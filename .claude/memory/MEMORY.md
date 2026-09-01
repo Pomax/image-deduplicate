@@ -1,0 +1,1 @@
+- [Build only through the build script](build-only-through-the-build-script.md) — run build.bat, never the cargo and move commands by hand

@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/imgdedupe-core",
+    "crates/imgindex",
+    "crates/imgdedupe",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+
+[profile.release]
+# Cross-crate inlining and one codegen unit let the linker drop what is never
+# reached, which is most of what these dependencies contain. Symbols go too:
+# nothing reads them at runtime.
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+# No unwinding: neither program catches a panic, so the tables and landing pads
+# that make unwinding possible are dead weight. Both install a hook that writes
+# the panic to their log before the process goes down.
+panic = "abort"
+
+# Drawing is not where the time goes, so the toolkit is built for size. The
+# decoding crates are left at full speed.
+[profile.release.package.egui]
+opt-level = "s"
+[profile.release.package.epaint]
+opt-level = "s"
+[profile.release.package.eframe]
+opt-level = "s"
+[profile.release.package.winit]
+opt-level = "s"
+[profile.release.package.egui-winit]
+opt-level = "s"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.29"
+# No "jpeg": JPEG decoding goes through `jpeg-decoder` for its scaled path, and
+# enabling it here links a second JPEG decoder that nothing calls.
+#
+# No "tiff": `image` declares the `tiff` crate with its default features, which
+# include `jpeg`, and features only ever union, so a second JPEG decoder cannot
+# be subtracted from this side.
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
+jpeg-decoder = "0.3"
+rayon = "1"
+rfd = "0.15"
+rusqlite = { version = "0.32", features = ["bundled", "functions", "window"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+trash = "5"
+walkdir = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

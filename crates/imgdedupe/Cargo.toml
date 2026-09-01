@@ -1,0 +1,32 @@
+[package]
+name = "imgdedupe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "imgdedupe"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+directories = "5"
+eframe.workspace = true
+egui.workspace = true
+fontdb = "0.22"
+imgdedupe-core = { path = "../imgdedupe-core", default-features = false, features = ["review"] }
+rfd.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
+
+[dev-dependencies]
+image.workspace = true
+tempfile = "3"

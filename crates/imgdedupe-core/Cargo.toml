@@ -1,0 +1,29 @@
+[package]
+name = "imgdedupe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["index", "review"]
+# Walking a folder and writing the index: what `imgindex` does.
+index = ["dep:rayon"]
+# Matching, scoring and removing: what the window does.
+review = ["dep:trash"]
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+jpeg-decoder.workspace = true
+rayon = { workspace = true, optional = true }
+rusqlite.workspace = true
+serde.workspace = true
+trash = { workspace = true, optional = true }
+walkdir.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+# The tests encode JPEG fixtures and compare decoders. Neither ships.
+image = { workspace = true, features = ["jpeg"] }
+tempfile = "3"
+zune-jpeg = "0.4"
