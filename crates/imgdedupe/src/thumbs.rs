@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use imgdedupe_core::decode::decode_at_most;
@@ -21,56 +21,204 @@ pub const LARGE_EDGE: u32 = 1600;
 
 /// The pictures the review list draws.
 ///
-/// Every thumbnail is read at once, on several threads, as soon as the sets are
-/// known, and everything read stays in memory. Scrolling never waits on a disk,
-/// and neither does going back to a picture that was looked at before.
+/// What is on screen is the only thing the workers touch until it is on screen.
+/// Every frame hands them the tiles it drew; a tile that has scrolled out of
+/// view and has not been picked up yet is taken off them again, and the rest of
+/// the result is only read once nothing being drawn is still missing.
+///
+/// Everything read stays in memory, so going back to a picture never waits.
 ///
 /// `egui` redraws every frame, so decoding on the frame that needs an image would
 /// stall the window. Requests go to the workers and the grid shows a placeholder
 /// until the answer arrives.
 pub struct Thumbnails {
     textures: HashMap<Key, TextureHandle>,
+    /// Decoded and waiting. A picture becomes a texture on the frame that draws
+    /// it, so a background pass cannot spend the window's frames uploading
+    /// thousands of pictures nobody is looking at.
+    ready: HashMap<Key, ColorImage>,
+    /// Kept from `collect` so a tile can be uploaded while it is being drawn.
+    painter: Option<egui::Context>,
     pending: HashSet<Key>,
-    requests: Sender<Request>,
+    /// Keys that came back with nothing, so a file that cannot be read is not
+    /// asked for again on every frame it is on screen.
+    failed: HashSet<Key>,
+    /// What the frame being drawn has asked for, in the order it drew it.
+    drawn: Vec<(Key, PathBuf)>,
+    drawing: HashSet<Key>,
+    /// What the workers were last given, so an unchanged view costs nothing.
+    in_front: HashSet<Key>,
+    holding: bool,
+    /// Whether a frame has drawn a tile yet. Until one has, the rest is held, or
+    /// the workers would all be inside a background picture on the frame the
+    /// review opens.
+    drew: bool,
+    lanes: Arc<Lanes>,
     results: Receiver<Decoded>,
+    /// What the reading is costing, written to the run log as it goes.
+    tally: Tally,
 }
+
+/// What the workers read from.
+struct Lanes {
+    queues: Mutex<Queues>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct Queues {
+    /// The tiles the last frame drew, the first of them at the back.
+    wanted: Vec<(Key, PathBuf)>,
+    rest: VecDeque<(Key, PathBuf)>,
+    /// Nothing from `rest` is started while a tile on screen is still missing.
+    hold_rest: bool,
+    /// Keys a worker has taken. A picture can be in both lanes, and this is what
+    /// stops it being decoded twice.
+    started: HashSet<Key>,
+    stop: bool,
+}
+
+impl Queues {
+    /// What a worker that only ever reads the screen takes.
+    fn take_wanted(&mut self) -> Option<(Key, PathBuf)> {
+        while let Some((key, path)) = self.wanted.pop() {
+            if self.started.insert(key) {
+                return Some((key, path));
+            }
+        }
+        None
+    }
+
+    /// What a worker that only ever reads the background takes. It takes nothing
+    /// at all while a tile on screen is still missing.
+    fn take_rest(&mut self) -> Option<(Key, PathBuf)> {
+        if self.hold_rest {
+            return None;
+        }
+        while let Some((key, path)) = self.rest.pop_front() {
+            if self.started.insert(key) {
+                return Some((key, path));
+            }
+        }
+        None
+    }
+}
+
+/// How much reading has been asked for and how much has arrived, so a review that
+/// sits on placeholders says where the time is going.
+#[derive(Debug, Default)]
+struct Tally {
+    asked: u64,
+    arrived: u64,
+    failed: u64,
+    decoding: f64,
+    uploading: f64,
+    started: Option<std::time::Instant>,
+    said: u64,
+}
+
+impl Tally {
+    /// Every so many pictures, and once at the end.
+    const EVERY: u64 = 200;
+
+    fn ask(&mut self) {
+        if self.asked == 0 {
+            self.started = Some(std::time::Instant::now());
+        }
+        self.asked += 1;
+    }
+
+    fn arrive(&mut self, decoding: f64, uploading: f64, ok: bool) {
+        self.arrived += 1;
+        self.decoding += decoding;
+        self.uploading += uploading;
+        if !ok {
+            self.failed += 1;
+        }
+    }
+
+    fn say(&mut self, force: bool) {
+        if self.arrived == 0 || (!force && self.arrived < self.said + Self::EVERY) {
+            return;
+        }
+        self.said = self.arrived;
+        let waited = self.started.map_or(0.0, |at| at.elapsed().as_secs_f64());
+        imgdedupe_core::runlog::line(&format!(
+            "thumbnails: {} of {} in {waited:.1}s, {} failed, {:.0}ms decoding and \
+             {:.0}ms uploading per picture",
+            self.arrived,
+            self.asked,
+            self.failed,
+            self.decoding * 1000.0 / self.arrived as f64,
+            self.uploading * 1000.0 / self.arrived as f64
+        ));
+    }
+}
+
+/// Threads kept for what is on screen. A review shows a couple of dozen tiles at
+/// once, and these decode them all at the same time.
+const SCREEN_WORKERS: usize = 24;
+
+/// Threads reading ahead. Four, because every one of them is a picture already
+/// being decoded that a scroll has to wait behind.
+const BACKGROUND_WORKERS: usize = 4;
 
 /// A file at one size. The grid and the pane beside it want different sizes of
 /// the same picture, and they are different pictures as far as the texture is
 /// concerned.
 type Key = (i64, u32);
 
-struct Request {
-    key: Key,
-    path: PathBuf,
-}
-
 struct Decoded {
     key: Key,
     image: Option<ColorImage>,
+    /// Seconds spent reading and decoding it.
+    took: f64,
 }
 
 impl Thumbnails {
     pub fn new() -> Self {
-        let (requests, request_rx) = mpsc::channel::<Request>();
         let (result_tx, results) = mpsc::channel::<Decoded>();
+        let lanes = Arc::new(Lanes {
+            queues: Mutex::new(Queues { hold_rest: true, ..Queues::default() }),
+            ready: Condvar::new(),
+        });
 
-        // Decoding is what takes the time, and there is a core per picture to
-        // spare while someone is looking at the list.
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get().min(8));
-        let queue = Arc::new(Mutex::new(request_rx));
-        for _ in 0..workers {
-            let queue = Arc::clone(&queue);
+        // Threads of their own for the screen, so a tile the eye is on never
+        // waits for a background picture a worker happens to be inside. They
+        // sit idle whenever the screen is complete.
+        //
+        // The background gets what is left, minus two cores for the window and
+        // the rest of the machine. How fast a screenful appears is how many of
+        // it can be decoded at once, so the screen pool is a screenful wide.
+        let cores = std::thread::available_parallelism().map_or(4, |count| count.get());
+        // A background picture cannot be given back once a worker is inside it,
+        // so the size of that pool is how much work the screen can find already
+        // running when someone scrolls. It is deliberately small.
+        let on_screen = cores.saturating_sub(2).clamp(1, SCREEN_WORKERS);
+        let background = BACKGROUND_WORKERS.min(cores).max(1);
+        for worker in 0..on_screen + background {
+            let screen = worker < on_screen;
+            let lanes = Arc::clone(&lanes);
             let result_tx = result_tx.clone();
             std::thread::spawn(move || loop {
-                let Ok(request) = ({
-                    let queue = queue.lock().expect("the request queue");
-                    queue.recv()
-                }) else {
-                    return;
+                let (key, path) = {
+                    let mut queues = lanes.queues.lock().expect("the thumbnail queues");
+                    loop {
+                        if queues.stop {
+                            return;
+                        }
+                        let next =
+                            if screen { queues.take_wanted() } else { queues.take_rest() };
+                        if let Some(next) = next {
+                            break next;
+                        }
+                        queues = lanes.ready.wait(queues).expect("the thumbnail queues");
+                    }
                 };
-                let image = load(&request.path, request.key.1);
-                if result_tx.send(Decoded { key: request.key, image }).is_err() {
+                let started = std::time::Instant::now();
+                let image = load(&path, key.1);
+                let took = started.elapsed().as_secs_f64();
+                if result_tx.send(Decoded { key, image, took }).is_err() {
                     return;
                 }
             });
@@ -78,33 +226,76 @@ impl Thumbnails {
 
         Thumbnails {
             textures: HashMap::new(),
+            ready: HashMap::new(),
+            painter: None,
             pending: HashSet::new(),
-            requests,
+            failed: HashSet::new(),
+            drawn: Vec::new(),
+            drawing: HashSet::new(),
+            in_front: HashSet::new(),
+            holding: true,
+            drew: false,
+            lanes,
             results,
+            tally: Tally::default(),
         }
     }
 
-    /// Take everything the workers have finished. Called once per frame.
+    /// Take everything the workers have finished, then hand them the tiles the
+    /// frame just drew. Called once per frame.
     pub fn collect(&mut self, ctx: &egui::Context) {
+        if self.painter.is_none() {
+            self.painter = Some(ctx.clone());
+        }
         while let Ok(decoded) = self.results.try_recv() {
             self.pending.remove(&decoded.key);
             let Some(image) = decoded.image else {
+                self.failed.insert(decoded.key);
+                self.tally.arrive(decoded.took, 0.0, false);
                 continue;
             };
-            let (file_id, edge) = decoded.key;
-            let handle = ctx.load_texture(
-                format!("preview{edge}-{file_id}"),
-                image,
-                TextureOptions::default(),
-            );
-            self.textures.insert(decoded.key, handle);
+            self.ready.insert(decoded.key, image);
+            self.tally.arrive(decoded.took, 0.0, true);
         }
+        self.hand_over();
+        self.tally.say(self.pending.is_empty());
 
         // Nothing else will wake the window when a picture finishes reading, and
         // then it appears on whatever frame some other input happens to cause.
         if !self.pending.is_empty() {
             ctx.request_repaint();
         }
+    }
+
+    /// Give the workers what the last frame drew and take back what it did not.
+    ///
+    /// A tile that scrolled out of view before a worker reached it goes to the
+    /// head of the rest rather than being read now, and nothing in the rest is
+    /// started at all while a tile on screen is still missing.
+    fn hand_over(&mut self) {
+        self.drew |= !self.drawing.is_empty();
+        let missing =
+            !self.drew || self.drawing.iter().any(|key| !self.textures.contains_key(key));
+        if self.drawing == self.in_front && missing == self.holding {
+            self.drawn.clear();
+            self.drawing.clear();
+            return;
+        }
+
+        let lanes = Arc::clone(&self.lanes);
+        let mut queues = lanes.queues.lock().expect("the thumbnail queues");
+        for entry in std::mem::take(&mut queues.wanted) {
+            if !self.drawing.contains(&entry.0) {
+                queues.rest.push_front(entry);
+            }
+        }
+        queues.wanted.extend(self.drawn.drain(..).rev());
+        queues.hold_rest = missing;
+        drop(queues);
+
+        self.holding = missing;
+        self.in_front = std::mem::take(&mut self.drawing);
+        lanes.ready.notify_all();
     }
 
     /// The texture for a file at one size, asking for it if this is the first
@@ -120,29 +311,70 @@ impl Thumbnails {
         if let Some(handle) = self.textures.get(&key).cloned() {
             return Some(handle);
         }
+        if let Some(handle) = self.upload(key) {
+            return Some(handle);
+        }
         self.request(key, root, rel_path);
         None
     }
 
-    /// Ask for every picture in the list up front, rather than when it is
-    /// scrolled to. Called once, when the sets are found.
+    /// Turn a decoded picture into a texture, on the frame that draws it.
+    fn upload(&mut self, key: Key) -> Option<TextureHandle> {
+        let painter = self.painter.clone()?;
+        let image = self.ready.remove(&key)?;
+        let (file_id, edge) = key;
+        let at = std::time::Instant::now();
+        let handle = painter.load_texture(
+            format!("preview{edge}-{file_id}"),
+            image,
+            TextureOptions::default(),
+        );
+        self.tally.uploading += at.elapsed().as_secs_f64();
+        self.textures.insert(key, handle.clone());
+        Some(handle)
+    }
+
+    /// Ask for every picture in the list, behind whatever is being drawn.
+    /// Called once, when the sets are found.
     pub fn prime<'a>(
         &mut self,
         root: &Path,
         members: impl Iterator<Item = (i64, &'a str)>,
         edge: u32,
     ) {
+        let lanes = Arc::clone(&self.lanes);
+        let mut queues = lanes.queues.lock().expect("the thumbnail queues");
         for (file_id, rel_path) in members {
-            self.request((file_id, edge), root, rel_path);
+            let key = (file_id, edge);
+            if self.textures.contains_key(&key) || !self.pending.insert(key) {
+                continue;
+            }
+            self.tally.ask();
+            queues.rest.push_back((key, root.join(rel_path)));
         }
+        drop(queues);
+        lanes.ready.notify_all();
     }
 
+    /// Note that this frame is drawing a picture it does not have. The workers
+    /// are given the whole frame's worth at once, in `hand_over`.
     fn request(&mut self, key: Key, root: &Path, rel_path: &str) {
-        if self.textures.contains_key(&key) || self.pending.contains(&key) {
+        if self.failed.contains(&key) || !self.drawing.insert(key) {
             return;
         }
-        self.pending.insert(key);
-        let _ = self.requests.send(Request { key, path: root.join(rel_path) });
+        self.drawn.push((key, root.join(rel_path)));
+        if self.pending.insert(key) {
+            self.tally.ask();
+        }
+    }
+}
+
+impl Drop for Thumbnails {
+    fn drop(&mut self) {
+        if let Ok(mut queues) = self.lanes.queues.lock() {
+            queues.stop = true;
+        }
+        self.lanes.ready.notify_all();
     }
 }
 
@@ -230,6 +462,7 @@ mod tests {
             wanted.push((index as i64, name));
         }
 
+        let ctx = egui::Context::default();
         let mut thumbs = Thumbnails::new();
         thumbs.prime(
             dir.path(),
@@ -237,11 +470,160 @@ mod tests {
             THUMB_EDGE,
         );
 
-        let mut arrived = 0;
-        while arrived < wanted.len() {
-            let decoded = thumbs.results.recv().expect("a decoded picture");
-            assert!(decoded.image.is_some(), "{:?} did not decode", decoded.key);
-            arrived += 1;
+        let first = &wanted[0];
+        while !thumbs.pending.is_empty() {
+            thumbs.collect(&ctx);
+            thumbs.get(first.0, THUMB_EDGE, dir.path(), &first.1);
+        }
+        assert_eq!(thumbs.textures.len() + thumbs.ready.len(), wanted.len());
+        assert_eq!(thumbs.tally.failed, 0);
+    }
+
+    /// What is being drawn is read before what is not. Everything is asked for
+    /// at once, then the picture at the far end of the list is drawn, and it has
+    /// to come back near the front of the answers instead of last.
+    #[test]
+    fn a_picture_being_drawn_is_read_before_the_ones_that_are_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let count = 400usize;
+        let mut wanted = Vec::new();
+        for index in 0..count {
+            let name = format!("{index}.png");
+            write(&dir.path().join(&name), 300, 200);
+            wanted.push((index as i64, name));
+        }
+
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::new();
+        thumbs.prime(
+            dir.path(),
+            wanted.iter().map(|(id, name)| (*id, name.as_str())),
+            THUMB_EDGE,
+        );
+
+        let last = &wanted[count - 1];
+        let (took, _) = fill(&mut thumbs, &ctx, dir.path(), std::slice::from_ref(last));
+        let others = thumbs.textures.len() - 1;
+        assert!(
+            others < 50,
+            "the picture on screen arrived in {took:.2}s, behind {others} that are not on screen"
+        );
+    }
+
+    /// A decoded picture becomes a texture on the frame that draws it, not on the
+    /// frame it arrives. A pass over thousands of pictures must not spend the
+    /// window's frames uploading ones nobody is looking at.
+    #[test]
+    fn a_picture_becomes_a_texture_when_it_is_drawn_and_not_before() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let count = 12usize;
+        let mut wanted = Vec::new();
+        for index in 0..count {
+            let name = format!("{index}.png");
+            write(&dir.path().join(&name), 300, 200);
+            wanted.push((index as i64, name));
+        }
+
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::new();
+        thumbs.prime(
+            dir.path(),
+            wanted.iter().map(|(id, name)| (*id, name.as_str())),
+            THUMB_EDGE,
+        );
+
+        let first = &wanted[0];
+        while !thumbs.pending.is_empty() {
+            thumbs.collect(&ctx);
+            thumbs.get(first.0, THUMB_EDGE, dir.path(), &first.1);
+        }
+
+        assert_eq!(thumbs.textures.len(), 1, "a picture nobody drew was uploaded");
+        assert_eq!(thumbs.ready.len(), count - 1);
+
+        let other = &wanted[5];
+        assert!(thumbs.get(other.0, THUMB_EDGE, dir.path(), &other.1).is_some());
+        assert_eq!(thumbs.textures.len(), 2);
+    }
+
+    /// A picture put in front is left in the queue behind as well. That place
+    /// must not turn into a second read of the same file.
+    #[test]
+    fn a_picture_put_in_front_is_still_only_read_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let count = 40usize;
+        let mut wanted = Vec::new();
+        for index in 0..count {
+            let name = format!("{index}.png");
+            write(&dir.path().join(&name), 300, 200);
+            wanted.push((index as i64, name));
+        }
+
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::new();
+        thumbs.prime(
+            dir.path(),
+            wanted.iter().map(|(id, name)| (*id, name.as_str())),
+            THUMB_EDGE,
+        );
+        let last = &wanted[count - 1];
+        while !thumbs.pending.is_empty() {
+            thumbs.collect(&ctx);
+            thumbs.get(last.0, THUMB_EDGE, dir.path(), &last.1);
+        }
+
+        assert_eq!(thumbs.textures.len() + thumbs.ready.len(), count);
+        assert_eq!(thumbs.tally.arrived, count as u64, "a picture was read twice");
+    }
+
+    /// Scrolling away from a tile before a worker has reached it takes it off
+    /// them. What the eye is on now is read instead, and does not wait behind it.
+    #[test]
+    fn a_tile_that_scrolled_away_does_not_hold_up_the_one_on_screen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(&dir.path().join("big.png"), 3000, 2000);
+        write(&dir.path().join("small.png"), 300, 200);
+        let big = (0i64, String::from("big.png"));
+        let small = (1i64, String::from("small.png"));
+
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::new();
+
+        // The frame the big picture is on screen for, and the frame after it has
+        // been scrolled past.
+        thumbs.collect(&ctx);
+        assert!(thumbs.get(big.0, THUMB_EDGE, dir.path(), &big.1).is_none());
+        thumbs.collect(&ctx);
+        assert!(thumbs.get(small.0, THUMB_EDGE, dir.path(), &small.1).is_none());
+
+        let (took, _) = fill(&mut thumbs, &ctx, dir.path(), std::slice::from_ref(&small));
+        assert!(
+            !thumbs.textures.contains_key(&(big.0, THUMB_EDGE)),
+            "the picture on screen only arrived once the one scrolled past had, in {took:.2}s"
+        );
+    }
+
+    /// Draw the given tiles frame after frame until every one of them has a
+    /// picture, the way the window does: collect what has arrived, then ask for
+    /// what is on screen and still missing.
+    fn fill(
+        thumbs: &mut Thumbnails,
+        ctx: &egui::Context,
+        root: &Path,
+        on_screen: &[(i64, String)],
+    ) -> (f64, u32) {
+        let started = std::time::Instant::now();
+        let mut frames = 0;
+        loop {
+            thumbs.collect(ctx);
+            frames += 1;
+            let missing = on_screen
+                .iter()
+                .filter(|(id, path)| thumbs.get(*id, THUMB_EDGE, root, path).is_none())
+                .count();
+            if missing == 0 {
+                return (started.elapsed().as_secs_f64(), frames);
+            }
         }
     }
 

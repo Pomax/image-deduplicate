@@ -58,7 +58,7 @@ impl Default for Settings {
         Settings {
             folder: None,
             recurse: true,
-            sensitivity: imgdedupe_core::matching::Thresholds::balanced().percent(),
+            sensitivity: imgdedupe_core::matching::DEFAULT_SENSITIVITY,
             ignore_colour: false,
             window: None,
             preview_width: None,

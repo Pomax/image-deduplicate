@@ -11,7 +11,6 @@ use imgdedupe_core::runlog;
 use crate::headless;
 use crate::indexer::{self, Run, Update};
 use crate::thumbs::{self, Thumbnails};
-use crate::Strictness;
 
 pub fn launch() -> Result<()> {
     let result = start_window();
@@ -457,7 +456,6 @@ const SECTION_GAP: f32 = 14.0;
 /// Height of the boxes on the scan row. Fixed, so the row is flush and nothing
 /// the pointer does can change it. Sized to the tallest of the three, which is
 /// the matching box at four rows.
-const SCAN_ROW_HEIGHT: f32 = 100.0;
 
 /// Border and inner margin `Frame::group` adds around its contents, so the
 /// arithmetic below is about outer widths.
@@ -485,17 +483,11 @@ fn fitted(width: u32, height: u32) -> egui::Vec2 {
     egui::vec2(width * scale, height * scale)
 }
 
-/// How wide a set's tiles are: its own widest picture with room for what is drawn
-/// around it, and nothing else. A set of portraits is not given columns the width
-/// of a landscape in some other set.
-fn tile_width(members: &[imgdedupe_core::matching::Member]) -> f32 {
-    members
-        .iter()
-        .map(|member| fitted(member.width, member.height).x)
-        .fold(0.0_f32, f32::max)
-        .max(1.0)
-        + TILE_BORDER
-        + TILE_RING * 2.0
+/// How wide one tile is: its own picture with room for what is drawn around it.
+/// A portrait beside a landscape is a portrait's width, so a strip has no gaps in
+/// it where a narrow picture was given a wide picture's column.
+fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
+    fitted(member.width, member.height).x.max(1.0) + TILE_BORDER + TILE_RING * 2.0
 }
 
 /// The button that keeps a whole set, drawn over the top right of its strip.
@@ -549,18 +541,18 @@ fn sized_section(
     title: &str,
     size: egui::Vec2,
     contents: impl FnOnce(&mut egui::Ui),
-) -> f32 {
-    let mut content_width = 0.0;
+) -> egui::Vec2 {
+    let mut content = egui::Vec2::ZERO;
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(title).strong());
         ui.add_space(4.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(size.x);
             ui.set_min_height(size.y);
-            content_width = ui.scope(contents).response.rect.width();
+            content = ui.scope(contents).response.rect.size();
         });
     });
-    content_width
+    content
 }
 
 /// A number with its name under it, for a row of them.
@@ -668,6 +660,9 @@ pub struct App {
     /// What each box on the scan row measured last frame, so this frame can share
     /// the leftover width between them.
     scan_content: Vec<f32>,
+    /// How tall the scan row's three boxes were last frame, so they end level
+    /// with each other without any of them being a fixed height.
+    scan_row: f32,
 }
 
 impl Default for App {
@@ -714,6 +709,7 @@ impl App {
             preview_width: saved.preview_width,
             error: None,
             scan_content: vec![0.0; 3],
+            scan_row: 0.0,
         }
     }
 }
@@ -883,23 +879,30 @@ impl App {
                     let widths =
                         share_row_width(ui.available_width(), &self.scan_content, SECTION_GAP);
                     let mut measured = self.scan_content.clone();
+                    // The three boxes end level with each other, at the height of
+                    // whichever holds the most. Nothing is a fixed height, so
+                    // taking a control out takes its space with it.
+                    let mut tallest = 0.0_f32;
                     ui.horizontal_top(|ui| {
-                        measured[0] = self.folder_section(ui, widths[0]);
+                        let folder = self.folder_section(ui, widths[0]);
                         ui.add_space(SECTION_GAP);
-                        measured[1] = self.matching_section(ui, widths[1]);
+                        let matching = self.matching_section(ui, widths[1]);
                         ui.add_space(SECTION_GAP);
-                        measured[2] = self.run_section(ui, widths[2]);
+                        let run = self.run_section(ui, widths[2]);
+                        measured = vec![folder.x, matching.x, run.x];
+                        tallest = folder.y.max(matching.y).max(run.y);
                     });
                     self.scan_content = measured;
+                    self.scan_row = tallest;
                     self.progress_section(ui);
                 })
             },
         );
     }
 
-    fn folder_section(&mut self, ui: &mut egui::Ui, width: f32) -> f32 {
+    fn folder_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
         let busy = self.busy();
-        sized_section(ui, "Folder", egui::vec2(width, SCAN_ROW_HEIGHT), |ui| {
+        sized_section(ui, "Folder", egui::vec2(width, self.scan_row), |ui| {
             ui.horizontal(|ui| {
                 if ui.add_enabled(!busy, egui::Button::new("Choose folder")).clicked() {
                     if let Some(folder) = crate::folder_picker::pick(self.folder.as_deref()) {
@@ -960,8 +963,19 @@ impl App {
     fn open_folder(&mut self, folder: PathBuf) {
         let db_path = headless::default_db_path(&folder);
         let indexed_already = db_path.is_file();
+        let elsewhere = self.folder.as_deref() != Some(folder.as_path());
         self.db_path = Some(db_path);
         self.folder = Some(folder);
+        // Everything about the last folder was about its pictures. A different
+        // folder starts where a first look at a folder starts, and then takes
+        // back whatever its own index has a record of.
+        if elsewhere {
+            self.sensitivity = matching::DEFAULT_SENSITIVITY;
+            self.ignore_colour = false;
+            self.recurse = true;
+            self.destination = Destination::Trash;
+            self.move_dir = String::new();
+        }
         self.sets.clear();
         self.keep.clear();
         self.selected = None;
@@ -987,12 +1001,13 @@ impl App {
         .save();
     }
 
-    fn matching_section(&mut self, ui: &mut egui::Ui, width: f32) -> f32 {
+    fn matching_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
         let busy = self.busy();
+        let row = self.scan_row;
         sized_section(
             ui,
             "What counts as a duplicate",
-            egui::vec2(width, SCAN_ROW_HEIGHT),
+            egui::vec2(width, row),
             |ui| {
             ui.spacing_mut().slider_width = 300.0;
             let mut changed = ui
@@ -1004,29 +1019,6 @@ impl App {
                         .text("difference allowed"),
                 )
                 .changed();
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("presets").weak());
-                for level in [Strictness::Strict, Strictness::Balanced, Strictness::Loose] {
-                    let target = level.thresholds(self.ignore_colour).percent();
-                    let selected = (self.sensitivity - target).abs() < 0.5;
-                    if ui
-                        .add_enabled(!busy, egui::SelectableLabel::new(selected, level.label()))
-                        .clicked()
-                    {
-                        self.sensitivity = target;
-                        changed = true;
-                    }
-                }
-            });
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(match self.sensitivity {
-                    s if s <= 5.0 => "Exact copies and re-encodes. Misses most rotations.",
-                    s if s <= 12.0 => "Resizes, re-encodes and most rotations.",
-                    _ => "Heavier edits too, and it will start offering pairs that are not duplicates.",
-                })
-                .weak(),
-            );
             ui.add_space(6.0);
             changed |= ui
                 .add_enabled(
@@ -1047,7 +1039,7 @@ impl App {
         )
     }
 
-    fn run_section(&mut self, ui: &mut egui::Ui, width: f32) -> f32 {
+    fn run_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
         // Cancel covers the indexing and the search, which are the two a person
         // waits through. It does not cover a removal: files are going, and
         // stopping halfway leaves a job half done with nothing said about it.
@@ -1055,7 +1047,7 @@ impl App {
         let busy = self.busy();
         let have_folder = self.folder.is_some();
 
-        sized_section(ui, "Run", egui::vec2(width, SCAN_ROW_HEIGHT), |ui| {
+        sized_section(ui, "Run", egui::vec2(width, self.scan_row), |ui| {
             ui.horizontal(|ui| {
                 let start = ui.add_enabled(
                     !busy && have_folder,
@@ -1604,17 +1596,20 @@ impl App {
                 ui.set_height(TILE_STRIP_HEIGHT + SCROLL_BAR);
                 let inside = ui.max_rect();
 
-                let width = tile_width(&members);
+                // One tile's width is what a click on the strip's scroll bar
+                // moves by, and the first tile's is as good a step as any.
+                let step = members.first().map_or(TILE.x, tile_width);
                 scrolled(
                     ui,
                     egui::Id::new(("set bar", set_id)),
                     false,
-                    width,
+                    step,
                     egui::ScrollArea::horizontal().id_salt(("set", set_id)),
                     |area, ui| {
                         area.show(ui, |ui| {
                             ui.horizontal_top(|ui| {
                                 for member in &members {
+                                    let width = tile_width(member);
                                     self.member_tile(ui, set_id, member, keeping, root, width);
                                 }
                             });
@@ -1654,6 +1649,11 @@ impl App {
 
         ui.allocate_ui(egui::vec2(width, TILE_STRIP_HEIGHT), |ui| {
             ui.set_height(TILE_STRIP_HEIGHT);
+            // A set is a strip that scrolls sideways, and the ones off the end of
+            // it are not on screen however much of the set is. Asking for them
+            // would put a hundred pictures nobody can see in front of the next
+            // set's, which is what made the sets below the first one wait.
+            let on_screen = ui.is_rect_visible(ui.max_rect());
             ui.vertical(|ui| {
                 ui.add_space(TILE_RING);
                 // The keeper's border stays on the picture. Being the one on the
@@ -1672,8 +1672,12 @@ impl App {
                     .outer_margin(egui::Margin::symmetric(TILE_RING, 0.0));
 
                 let framed = frame.show(ui, |ui| {
-                    match self.thumbs.get(member.file_id, thumbs::THUMB_EDGE, root, &member.rel_path)
-                    {
+                    let picture = if on_screen {
+                        self.thumbs.get(member.file_id, thumbs::THUMB_EDGE, root, &member.rel_path)
+                    } else {
+                        None
+                    };
+                    match picture {
                         Some(texture) => ui.add(
                             egui::Image::new(&texture)
                                 .fit_to_exact_size(TILE)
@@ -2516,13 +2520,16 @@ mod tests {
         // around it, or the neighbouring tile clips them.
         let around = TILE_BORDER + TILE_RING * 2.0;
         assert!(around >= 12.0, "there is not enough room around a picture for its ring");
-        assert_eq!(tile_width(&[of(900, 1200), of(600, 800)]), portrait.x + around);
+        assert_eq!(tile_width(&of(900, 1200)), portrait.x + around);
         assert_eq!(
-            tile_width(&[of(900, 1200), of(1600, 900)]),
+            tile_width(&of(1600, 900)),
             landscape.x + around,
-            "a set is as wide as its own widest picture"
+            "a tile is the width of its own picture"
         );
-        assert!(tile_width(&[]) > 0.0, "an empty set produced a zero width column");
+        assert!(
+            tile_width(&of(900, 1200)) < tile_width(&of(1600, 900)),
+            "a portrait was given a landscape's column, which is the gap beside it"
+        );
     }
 
     /// The tally beside the set and duplicate counts: every picture that is not
@@ -3231,6 +3238,39 @@ mod tests {
         );
     }
 
+    /// A different folder is different pictures, so what counted as a duplicate
+    /// in the last one does not carry over. Opening the same folder again leaves
+    /// the setting alone.
+    #[test]
+    fn a_different_folder_starts_on_the_default_setting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_one_set();
+        app.sensitivity = matching::MAX_SENSITIVITY;
+        app.ignore_colour = true;
+
+        app.open_folder(dir.path().to_path_buf());
+        assert_eq!(
+            app.sensitivity,
+            matching::DEFAULT_SENSITIVITY,
+            "the last folder's sensitivity was carried over"
+        );
+        assert!(!app.ignore_colour, "the last folder's colour setting was carried over");
+        assert_eq!(
+            app.destination,
+            Destination::Trash,
+            "the last folder's cleanup choice was carried over"
+        );
+        assert!(app.move_dir.is_empty(), "the last folder's move folder was carried over");
+
+        app.sensitivity = matching::MAX_SENSITIVITY;
+        app.open_folder(dir.path().to_path_buf());
+        assert_eq!(
+            app.sensitivity,
+            matching::MAX_SENSITIVITY,
+            "opening the same folder again threw away the setting chosen for it"
+        );
+    }
+
     #[test]
     fn no_saved_settings_leaves_the_window_empty() {
         let app = App::from_settings(crate::settings::Settings::default());
@@ -3240,51 +3280,27 @@ mod tests {
     }
 
     #[test]
-    fn strictness_presets_widen_in_order() {
-        let strict = Strictness::Strict.thresholds(false);
-        let balanced = Strictness::Balanced.thresholds(false);
-        let loose = Strictness::Loose.thresholds(false);
-        assert!(strict.max_bits < balanced.max_bits);
-        assert!(balanced.max_bits < loose.max_bits);
-        assert!(strict.max_ring < loose.max_ring);
+    fn the_slider_widens_what_counts_as_a_duplicate() {
+        assert!(Thresholds::at(4.0).max_bits < Thresholds::at(30.0).max_bits);
+        assert!(Thresholds::at(30.0).max_bits < Thresholds::at(50.0).max_bits);
+        assert!(Thresholds::at(4.0).max_ring < Thresholds::at(50.0).max_ring);
     }
 
     #[test]
     fn the_colour_setting_reaches_the_thresholds() {
-        assert!(!Strictness::Balanced.thresholds(false).ignore_colour);
-        assert!(Strictness::Balanced.thresholds(true).ignore_colour);
+        let mut thresholds = Thresholds::at(matching::DEFAULT_SENSITIVITY);
+        assert!(!thresholds.ignore_colour);
+        thresholds.ignore_colour = true;
+        assert!(thresholds.ignore_colour);
     }
 
     #[test]
-    fn the_app_starts_on_the_balanced_setting() {
-        let app = App::default();
-        assert!((app.sensitivity - Thresholds::balanced().percent()).abs() < 0.01);
-    }
-
-    #[test]
-    fn a_preset_button_moves_the_slider_to_that_preset() {
-        // The presets are points on the slider, not a separate control, so the
-        // two can never disagree about what the match will use.
-        for level in [Strictness::Strict, Strictness::Balanced, Strictness::Loose] {
-            let sensitivity = level.thresholds(false).percent();
-            assert_eq!(
-                Thresholds::at(sensitivity).max_bits,
-                level.thresholds(false).max_bits,
-                "{} does not round-trip through the slider",
-                level.label()
-            );
-        }
-    }
-
-    #[test]
-    fn the_slider_reaches_wider_and_narrower_than_every_preset() {
-        let widest = Strictness::Loose.thresholds(false);
-        assert!(
-            Thresholds::at(matching::MAX_SENSITIVITY).max_bits > widest.max_bits,
-            "the slider cannot go past the loosest preset"
-        );
-        let narrowest = Strictness::Strict.thresholds(false);
-        assert!(Thresholds::at(0.5).max_bits < narrowest.max_bits);
+    fn the_app_starts_on_the_default_setting() {
+        // Not `App::default`, which reads whatever this machine was last left
+        // set to and would pass or fail depending on it.
+        let app = App::from_settings(crate::settings::Settings::default());
+        assert_eq!(app.sensitivity, matching::DEFAULT_SENSITIVITY);
+        assert!(matching::DEFAULT_SENSITIVITY <= matching::MAX_SENSITIVITY);
     }
 
     #[test]

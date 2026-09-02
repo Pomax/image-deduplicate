@@ -6,13 +6,7 @@ of work: build and run the named tests before starting the next.
 
 ## The measurement that matters
 
-`crates/imgdedupe-core/tests/decode_speed.rs`, run against a real folder:
-
-```
-IMGDEDUPE_SPEED_FOLDER=D:\some\folder cargo test --release -p imgdedupe-core --test decode_speed -- --nocapture
-```
-
-On a folder of 2213 pictures:
+Measured on a folder of 2213 pictures, 1.63 GB, mostly JPEG:
 
 | | count | total | each |
 |---|---|---|---|

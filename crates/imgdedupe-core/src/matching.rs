@@ -44,6 +44,10 @@ fn share(percent: f64) -> u32 {
 /// step is where they decide it.
 pub const MAX_SENSITIVITY: f64 = 50.0;
 
+/// What the window starts on, and what it goes back to for a folder it has not
+/// been set for.
+pub const DEFAULT_SENSITIVITY: f64 = 30.0;
+
 impl Thresholds {
     /// Only files that are the same picture, allowing for a re-encode.
     pub fn strict() -> Self {
