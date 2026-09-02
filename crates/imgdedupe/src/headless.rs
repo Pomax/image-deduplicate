@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use imgdedupe_core::db;
-use imgdedupe_core::matching;
 
 /// Open an index read only and register the functions the queries call. The
 /// indexer is the only writer, so nothing here needs write access.
@@ -13,9 +12,7 @@ pub fn open_index(db_path: &Path) -> Result<db::Connection> {
             db_path.display()
         );
     }
-    let conn = db::open_read_only(db_path)?;
-    matching::register_functions(&conn)?;
-    Ok(conn)
+    Ok(db::open_read_only(db_path)?)
 }
 
 /// Where the index for a folder lives unless it was put somewhere else.

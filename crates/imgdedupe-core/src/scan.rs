@@ -31,6 +31,10 @@ pub enum Event {
         changed: u64,
         unchanged: u64,
         removed: u64,
+        /// Files that were read and turned out not to be a picture this build can
+        /// index. They are read on every pass, because a file with no fingerprint
+        /// has no row and the next pass cannot tell it has been seen.
+        ignored: u64,
         per_sec: u64,
     },
     /// Rows committed to the index. The writer runs behind the decoders, so this
@@ -56,7 +60,6 @@ pub struct Options {
     pub root: PathBuf,
     pub db_path: PathBuf,
     pub recurse: bool,
-    pub verify: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +160,7 @@ struct Diff {
     unchanged: u64,
 }
 
-fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db::Known>, verify: bool) -> Diff {
+fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db::Known>) -> Diff {
     let mut to_index = Vec::new();
     let mut unchanged = 0u64;
     let mut seen = std::collections::HashSet::with_capacity(candidates.len());
@@ -169,7 +172,7 @@ fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db
                 && entry.mtime_ns == candidate.mtime_ns
                 && entry.fingerprint_version == FINGERPRINT_VERSION
         });
-        if fresh && !verify {
+        if fresh {
             unchanged += 1;
         } else {
             to_index.push(candidate);
@@ -261,7 +264,7 @@ pub fn run(
     let started = Instant::now();
     let candidates = walk(options).context("walking the folder")?;
     let known = db::load_known(conn).context("reading the existing index")?;
-    let Diff { to_index, removed, unchanged } = diff(candidates, &known, options.verify);
+    let Diff { to_index, removed, unchanged } = diff(candidates, &known);
 
     let mut summary = Summary { unchanged, ..Summary::default() };
 
@@ -275,6 +278,7 @@ pub fn run(
     report(Event::Start { total });
 
     let done = AtomicU64::new(0);
+    let ignored = AtomicU64::new(0);
     let (send, recv) = mpsc::channel::<Outcome>();
 
     let write_result = std::thread::scope(|scope| -> Result<(u64, u64)> {
@@ -336,6 +340,7 @@ pub fn run(
                 changed: 0,
                 unchanged,
                 removed: summary.removed,
+                ignored: ignored.load(Ordering::Relaxed),
                 per_sec: (count as f64 / elapsed) as u64,
             });
         };
@@ -345,6 +350,9 @@ pub fn run(
                 return;
             }
             let outcome = index_one(candidate);
+            if matches!(outcome, Outcome::NotAnImage) {
+                ignored.fetch_add(1, Ordering::Relaxed);
+            }
             let _ = send.send(outcome);
 
             let count = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -364,7 +372,6 @@ pub fn run(
     summary.failed = write_result.1;
     summary.cancelled = cancel.load(Ordering::Relaxed);
 
-    db::set_meta(conn, "root_path", &options.root.display().to_string())?;
     db::set_meta(conn, "last_scan", &now_seconds().to_string())?;
 
     report(Event::Done {
@@ -407,7 +414,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
         let db_path = root.join(db::INDEX_FILENAME);
-        let options = Options { root, db_path, recurse: true, verify: false };
+        let options = Options { root, db_path, recurse: true };
         Fixture { dir, options }
     }
 
@@ -482,15 +489,27 @@ mod tests {
         assert_eq!(width, 100);
     }
 
+    /// A file that is not a picture gets no row, so every later pass reads it
+    /// again. The pass says how many of those it read, so they are not mistaken
+    /// for work that produced something.
     #[test]
     fn files_that_are_not_images_are_neither_indexed_nor_failures() {
         let fx = fixture();
         write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
         std::fs::write(fx.dir.path().join("notes.txt"), b"just some text").expect("write");
         std::fs::write(fx.dir.path().join("archive.zip"), b"PK\x03\x04rest").expect("write");
-        let (summary, _) = scan(&fx);
+        let (summary, events) = scan(&fx);
         assert_eq!(summary.indexed, 1);
         assert_eq!(summary.failed, 0);
+
+        let counted = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Progress { ignored, .. } => Some(*ignored),
+                _ => None,
+            })
+            .max();
+        assert_eq!(counted, Some(2), "the two files that are not pictures were not reported");
     }
 
     #[test]
@@ -551,21 +570,6 @@ mod tests {
             .query_row("SELECT rel_path FROM files", [], |r| r.get(0))
             .unwrap();
         assert_eq!(path, "one/two/deep.png");
-    }
-
-    #[test]
-    fn verify_reindexes_paths_whose_timestamp_did_not_move() {
-        let fx = fixture();
-        write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
-        scan(&fx);
-
-        let mut verifying = fx.options.clone();
-        verifying.verify = true;
-        let mut conn = db::open(&verifying.db_path).expect("open");
-        let cancel = AtomicBool::new(false);
-        let summary = run(&mut conn, &verifying, &cancel, &|_| {}).expect("scan");
-        assert_eq!(summary.indexed, 1);
-        assert_eq!(summary.unchanged, 0);
     }
 
     #[test]

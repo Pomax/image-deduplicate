@@ -69,6 +69,81 @@ pub fn hamming(a: &Hash, b: &Hash) -> u32 {
     a.iter().zip(b.iter()).map(|(x, y)| (x ^ y).count_ones()).sum()
 }
 
+/// A hash as machine words. The search compares millions of pairs and does it a
+/// word at a time rather than a byte at a time.
+pub const HASH_WORDS: usize = HASH_BYTES / 8;
+
+pub type Words = [u64; HASH_WORDS];
+
+pub fn words(hash: &Hash) -> Words {
+    let mut out = [0u64; HASH_WORDS];
+    for (slot, chunk) in out.iter_mut().zip(hash.chunks_exact(8)) {
+        *slot = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+    }
+    out
+}
+
+pub fn hamming_words(a: &Words, b: &Words) -> u32 {
+    let mut total = 0;
+    for index in 0..HASH_WORDS {
+        total += (a[index] ^ b[index]).count_ones();
+    }
+    total
+}
+
+/// `hamming_any` on words: one side's eight variants against the other's indexed
+/// one, stopping as soon as a variant is inside `limit`.
+pub fn hamming_any_words(variants: &[Words; VARIANTS], other: &Words, limit: u32) -> u32 {
+    let mut best = u32::MAX;
+    for hash in variants {
+        let distance = hamming_words(hash, other);
+        if distance <= limit {
+            return distance;
+        }
+        best = best.min(distance);
+    }
+    best
+}
+
+/// A stored ring signature as the floats `ring_distance` would weigh, so the
+/// weighting is paid once per image rather than once per comparison. An empty
+/// vector stands for a signature that cannot be compared.
+pub fn ring_weighted(bytes: &[u8]) -> Vec<f32> {
+    if bytes.len() % 4 != 0 {
+        return Vec::new();
+    }
+    bytes
+        .chunks_exact(4)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            value * ring_weight(index)
+        })
+        .collect()
+}
+
+/// `ring_distance` over what `ring_weighted` produced.
+pub fn ring_distance_weighted(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return f32::MAX;
+    }
+    let mut total = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let delta = x - y;
+        total += delta * delta;
+    }
+    (total / (RINGS * RING_VALUES) as f32).sqrt()
+}
+
+/// The colour axes count for more than lightness: a recompression moves
+/// lightness far more than it moves hue.
+fn ring_weight(index: usize) -> f32 {
+    match index % RING_VALUES {
+        1 | 2 => 4.0,
+        _ => 1.0,
+    }
+}
+
 /// How far apart two images are, allowing either to be a rotation or a mirror of
 /// the other. One side contributes all eight of its hashes and the other only the
 /// one it was indexed under, which is enough: if B is a symmetry of A then one of
@@ -314,12 +389,7 @@ pub fn ring_distance(a: &[u8], b: &[u8]) -> f32 {
     for (index, (pa, pb)) in a.chunks_exact(4).zip(b.chunks_exact(4)).enumerate() {
         let va = f32::from_le_bytes([pa[0], pa[1], pa[2], pa[3]]);
         let vb = f32::from_le_bytes([pb[0], pb[1], pb[2], pb[3]]);
-        let weight = match index % RING_VALUES {
-            0 => 1.0,
-            1 | 2 => 4.0,
-            _ => 1.0,
-        };
-        let delta = (va - vb) * weight;
+        let delta = (va - vb) * ring_weight(index);
         total += delta * delta;
     }
     (total / (RINGS * RING_VALUES) as f32).sqrt()
@@ -728,5 +798,63 @@ mod tests {
     #[test]
     fn ring_distance_rejects_mismatched_signatures() {
         assert_eq!(ring_distance(&[0, 0, 0, 0], &[0, 0]), f32::MAX);
+    }
+
+    /// The search compares in words and against pre-weighted floats. Both have to
+    /// give the same answers as the byte versions they replace, or a folder gets
+    /// a different set of duplicates depending on which one ran.
+    #[test]
+    fn comparing_in_words_gives_what_comparing_in_bytes_gives() {
+        let mut a = [0u8; HASH_BYTES];
+        let mut b = [0u8; HASH_BYTES];
+        for index in 0..HASH_BYTES {
+            a[index] = (index as u8).wrapping_mul(37);
+            b[index] = (index as u8).wrapping_mul(91) ^ 0x5A;
+        }
+        assert_eq!(hamming_words(&words(&a), &words(&b)), hamming(&a, &b));
+        assert_eq!(hamming_words(&words(&a), &words(&a)), 0);
+
+        let variants = [a, b, a, b, a, b, a, b];
+        let word_variants = [
+            words(&a), words(&b), words(&a), words(&b),
+            words(&a), words(&b), words(&a), words(&b),
+        ];
+        assert_eq!(
+            hamming_any_words(&word_variants, &words(&b), 0),
+            hamming_any(&variants, &b)
+        );
+    }
+
+    /// Stopping early is only allowed to change how long it takes, never what it
+    /// reports: inside the limit the distance is exact, outside it the smallest.
+    #[test]
+    fn stopping_early_still_reports_a_distance_the_threshold_can_judge() {
+        let zero = [0u8; HASH_BYTES];
+        let mut one_bit = zero;
+        one_bit[0] = 1;
+        let mut far = [0xFFu8; HASH_BYTES];
+        far[0] = 0xFE;
+
+        let variants = [far, far, far, one_bit, far, far, far, far];
+        let word_variants = variants.map(|hash| words(&hash));
+
+        assert_eq!(hamming_any_words(&word_variants, &words(&zero), 4), 1);
+        assert!(
+            hamming_any_words(&word_variants, &words(&zero), 0) <= 1,
+            "the nearest variant was not reported when nothing was inside the limit"
+        );
+    }
+
+    #[test]
+    fn a_pre_weighted_signature_measures_the_same_distance() {
+        let red = ring_stats(&RgbImage::from_pixel(64, 64, image::Rgb([200, 30, 30])));
+        let grey = ring_stats(&RgbImage::from_pixel(64, 64, image::Rgb([128, 128, 128])));
+        let plain = ring_distance(&red, &grey);
+        let weighted = ring_distance_weighted(&ring_weighted(&red), &ring_weighted(&grey));
+        assert!(
+            (plain - weighted).abs() < 1e-5,
+            "bytes gave {plain} and weighted floats gave {weighted}"
+        );
+        assert_eq!(ring_distance_weighted(&ring_weighted(&red), &[]), f32::MAX);
     }
 }

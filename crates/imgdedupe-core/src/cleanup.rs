@@ -8,7 +8,7 @@ pub enum Disposal {
     /// The default: the operating system's recycle bin, so a wrong choice is recoverable.
     Trash,
     /// Move into a folder, keeping the relative path, so the originals can be put back.
-    Quarantine(PathBuf),
+    MoveTo(PathBuf),
     /// Unlink. Not recoverable, and never the default.
     Delete,
 }
@@ -69,9 +69,9 @@ pub fn apply_reporting(
     disposal: &Disposal,
     done: &dyn Fn(usize),
 ) -> Result<Outcome> {
-    if let Disposal::Quarantine(target) = disposal {
+    if let Disposal::MoveTo(target) = disposal {
         std::fs::create_dir_all(target)
-            .with_context(|| format!("creating the quarantine folder {}", target.display()))?;
+            .with_context(|| format!("creating the folder {}", target.display()))?;
     }
 
     let mut outcome = Outcome::default();
@@ -81,7 +81,7 @@ pub fn apply_reporting(
         let result = match disposal {
             Disposal::Trash => trash::delete(&path).map_err(|err| err.to_string()),
             Disposal::Delete => std::fs::remove_file(&path).map_err(|err| err.to_string()),
-            Disposal::Quarantine(target) => quarantine(&path, &removal.rel_path, target),
+            Disposal::MoveTo(target) => move_to(&path, &removal.rel_path, target),
         };
         match result {
             Ok(()) => {
@@ -95,16 +95,16 @@ pub fn apply_reporting(
     Ok(outcome)
 }
 
-/// Move under the quarantine folder keeping the relative path, so the tree can be
-/// put back over the original by copying it in.
-fn quarantine(path: &Path, rel_path: &str, target: &Path) -> std::result::Result<(), String> {
+/// Move under the chosen folder keeping the relative path, so the tree can be put
+/// back over the original by copying it in.
+fn move_to(path: &Path, rel_path: &str, target: &Path) -> std::result::Result<(), String> {
     let destination = target.join(rel_path);
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     match std::fs::rename(path, &destination) {
         Ok(()) => Ok(()),
-        // A rename across volumes fails, and the quarantine folder is often on
+        // A rename across volumes fails, and the chosen folder is often on
         // another one, so fall back to a copy and then remove the original.
         Err(_) => {
             std::fs::copy(path, &destination).map_err(|err| err.to_string())?;
@@ -115,20 +115,13 @@ fn quarantine(path: &Path, rel_path: &str, target: &Path) -> std::result::Result
 
 /// Build a plan from the members of a set that are not marked to keep.
 ///
-/// A set with nothing kept is left alone entirely. Removing every copy of an
-/// image is never what someone meant, and it is the one mistake this tool could
-/// make that has no undo.
+/// What is marked is kept and everything else goes, including every picture in a
+/// set where nothing is marked. The count is on the button that carries it out.
 pub fn plan_from_sets<'a>(
-    sets: impl IntoIterator<Item = (&'a [crate::matching::Member], bool)>,
+    sets: impl IntoIterator<Item = &'a [crate::matching::Member]>,
 ) -> Plan {
     let mut plan = Plan::default();
-    for (members, resolved) in sets {
-        if !resolved {
-            continue;
-        }
-        if !members.iter().any(|member| member.auto_keep) {
-            continue;
-        }
+    for members in sets {
         for member in members.iter().filter(|member| !member.auto_keep) {
             plan.removals.push(Removal {
                 file_id: member.file_id,
@@ -188,24 +181,26 @@ mod tests {
             member(2, "drop.jpg", 300, false),
             member(3, "drop2.jpg", 200, false),
         ];
-        let plan = plan_from_sets([(members.as_slice(), true)]);
+        let plan = plan_from_sets([members.as_slice()]);
         assert_eq!(plan.files(), 2);
         assert_eq!(plan.bytes(), 500);
         assert!(!plan.to_text().contains("keep.jpg"));
     }
 
+    /// What is marked is what is kept. A set where nothing is marked is a set
+    /// where nothing is being kept, so all of it goes.
     #[test]
-    fn an_unresolved_set_contributes_nothing() {
-        let members = vec![member(1, "a.jpg", 100, true), member(2, "b.jpg", 100, false)];
-        assert_eq!(plan_from_sets([(members.as_slice(), false)]).files(), 0);
+    fn a_set_with_nothing_kept_loses_all_of_it() {
+        let members = vec![member(1, "a.jpg", 100, false), member(2, "b.jpg", 100, false)];
+        let plan = plan_from_sets([members.as_slice()]);
+        assert_eq!(plan.files(), 2);
+        assert_eq!(plan.bytes(), 200);
     }
 
     #[test]
-    fn a_set_with_nothing_kept_is_left_alone() {
-        // The one mistake with no undo. A set where every member is unmarked must
-        // never turn into a plan that removes all of them.
-        let members = vec![member(1, "a.jpg", 100, false), member(2, "b.jpg", 100, false)];
-        assert_eq!(plan_from_sets([(members.as_slice(), true)]).files(), 0);
+    fn a_set_with_everything_kept_loses_none_of_it() {
+        let members = vec![member(1, "a.jpg", 100, true), member(2, "b.jpg", 100, true)];
+        assert_eq!(plan_from_sets([members.as_slice()]).files(), 0);
     }
 
     /// The window shows a bar while files are going, so the removal has to count
@@ -250,14 +245,14 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_moves_the_file_and_keeps_its_path() {
+    fn moving_to_a_folder_keeps_the_path_under_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(dir.path().join("one/two")).unwrap();
         std::fs::write(dir.path().join("one/two/drop.jpg"), b"drop").unwrap();
-        let held = dir.path().join("quarantine");
+        let held = dir.path().join("somewhere else");
 
         let plan = plan_of(&[("one/two/drop.jpg", 4)]);
-        let outcome = apply(dir.path(), &plan, &Disposal::Quarantine(held.clone())).expect("apply");
+        let outcome = apply(dir.path(), &plan, &Disposal::MoveTo(held.clone())).expect("apply");
 
         assert_eq!(outcome.failed, Vec::new());
         assert!(!dir.path().join("one/two/drop.jpg").exists());

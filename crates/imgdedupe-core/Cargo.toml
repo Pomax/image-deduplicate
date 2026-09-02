@@ -7,7 +7,7 @@ rust-version.workspace = true
 [features]
 default = ["index", "review"]
 # Walking a folder and writing the index: what `imgindex` does.
-index = ["dep:rayon"]
+index = []
 # Matching, scoring and removing: what the window does.
 review = ["dep:trash"]
 
@@ -15,7 +15,7 @@ review = ["dep:trash"]
 anyhow.workspace = true
 image.workspace = true
 jpeg-decoder.workspace = true
-rayon = { workspace = true, optional = true }
+rayon.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 trash = { workspace = true, optional = true }

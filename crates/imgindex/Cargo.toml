@@ -13,7 +13,6 @@ anyhow.workspace = true
 clap.workspace = true
 ctrlc = "3"
 imgdedupe-core = { path = "../imgdedupe-core", default-features = false, features = ["index"] }
-rayon.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

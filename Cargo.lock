@@ -1728,7 +1728,6 @@ dependencies = [
  "ctrlc",
  "image",
  "imgdedupe-core",
- "rayon",
  "rusqlite",
  "serde_json",
  "tempfile",

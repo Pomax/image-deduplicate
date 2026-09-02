@@ -52,16 +52,8 @@ struct Args {
     #[arg(long)]
     db: Option<PathBuf>,
 
-    /// Re-read files whose size and timestamp have not changed.
-    #[arg(long)]
-    verify: bool,
-
     #[arg(long, value_enum, default_value_t = Progress::Text)]
     progress: Progress,
-
-    /// Decoding threads. Defaults to one per core.
-    #[arg(long)]
-    threads: Option<usize>,
 
     /// Write what this run did to imgindex.log, beside this program.
     #[arg(long)]
@@ -74,11 +66,9 @@ fn main() -> ExitCode {
         runlog::start("imgindex");
     }
     runlog::line(&format!(
-        "indexing {} (recurse {}, verify {}, threads {:?})",
+        "indexing {} (recurse {})",
         args.folder.display(),
-        args.recurse,
-        args.verify,
-        args.threads
+        args.recurse
     ));
 
     match run(args) {
@@ -113,19 +103,48 @@ fn absolute(folder: &std::path::Path) -> Result<PathBuf> {
     Ok(current.join(folder))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::absolute;
+
+    /// The folder someone names is the folder that gets indexed. A link is a name
+    /// they chose and the target is not, so nothing here may swap one for the
+    /// other.
+    #[test]
+    fn making_a_path_absolute_leaves_a_link_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).expect("mkdir");
+
+        let link = dir.path().join("link");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&real, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        if !made {
+            // Windows needs developer mode or elevation to create one.
+            return;
+        }
+
+        assert_eq!(absolute(&link).expect("absolute"), link);
+    }
+
+    #[test]
+    fn a_relative_path_is_joined_to_where_the_program_was_run() {
+        let here = std::env::current_dir().expect("cwd");
+        assert_eq!(
+            absolute(std::path::Path::new("pictures")).expect("absolute"),
+            here.join("pictures")
+        );
+    }
+}
+
 fn run(args: Args) -> Result<bool> {
     if !args.folder.is_dir() {
         anyhow::bail!("{} is not a folder", args.folder.display());
     }
     let root = absolute(&args.folder)?;
     let db_path = args.db.unwrap_or_else(|| root.join(db::INDEX_FILENAME));
-
-    if let Some(threads) = args.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global()
-            .context("setting the thread count")?;
-    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     let handler_flag = Arc::clone(&cancel);
@@ -134,12 +153,7 @@ fn run(args: Args) -> Result<bool> {
     let _ = ctrlc::set_handler(move || handler_flag.store(true, Ordering::Relaxed));
 
     let mut conn = db::open(&db_path)?;
-    let options = Options {
-        root,
-        db_path,
-        recurse: args.recurse,
-        verify: args.verify,
-    };
+    let options = Options { root, db_path, recurse: args.recurse };
 
     let report = |event: Event| emit(args.progress, &event);
     let summary = scan::run(&mut conn, &options, &cancel, &report)?;

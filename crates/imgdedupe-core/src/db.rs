@@ -18,8 +18,9 @@ pub const INDEX_FILENAME: &str = "imgdedupe.sqlite";
 /// Every statement that defines the index. Applied on open and reused by tests
 /// that want the same shape in memory.
 pub const SCHEMA: &str = "
--- Facts about the index itself: schema_version, root_path, last_scan. Nothing
--- about how the application was being driven when it ran.
+-- Facts about the index itself: schema_version, last_scan, and where a cleanup
+-- sends what it removes. The folder is the one this file sits in, so it is not
+-- written down anywhere.
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -374,6 +375,39 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", "ON").expect("pragma");
         conn.execute_batch(SCHEMA).expect("schema");
         conn
+    }
+
+    /// A file's id is not a lasting name for it. Deleting the last rows and
+    /// indexing again hands those ids to different files, so anything outside the
+    /// index that remembers a file by its id is remembering the wrong file.
+    #[test]
+    fn a_file_id_is_reused_after_the_rows_above_it_are_deleted() {
+        let mut conn = memory_db();
+        let tx = conn.transaction().expect("tx");
+        for path in ["a.jpg", "b.jpg", "c.jpg"] {
+            upsert(&tx, &record(path, 1), 1).expect("insert");
+        }
+        tx.commit().expect("commit");
+
+        let id_of = |conn: &Connection, path: &str| -> i64 {
+            conn.query_row("SELECT id FROM files WHERE rel_path = ?1", [path], |row| row.get(0))
+                .expect("id")
+        };
+        let was = id_of(&conn, "c.jpg");
+
+        let tx = conn.transaction().expect("tx");
+        delete_paths(&tx, &[String::from("c.jpg")]).expect("delete");
+        tx.commit().expect("commit");
+
+        let tx = conn.transaction().expect("tx");
+        upsert(&tx, &record("something else.jpg", 1), 1).expect("insert");
+        tx.commit().expect("commit");
+
+        assert_eq!(
+            id_of(&conn, "something else.jpg"),
+            was,
+            "the id was not reused, so this check is no longer measuring anything"
+        );
     }
 
     #[test]

@@ -283,9 +283,9 @@ fn the_db_flag_puts_the_index_where_it_is_told() {
 }
 
 #[test]
-fn a_symlinked_folder_is_indexed_under_the_link_and_not_its_target() {
-    // The link is what the user chose and what stays put. Resolving it would key
-    // the index on a target that can move.
+fn a_symlinked_folder_is_indexed_through_the_link() {
+    // The link is what the user chose. Nothing resolves it, so the pictures under
+    // it are read through it and the index sits beside them.
     let dir = tempfile::tempdir().expect("tempdir");
     let real = dir.path().join("real");
     std::fs::create_dir(&real).expect("mkdir");
@@ -313,19 +313,10 @@ fn a_symlinked_folder_is_indexed_under_the_link_and_not_its_target() {
     assert_eq!(events(&output).last().expect("done")["indexed"], 1);
 
     let conn = rusqlite::Connection::open(&db).expect("open");
-    let root: String = conn
-        .query_row("SELECT value FROM meta WHERE key = 'root_path'", [], |row| {
-            row.get(0)
-        })
-        .expect("root_path");
-    assert!(
-        root.contains("link"),
-        "the index was keyed on {root} rather than the link"
-    );
-    assert!(
-        !root.contains("real"),
-        "the link was resolved to its target: {root}"
-    );
+    let path: String = conn
+        .query_row("SELECT rel_path FROM files", [], |row| row.get(0))
+        .expect("the indexed file");
+    assert_eq!(path, "a.png", "the path was stored against something other than the folder");
 }
 
 #[test]
@@ -340,44 +331,3 @@ fn a_removed_file_is_reported_as_removed() {
     assert_eq!(events(&output).last().expect("done")["removed"], 1);
 }
 
-#[test]
-fn verify_reindexes_files_whose_timestamp_did_not_move() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    write_image(&dir.path().join("a.png"), 32, 32, 0);
-    run(&[dir.path().to_str().unwrap(), "--progress", "json"]);
-
-    let output = run(&[dir.path().to_str().unwrap(), "--verify", "--progress", "json"]);
-    assert_eq!(events(&output).last().expect("done")["indexed"], 1);
-}
-
-#[test]
-fn the_thread_count_does_not_change_the_result() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    for n in 0..6 {
-        write_image(&dir.path().join(format!("{n}.png")), 48, 32, n);
-    }
-
-    let single = dir.path().join("single.sqlite");
-    let output = run(&[
-        dir.path().to_str().unwrap(),
-        "--threads",
-        "1",
-        "--db",
-        single.to_str().unwrap(),
-        "--progress",
-        "json",
-    ]);
-    assert_eq!(events(&output).last().expect("done")["indexed"], 6);
-
-    let many = dir.path().join("many.sqlite");
-    let output = run(&[
-        dir.path().to_str().unwrap(),
-        "--threads",
-        "4",
-        "--db",
-        many.to_str().unwrap(),
-        "--progress",
-        "json",
-    ]);
-    assert_eq!(events(&output).last().expect("done")["indexed"], 6);
-}

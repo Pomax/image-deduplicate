@@ -10,7 +10,7 @@ use imgdedupe_core::runlog;
 #[derive(Debug, Clone)]
 pub enum Update {
     Start { total: u64 },
-    Progress { done: u64, per_sec: u64, unchanged: u64, removed: u64 },
+    Progress { done: u64, per_sec: u64, unchanged: u64, removed: u64, ignored: u64 },
     /// Rows committed. The writer runs behind the readers and is still going
     /// after the last file has been decoded.
     Writing { done: u64, total: u64 },
@@ -151,6 +151,7 @@ fn parse(line: &str) -> Option<Update> {
             per_sec: number("per_sec"),
             unchanged: number("unchanged"),
             removed: number("removed"),
+            ignored: number("ignored"),
         }),
         "writing" => Some(Update::Writing { done: number("done"), total: number("total") }),
         "error" => Some(Update::Failed {
@@ -178,8 +179,16 @@ mod tests {
             Some(Update::Start { total: 12 })
         ));
         assert!(matches!(
-            parse(r#"{"event":"progress","done":5,"per_sec":100,"unchanged":2,"removed":1}"#),
-            Some(Update::Progress { done: 5, per_sec: 100, unchanged: 2, removed: 1 })
+            parse(
+                r#"{"event":"progress","done":5,"per_sec":100,"unchanged":2,"removed":1,"ignored":3}"#
+            ),
+            Some(Update::Progress {
+                done: 5,
+                per_sec: 100,
+                unchanged: 2,
+                removed: 1,
+                ignored: 3
+            })
         ));
         assert!(matches!(
             parse(r#"{"event":"writing","done":4,"total":9}"#),

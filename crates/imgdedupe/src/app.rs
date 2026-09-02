@@ -58,13 +58,16 @@ enum View {
 /// What the thread removing files sends back.
 enum Removal {
     Progress(usize),
-    Done(Box<cleanup::Outcome>),
+    /// The files are gone and the index is being brought up to date. On a large
+    /// folder that is the slowest part of a cleanup, so it says so.
+    Tidying,
+    /// The outcome, and how many rows the index lost.
+    Done(Box<cleanup::Outcome>, usize),
     Failed(String),
 }
 
 /// What the thread searching for duplicates sends back.
 enum Found {
-    Progress(matching::Progress),
     Sets(Vec<DuplicateSet>),
     Cancelled,
     Failed(String),
@@ -120,28 +123,52 @@ fn step(counts: &[usize], at: (usize, usize), direction: Direction) -> Option<(u
     }
 }
 
-/// Where the list has to be scrolled to for one row to be wholly in sight, or
-/// nothing when it already is.
+/// Where the list has to be scrolled to for one row to sit in the middle of what
+/// is on screen, or nothing when it is already there.
+///
+/// The row walked to is always brought to the middle, so the rows on either side
+/// of it are in sight: walking forward shows what is coming and walking back
+/// shows what has been passed. The ends of the list are the only exception, since
+/// there is nothing beyond them to scroll into view.
 ///
 /// The rows the list is not drawing cannot be asked to scroll themselves into
 /// view, so the place of the one wanted is worked out from its number: every row
 /// is the same height, and they are laid out one after another.
 fn scroll_to_show(
     row: usize,
+    rows: usize,
     row_height: f32,
     spacing: f32,
     offset: f32,
     viewport: f32,
 ) -> Option<f32> {
-    let top = row as f32 * (row_height + spacing);
-    let bottom = top + row_height;
-    if top < offset {
-        Some(top)
-    } else if bottom > offset + viewport {
-        Some((bottom - viewport).max(0.0))
-    } else {
-        None
+    let pitch = row_height + spacing;
+    let content = (rows as f32 * pitch - spacing).max(0.0);
+    let middle = row as f32 * pitch + row_height / 2.0 - viewport / 2.0;
+    let wanted = middle.clamp(0.0, (content - viewport).max(0.0));
+    ((wanted - offset).abs() > 0.5).then_some(wanted)
+}
+
+/// What a set is keeping. A set with no entry at all is keeping nothing, and
+/// every picture in it goes: what is marked is what is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    One(i64),
+    All,
+}
+
+impl Keep {
+    fn keeps(self, file_id: i64) -> bool {
+        match self {
+            Keep::One(kept) => kept == file_id,
+            Keep::All => true,
+        }
     }
+}
+
+/// Whether a set that is keeping this is keeping that picture.
+fn keeps(keeping: Option<Keep>, file_id: i64) -> bool {
+    keeping.is_some_and(|keep| keep.keeps(file_id))
 }
 
 /// Where removed files go. Held as one value rather than three booleans, so the
@@ -149,7 +176,7 @@ fn scroll_to_show(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Destination {
     Trash,
-    Quarantine,
+    MoveTo,
     Delete,
 }
 
@@ -157,7 +184,7 @@ impl Destination {
     fn label(self) -> &'static str {
         match self {
             Destination::Trash => "Recycle bin",
-            Destination::Quarantine => "Move to a folder",
+            Destination::MoveTo => "Move to a folder",
             Destination::Delete => "Delete permanently",
         }
     }
@@ -165,7 +192,7 @@ impl Destination {
     fn note(self) -> &'static str {
         match self {
             Destination::Trash => "Recoverable from the recycle bin.",
-            Destination::Quarantine => "Keeps the folder structure, so the files can be put back.",
+            Destination::MoveTo => "Keeps the folder structure, so the files can be put back.",
             Destination::Delete => "This cannot be undone.",
         }
     }
@@ -173,7 +200,7 @@ impl Destination {
     fn name(self) -> &'static str {
         match self {
             Destination::Trash => "trash",
-            Destination::Quarantine => "quarantine",
+            Destination::MoveTo => "move",
             Destination::Delete => "delete",
         }
     }
@@ -183,14 +210,14 @@ impl Destination {
     fn verb(self) -> &'static str {
         match self {
             Destination::Trash | Destination::Delete => "Remove",
-            Destination::Quarantine => "Move",
+            Destination::MoveTo => "Move",
         }
     }
 
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "trash" => Some(Destination::Trash),
-            "quarantine" => Some(Destination::Quarantine),
+            "move" => Some(Destination::MoveTo),
             "delete" => Some(Destination::Delete),
             _ => None,
         }
@@ -436,19 +463,56 @@ const SCAN_ROW_HEIGHT: f32 = 100.0;
 /// arithmetic below is about outer widths.
 const FRAME_EXTRA: f32 = 14.0;
 
-/// One picture in a set, and the strip of them a set row holds: the picture, the
-/// keep control and the three lines under it.
+/// The largest a picture in a set may be drawn, and the height of the strip of
+/// them a set row holds: the picture, the keep control and the four lines under
+/// it.
 const TILE: egui::Vec2 = egui::vec2(156.0, 118.0);
-const TILE_STRIP_HEIGHT: f32 = 214.0;
+const TILE_STRIP_HEIGHT: f32 = 226.0;
 
-/// The line above the strip: the button to keep the whole set.
-const SET_HEADER_HEIGHT: f32 = 28.0;
+/// Space kept clear around a picture for what is drawn around it: the keeper's
+/// border, and the ring outside that for the one the preview is showing. The ring
+/// sits 3 out from the border and is 3 wide, so it reaches 4.5 past it. Without
+/// this the ring is drawn outside the tile and the neighbour clips it.
+const TILE_RING: f32 = 6.0;
+
+/// The picture's border and the margin inside it, on both sides.
+const TILE_BORDER: f32 = 4.0;
+
+/// What a picture of these proportions comes out as inside `TILE`.
+fn fitted(width: u32, height: u32) -> egui::Vec2 {
+    let (width, height) = (width.max(1) as f32, height.max(1) as f32);
+    let scale = (TILE.x / width).min(TILE.y / height);
+    egui::vec2(width * scale, height * scale)
+}
+
+/// How wide a set's tiles are: its own widest picture with room for what is drawn
+/// around it, and nothing else. A set of portraits is not given columns the width
+/// of a landscape in some other set.
+fn tile_width(members: &[imgdedupe_core::matching::Member]) -> f32 {
+    members
+        .iter()
+        .map(|member| fitted(member.width, member.height).x)
+        .fold(0.0_f32, f32::max)
+        .max(1.0)
+        + TILE_BORDER
+        + TILE_RING * 2.0
+}
+
+/// The button that keeps a whole set, drawn over the top right of its strip.
+const KEEP_ALL: egui::Vec2 = egui::vec2(90.0, 24.0);
+
+/// How many pictures are copies of another: every picture in a set, less the one
+/// each set keeps.
+fn duplicate_count(sets: &[DuplicateSet]) -> usize {
+    let pictures: usize = sets.iter().map(|set| set.members.len()).sum();
+    pictures - sets.len()
+}
 
 /// What a set row takes. The list places the rows it is not drawing by this, and
 /// a row is built to exactly it, so a row can never be a few points out and shift
 /// the content under a scroll that is already running.
-fn set_row_height(ui: &egui::Ui) -> f32 {
-    TILE_STRIP_HEIGHT + SCROLL_BAR + SET_HEADER_HEIGHT + ui.spacing().item_spacing.y + FRAME_EXTRA
+fn set_row_height(_ui: &egui::Ui) -> f32 {
+    TILE_STRIP_HEIGHT + SCROLL_BAR + FRAME_EXTRA
 }
 
 /// Box widths for a row: each one its measured content, plus an equal share of
@@ -528,8 +592,19 @@ struct ScanState {
     per_sec: u64,
     unchanged: u64,
     removed: u64,
+    /// Read, and not a picture this build indexes. Not a failure and not work
+    /// that produced anything, so it is not counted as either.
+    ignored: u64,
     failures: Vec<(String, String)>,
     finished: Option<String>,
+}
+
+impl ScanState {
+    /// Pictures this pass actually read. What was skipped over as not an image,
+    /// and what could not be read at all, are their own numbers.
+    fn found(&self) -> u64 {
+        self.done.saturating_sub(self.ignored).saturating_sub(self.failures.len() as u64)
+    }
 }
 
 pub struct App {
@@ -544,24 +619,24 @@ pub struct App {
 
     running: Option<Run>,
     scan: ScanState,
-    /// The search for duplicates, while it is running, and how far it has got.
+    /// The search for duplicates, while it is running.
     searching: Option<std::sync::mpsc::Receiver<Found>>,
-    search_progress: Option<matching::Progress>,
     /// Set to stop the search. It is looked at between the pieces of the work.
     search_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
     sets: Vec<DuplicateSet>,
-    /// The keep mark per set, held here and not in the index: a review session is
-    /// not a fact about a file on disk.
-    keep: HashMap<i64, i64>,
-    min_recoverable: i64,
+    /// The keep marks per set, held here and not in the index: a review session
+    /// is not a fact about a file on disk.
+    keep: HashMap<i64, Keep>,
 
     destination: Destination,
-    quarantine_dir: String,
+    move_dir: String,
     /// The removal, while it is running, and how far through it is.
     removing: Option<std::sync::mpsc::Receiver<Removal>>,
     removed_so_far: usize,
     to_remove: usize,
+    /// The files are gone and the index is being rewritten without them.
+    tidying: bool,
     /// Files the last cleanup could not remove, and what the system said. Shown
     /// on the cleanup page so another destination can be tried.
     cleanup_failures: Vec<(String, String)>,
@@ -617,16 +692,15 @@ impl App {
             running: None,
             scan: ScanState::default(),
             searching: None,
-            search_progress: None,
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sets: Vec::new(),
             keep: HashMap::new(),
-            min_recoverable: 0,
             destination: Destination::Trash,
-            quarantine_dir: String::new(),
+            move_dir: String::new(),
             removing: None,
             removed_so_far: 0,
             to_remove: 0,
+            tidying: false,
             cleanup_failures: Vec::new(),
             cleanup_result: None,
             thumbs: Thumbnails::new(),
@@ -755,11 +829,12 @@ impl App {
                 Update::Start { total } => {
                     self.scan = ScanState { total, ..ScanState::default() };
                 }
-                Update::Progress { done, per_sec, unchanged, removed } => {
+                Update::Progress { done, per_sec, unchanged, removed, ignored } => {
                     self.scan.done = done;
                     self.scan.per_sec = per_sec;
                     self.scan.unchanged = unchanged;
                     self.scan.removed = removed;
+                    self.scan.ignored = ignored;
                 }
                 Update::Writing { done, total } => {
                     self.scan.written = done;
@@ -919,7 +994,7 @@ impl App {
             "What counts as a duplicate",
             egui::vec2(width, SCAN_ROW_HEIGHT),
             |ui| {
-            ui.spacing_mut().slider_width = 150.0;
+            ui.spacing_mut().slider_width = 300.0;
             let mut changed = ui
                 .add_enabled(
                     !busy,
@@ -1033,27 +1108,16 @@ impl App {
             };
             bar(ui, "read", self.scan.done, self.scan.total);
             ui.add_space(4.0);
-            bar(ui, "written", self.scan.written, self.scan.to_write);
-            if searching {
-                ui.add_space(4.0);
-                match self.search_progress {
-                    Some(progress) => bar(
-                        ui,
-                        &format!("looking for duplicates: {}", progress.step.label()),
-                        progress.done,
-                        progress.total,
-                    ),
-                    None => bar(ui, "looking for duplicates", 0, 4),
-                }
-            }
+            bar(ui, "indexed", self.scan.written, self.scan.to_write);
             ui.add_space(6.0);
             egui::Grid::new("scan counts")
-                .num_columns(4)
+                .num_columns(5)
                 .spacing([24.0, 4.0])
                 .show(ui, |ui| {
-                    counter(ui, "indexed", self.scan.done);
+                    counter(ui, "found", self.scan.found());
                     counter(ui, "unchanged", self.scan.unchanged);
                     counter(ui, "removed", self.scan.removed);
+                    counter(ui, "failed to read", self.scan.failures.len() as u64);
                     counter(ui, "per second", self.scan.per_sec);
                     ui.end_row();
                 });
@@ -1126,22 +1190,17 @@ impl App {
         self.error = None;
 
         let (send, receive) = std::sync::mpsc::channel::<Found>();
-        let steps = send.clone();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let asked = std::sync::Arc::clone(&stop);
         std::thread::spawn(move || {
-            let result = headless::open_index(&db_path).and_then(|conn| {
-                matching::find_sets_reporting(&conn, thresholds, &asked, &|progress| {
-                    let _ = steps.send(Found::Progress(progress));
-                })
-            });
+            let result = headless::open_index(&db_path)
+                .and_then(|conn| matching::find_sets_cancellable(&conn, thresholds, &asked));
             let _ = send.send(match result {
                 Ok(Some(sets)) => Found::Sets(sets),
                 Ok(None) => Found::Cancelled,
                 Err(err) => Found::Failed(format!("{err:#}")),
             });
         });
-        self.search_progress = None;
         self.search_cancel = stop;
         self.searching = Some(receive);
     }
@@ -1156,7 +1215,6 @@ impl App {
         let mut done = false;
         for found in waiting {
             match found {
-                Found::Progress(progress) => self.search_progress = Some(progress),
                 Found::Sets(sets) => {
                     self.accept_sets(sets);
                     done = true;
@@ -1192,7 +1250,7 @@ impl App {
 
         for set in &sets {
             if let Some(member) = set.members.iter().find(|member| member.auto_keep) {
-                self.keep.insert(set.set_id, member.file_id);
+                self.keep.insert(set.set_id, Keep::One(member.file_id));
             }
         }
         self.sets = sets;
@@ -1231,56 +1289,30 @@ impl App {
             return;
         };
 
-        let visible: Vec<usize> = self
-            .sets
-            .iter()
-            .enumerate()
-            .filter(|(_, set)| set.recoverable_bytes() >= self.min_recoverable)
-            .map(|(index, _)| index)
-            .collect();
-        let reclaimable: i64 = visible
-            .iter()
-            .filter(|index| self.keep.contains_key(&self.sets[**index].set_id))
-            .map(|index| self.sets[*index].recoverable_bytes())
-            .sum();
+        let visible: Vec<usize> = (0..self.sets.len()).collect();
+        let duplicates = duplicate_count(&self.sets);
+        let (going, reclaimable) = self.selected_for_removal();
 
         egui::TopBottomPanel::top("review toolbar").show_inside(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!("{} sets", visible.len())).strong());
+                ui.label(egui::RichText::new(format!("{duplicates} duplicates")).strong());
+                ui.label(egui::RichText::new(format!("{going} to remove")).strong());
                 ui.label(
                     egui::RichText::new(format!("{:.1} MB to reclaim", reclaimable as f64 / 1e6))
                         .weak(),
                 );
 
-                ui.separator();
-                ui.label("hide under");
-                let mut megabytes = self.min_recoverable as f64 / 1_000_000.0;
-                ui.spacing_mut().slider_width = 120.0;
-                if ui
-                    .add(egui::Slider::new(&mut megabytes, 0.0..=50.0).suffix(" MB"))
-                    .changed()
-                {
-                    self.min_recoverable = (megabytes * 1_000_000.0) as i64;
-                }
-
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // A set is in the cleanup when it has a keeper. Every set has
-                    // one to start with, and "keep all" is what takes it away.
-                    let keepers = visible
-                        .iter()
-                        .filter(|index| self.keep.contains_key(&self.sets[**index].set_id))
-                        .count();
                     let go = egui::Button::new(
                         egui::RichText::new("Clean up").strong().color(egui::Color32::WHITE),
                     )
                     .fill(egui::Color32::from_rgb(60, 110, 180))
                     .min_size(egui::vec2(120.0, 28.0));
                     if ui
-                        .add_enabled(keepers > 0, go)
-                        .on_hover_text(format!(
-                            "go to step 3 with the {keepers} sets that have a keeper"
-                        ))
+                        .add_enabled(going > 0, go)
+                        .on_hover_text(format!("go to step 3 with the {going} pictures not kept"))
                         .clicked()
                     {
                         self.view = View::Cleanup;
@@ -1312,9 +1344,14 @@ impl App {
         let spacing = ui.spacing().item_spacing.y;
         let mut list = egui::ScrollArea::vertical().auto_shrink([false, false]);
         if let Some(row) = self.scroll_to.take() {
-            if let Some(offset) =
-                scroll_to_show(row, row_height, spacing, self.list_offset, self.list_viewport)
-            {
+            if let Some(offset) = scroll_to_show(
+                row,
+                visible.len(),
+                row_height,
+                spacing,
+                self.list_offset,
+                self.list_viewport,
+            ) {
                 list = list.vertical_scroll_offset(offset);
             }
         }
@@ -1348,7 +1385,7 @@ impl App {
         let stored = self.destination.name();
         let result = db::open_for_notes(db_path).and_then(|conn| {
             db::set_meta(&conn, "disposal", stored)?;
-            db::set_meta(&conn, "quarantine_dir", &self.quarantine_dir)
+            db::set_meta(&conn, "move_dir", &self.move_dir)
         });
         if let Err(err) = result {
             runlog::line(&format!("the cleanup choice could not be written: {err:#}"));
@@ -1360,15 +1397,15 @@ impl App {
             return;
         };
         let read = headless::open_index(db_path).and_then(|conn| {
-            Ok((db::get_meta(&conn, "disposal")?, db::get_meta(&conn, "quarantine_dir")?))
+            Ok((db::get_meta(&conn, "disposal")?, db::get_meta(&conn, "move_dir")?))
         });
         match read {
-            Ok((disposal, quarantine)) => {
+            Ok((disposal, move_dir)) => {
                 if let Some(choice) = disposal.as_deref().and_then(Destination::from_name) {
                     self.destination = choice;
                 }
-                if let Some(folder) = quarantine {
-                    self.quarantine_dir = folder;
+                if let Some(folder) = move_dir {
+                    self.move_dir = folder;
                 }
             }
             Err(err) => runlog::line(&format!("the cleanup choice could not be read: {err:#}")),
@@ -1399,8 +1436,14 @@ impl App {
             .iter()
             .find(|set| set.members.iter().any(|member| member.file_id == file_id))
             .map(|set| set.set_id);
+        // Pressing it again on the one already kept takes the mark off, so the
+        // same key both makes a choice and undoes it.
         if let Some(set_id) = holder {
-            self.keep.insert(set_id, file_id);
+            if self.keep.get(&set_id) == Some(&Keep::One(file_id)) {
+                self.keep.remove(&set_id);
+            } else {
+                self.keep.insert(set_id, Keep::One(file_id));
+            }
         }
     }
 
@@ -1418,8 +1461,28 @@ impl App {
 
     /// Open the preview on the keeper of the first set, so the review view starts
     /// on a picture rather than on an invitation to click one.
+    /// How many pictures are not marked to keep, and how many bytes they are.
+    /// That is what a cleanup would take, so it is what the toolbar counts.
+    fn selected_for_removal(&self) -> (usize, i64) {
+        let mut count = 0usize;
+        let mut bytes = 0i64;
+        for set in &self.sets {
+            let keeping = self.keep.get(&set.set_id).copied();
+            for member in &set.members {
+                if !keeps(keeping, member.file_id) {
+                    count += 1;
+                    bytes += member.size_bytes;
+                }
+            }
+        }
+        (count, bytes)
+    }
+
     fn preselect_first_keeper(&mut self) {
-        self.selected = self.sets.first().and_then(|set| self.keep.get(&set.set_id).copied());
+        self.selected = self.sets.first().and_then(|set| match self.keep.get(&set.set_id) {
+            Some(Keep::One(file_id)) => Some(*file_id),
+            _ => set.members.first().map(|member| member.file_id),
+        });
         self.showing = None;
     }
 
@@ -1476,12 +1539,12 @@ impl App {
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    let keeping = self.keep.get(&set_id) == Some(&member.file_id);
+                    let keeping = keeps(self.keep.get(&set_id).copied(), member.file_id);
                     if ui
                         .add_enabled(!keeping, egui::Button::new("Keep this one"))
                         .clicked()
                     {
-                        self.keep.insert(set_id, member.file_id);
+                        self.keep.insert(set_id, Keep::One(member.file_id));
                     }
                     ui.label(
                         egui::RichText::new(format!(
@@ -1528,7 +1591,7 @@ impl App {
     fn set_row(&mut self, ui: &mut egui::Ui, index: usize, root: &std::path::Path) {
         let set_id = self.sets[index].set_id;
         let members = self.sets[index].members.clone();
-        let chosen = self.keep.get(&set_id).copied();
+        let keeping = self.keep.get(&set_id).copied();
 
         // Built to a fixed height rather than measured afterwards. The list places
         // the rows it is not drawing by this number, and a row that came out any
@@ -1538,38 +1601,38 @@ impl App {
         ui.set_min_size(size);
         egui::Frame::group(ui.style())
             .show(ui, |ui| {
-                ui.set_height(
-                    TILE_STRIP_HEIGHT + SCROLL_BAR + SET_HEADER_HEIGHT + ui.spacing().item_spacing.y,
-                );
-                ui.allocate_ui(egui::vec2(ui.available_width(), SET_HEADER_HEIGHT), |ui| {
-                ui.set_min_height(SET_HEADER_HEIGHT);
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let keep_all = egui::Button::new("keep all")
-                            .min_size(egui::vec2(90.0, SET_HEADER_HEIGHT - 4.0));
-                        if ui.add(keep_all).clicked() {
-                            self.keep.remove(&set_id);
-                        }
-                    });
-                });
-                });
+                ui.set_height(TILE_STRIP_HEIGHT + SCROLL_BAR);
+                let inside = ui.max_rect();
 
+                let width = tile_width(&members);
                 scrolled(
                     ui,
                     egui::Id::new(("set bar", set_id)),
                     false,
-                    TILE.x,
+                    width,
                     egui::ScrollArea::horizontal().id_salt(("set", set_id)),
                     |area, ui| {
                         area.show(ui, |ui| {
                             ui.horizontal_top(|ui| {
                                 for member in &members {
-                                    self.member_tile(ui, set_id, member, chosen, root);
+                                    self.member_tile(ui, set_id, member, keeping, root, width);
                                 }
                             });
                         })
                     },
                 );
+
+                // Over the strip rather than above it. A row of its own to hold
+                // one button is a row of the list nobody can see pictures in.
+                let at = egui::Rect::from_min_size(
+                    egui::pos2(inside.right() - KEEP_ALL.x, inside.top()),
+                    KEEP_ALL,
+                );
+                let keep_all = egui::Button::new("keep all")
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x33, 0x33, 0x33)));
+                if ui.put(at, keep_all).clicked() {
+                    self.keep.insert(set_id, Keep::All);
+                }
             });
         });
     }
@@ -1581,16 +1644,18 @@ impl App {
         ui: &mut egui::Ui,
         set_id: i64,
         member: &imgdedupe_core::matching::Member,
-        chosen: Option<i64>,
+        keeping: Option<Keep>,
         root: &std::path::Path,
+        width: f32,
     ) {
-        let kept = chosen == Some(member.file_id);
+        let kept = keeps(keeping, member.file_id);
         let showing = self.selected == Some(member.file_id);
         let keep_colour = egui::Color32::from_rgb(90, 180, 110);
 
-        ui.allocate_ui(egui::vec2(TILE.x, TILE_STRIP_HEIGHT), |ui| {
+        ui.allocate_ui(egui::vec2(width, TILE_STRIP_HEIGHT), |ui| {
             ui.set_height(TILE_STRIP_HEIGHT);
             ui.vertical(|ui| {
+                ui.add_space(TILE_RING);
                 // The keeper's border stays on the picture. Being the one on the
                 // right is a second thing, drawn as a ring outside it, so a
                 // picture that is both shows both.
@@ -1603,7 +1668,8 @@ impl App {
                             ui.style().visuals.widgets.noninteractive.bg_stroke.color,
                         )
                     })
-                    .inner_margin(2.0);
+                    .inner_margin(TILE_BORDER / 2.0)
+                    .outer_margin(egui::Margin::symmetric(TILE_RING, 0.0));
 
                 let framed = frame.show(ui, |ui| {
                     match self.thumbs.get(member.file_id, thumbs::THUMB_EDGE, root, &member.rel_path)
@@ -1613,16 +1679,21 @@ impl App {
                                 .fit_to_exact_size(TILE)
                                 .sense(egui::Sense::click()),
                         ),
+                        // The same space the picture will take, so nothing moves
+                        // when it arrives.
                         None => ui.add_sized(
-                            TILE,
+                            fitted(member.width, member.height),
                             egui::Label::new(egui::RichText::new("...").weak())
                                 .sense(egui::Sense::click()),
                         ),
                     }
                 });
+                // A frame's response covers its outer margin as well, and the ring
+                // goes around the picture, not around the space kept clear for it.
+                let bordered = framed.response.rect.shrink2(egui::vec2(TILE_RING, 0.0));
                 if showing {
                     ui.painter().rect_stroke(
-                        framed.response.rect.expand(3.0),
+                        bordered.expand(3.0),
                         2.0,
                         egui::Stroke::new(3.0_f32, ui.style().visuals.selection.bg_fill),
                     );
@@ -1631,25 +1702,27 @@ impl App {
                     self.selected = Some(member.file_id);
                 }
 
-                if kept {
-                    // Centred under the picture it belongs to, so which one is
-                    // being kept can be read off the strip at a glance.
-                    ui.add_sized(
-                        egui::vec2(TILE.x, ui.spacing().interact_size.y),
-                        egui::Label::new(
-                            egui::RichText::new("KEEP").strong().color(keep_colour),
-                        ),
-                    );
-                } else if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new("keep this").weak())
-                            .small()
-                            .frame(false),
-                    )
-                    .clicked()
-                {
-                    self.keep.insert(set_id, member.file_id);
-                }
+                // Centred on the picture this tile is about. The picture sits in
+                // the middle of the column, so the column's width is its width.
+                let over_the_picture = egui::vec2(width, ui.spacing().interact_size.y);
+                ui.allocate_ui_with_layout(
+                    over_the_picture,
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        if kept {
+                            ui.label(egui::RichText::new("KEEP").strong().color(keep_colour));
+                        } else if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new("keep this").weak())
+                                    .small()
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            self.keep.insert(set_id, Keep::One(member.file_id));
+                        }
+                    },
+                );
                 ui.label(format!("{}x{}", member.width, member.height));
                 ui.label(
                     egui::RichText::new(format!(
@@ -1670,7 +1743,7 @@ impl App {
 
     fn cleanup_view(&mut self, ui: &mut egui::Ui) {
         let plan = self.build_plan();
-        let sets_in_play = self.sets.iter().filter(|set| self.keep.contains_key(&set.set_id)).count();
+        let sets_in_play = self.sets.len();
 
         // The action sits top right, where the one that starts a scan and the one
         // that goes from the review to here both are.
@@ -1686,17 +1759,29 @@ impl App {
                     if self.removing.is_some() {
                         let done = self.removed_so_far;
                         let total = self.to_remove.max(1);
-                        ui.add(
-                            egui::ProgressBar::new(done as f32 / total as f32)
-                                .text(format!(
-                                    "{} {done} of {total}",
-                                    match self.destination {
-                                        Destination::Quarantine => "moving",
-                                        _ => "removing",
-                                    }
-                                ))
-                                .desired_width(210.0),
-                        );
+                        let mut bar =
+                            egui::ProgressBar::new(done as f32 / total as f32).desired_width(210.0);
+                        if !self.tidying {
+                            bar = bar.text(format!(
+                                "{} {done} of {total}",
+                                match self.destination {
+                                    Destination::MoveTo => "moving",
+                                    _ => "removing",
+                                }
+                            ));
+                        }
+                        let painted = ui.add(bar);
+                        // The bar's own text sits at its left edge. This one is a
+                        // sentence rather than a count, so it goes in the middle.
+                        if self.tidying {
+                            ui.painter().text(
+                                painted.rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "tidying the index",
+                                egui::TextStyle::Button.resolve(ui.style()),
+                                ui.visuals().strong_text_color(),
+                            );
+                        }
                         return;
                     }
                     let ready = plan.files() > 0 && self.folder.is_some() && !self.busy();
@@ -1739,7 +1824,7 @@ impl App {
                             ui.label(egui::RichText::new(sets_in_play.to_string()).strong());
                             ui.end_row();
                             ui.label(match self.destination {
-                                Destination::Quarantine => "Files moved",
+                                Destination::MoveTo => "Files moved",
                                 _ => "Files removed",
                             });
                             ui.label(egui::RichText::new(plan.files().to_string()).strong());
@@ -1759,7 +1844,7 @@ impl App {
                 ui.add_space(SECTION_GAP);
                 let busy = self.busy();
                 section(ui, "Where they go", |ui| {
-                    for choice in [Destination::Trash, Destination::Quarantine, Destination::Delete] {
+                    for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {
                         let picked = self.destination == choice;
                         if ui
                             .add_enabled(!busy, egui::RadioButton::new(picked, choice.label()))
@@ -1777,18 +1862,18 @@ impl App {
                         ui.label(note.weak());
                     }
 
-                    if self.destination == Destination::Quarantine {
+                    if self.destination == Destination::MoveTo {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.add_enabled(
                                 !busy,
-                                egui::TextEdit::singleline(&mut self.quarantine_dir)
+                                egui::TextEdit::singleline(&mut self.move_dir)
                                     .hint_text("folder")
                                     .desired_width(190.0),
                             );
                             if ui.add_enabled(!busy, egui::Button::new("choose")).clicked() {
                                 if let Some(folder) = crate::folder_picker::pick(None) {
-                                    self.quarantine_dir = folder.display().to_string();
+                                    self.move_dir = folder.display().to_string();
                                     self.remember_disposal();
                                 }
                             }
@@ -1802,7 +1887,7 @@ impl App {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new(match self.destination {
-                    Destination::Quarantine => "Files that will be moved",
+                    Destination::MoveTo => "Files that will be moved",
                     _ => "Files that will be removed",
                 })
                 .strong(),
@@ -1850,29 +1935,29 @@ impl App {
         match self.destination {
             Destination::Trash => Disposal::Trash,
             Destination::Delete => Disposal::Delete,
-            Destination::Quarantine => Disposal::Quarantine(PathBuf::from(&self.quarantine_dir)),
+            Destination::MoveTo => Disposal::MoveTo(PathBuf::from(&self.move_dir)),
         }
     }
 
     /// What the keep marks imply. Rebuilt every frame so the count on the button
-    /// is always the count of what the button does. A set whose keeper has been
-    /// taken away by "keep all" is left alone entirely.
+    /// is always the count of what the button does. What is marked is kept and
+    /// everything else goes, including all of a set that is keeping nothing.
     fn build_plan(&self) -> Plan {
-        let mut sets: Vec<(Vec<imgdedupe_core::matching::Member>, bool)> = Vec::new();
+        let mut sets: Vec<Vec<imgdedupe_core::matching::Member>> = Vec::new();
         for set in &self.sets {
-            let chosen = self.keep.get(&set.set_id).copied();
+            let keeping = self.keep.get(&set.set_id).copied();
             let members = set
                 .members
                 .iter()
                 .map(|member| {
                     let mut member = member.clone();
-                    member.auto_keep = chosen == Some(member.file_id);
+                    member.auto_keep = keeps(keeping, member.file_id);
                     member
                 })
                 .collect();
-            sets.push((members, chosen.is_some()));
+            sets.push(members);
         }
-        cleanup::plan_from_sets(sets.iter().map(|(members, wanted)| (members.as_slice(), *wanted)))
+        cleanup::plan_from_sets(sets.iter().map(|members| members.as_slice()))
     }
 
     /// Start removing. It runs on its own thread and says how far it has got,
@@ -1906,16 +1991,25 @@ impl App {
 
         let (send, receive) = std::sync::mpsc::channel::<Removal>();
         let steps = send.clone();
+        let db_path = self.db_path.clone();
         std::thread::spawn(move || {
             let result = cleanup::apply_reporting(&root, &plan, &disposal, &|done| {
                 let _ = steps.send(Removal::Progress(done));
             });
             let _ = send.send(match result {
-                Ok(outcome) => Removal::Done(Box::new(outcome)),
+                Ok(outcome) => {
+                    // Here rather than in the frame that takes the outcome: this
+                    // rebuilds the index file, which on a large folder is seconds
+                    // of copying, and the window would not paint for that long.
+                    let _ = steps.send(Removal::Tidying);
+                    let forgotten = forget_rows(db_path.as_deref(), &outcome.removed);
+                    Removal::Done(Box::new(outcome), forgotten)
+                }
                 Err(err) => Removal::Failed(format!("{err:#}")),
             });
         });
         self.removing = Some(receive);
+        self.tidying = false;
         self.removed_so_far = 0;
         self.to_remove = total;
     }
@@ -1931,8 +2025,9 @@ impl App {
         for step in waiting {
             match step {
                 Removal::Progress(done) => self.removed_so_far = done,
-                Removal::Done(outcome) => {
-                    self.finish_cleanup(&outcome);
+                Removal::Tidying => self.tidying = true,
+                Removal::Done(outcome, forgotten) => {
+                    self.finish_cleanup(&outcome, forgotten);
                     over = true;
                 }
                 Removal::Failed(message) => {
@@ -1943,16 +2038,16 @@ impl App {
         }
         if over {
             self.removing = None;
+            self.tidying = false;
         }
     }
 
-    fn finish_cleanup(&mut self, outcome: &cleanup::Outcome) {
+    fn finish_cleanup(&mut self, outcome: &cleanup::Outcome, forgotten: usize) {
         // Every file that would not go, by name and by reason. A cleanup that
         // quietly removes nothing is what this is here to explain.
         for (path, message) in &outcome.failed {
             runlog::line(&format!("  could not remove {path}: {message}"));
         }
-        let forgotten = self.forget(&outcome.removed);
         runlog::line(&format!(
             "cleanup finished: {} removed, {} failed, {:.1} MB, {forgotten} rows dropped",
             outcome.removed.len(),
@@ -2004,37 +2099,41 @@ impl App {
         self.showing = self.showing.filter(|id| still_here.contains(id));
     }
 
-    /// Take the files that were removed out of the index. Deleted or moved, they
-    /// are not at those paths any more, and an index that still lists them offers
-    /// duplicates of files that are gone.
-    fn forget(&mut self, removed: &[String]) -> usize {
-        let Some(db_path) = self.db_path.clone() else {
-            runlog::line("nothing was dropped from the index: no index is open");
-            return 0;
-        };
-        if removed.is_empty() {
-            return 0;
-        }
-        let dropped = db::open_for_notes(&db_path).and_then(|mut conn| {
-            let tx = conn.transaction()?;
-            let dropped = db::delete_paths(&tx, removed)?;
-            tx.commit()?;
-            drop(conn);
+}
 
-            // Rebuilding costs a copy of the whole index, so it happens here and
-            // only here: a cleanup is the one thing that leaves enough behind to
-            // be worth it, and only when it actually dropped rows.
-            if dropped > 0 {
-                db::compact(&db_path)?;
-            }
-            Ok(dropped)
-        });
-        match dropped {
-            Ok(count) => count,
-            Err(err) => {
-                self.fail(&format!("the index still lists the removed files: {err:#}"));
-                0
-            }
+/// Take the files that were removed out of the index. Deleted or moved, they are
+/// not at those paths any more, and an index that still lists them offers
+/// duplicates of files that are gone.
+///
+/// This runs on the removal's own thread. It rewrites the index file, which on a
+/// folder of thousands is seconds of work.
+fn forget_rows(db_path: Option<&Path>, removed: &[String]) -> usize {
+    let Some(db_path) = db_path else {
+        runlog::line("nothing was dropped from the index: no index is open");
+        return 0;
+    };
+    if removed.is_empty() {
+        return 0;
+    }
+    let dropped = db::open_for_notes(db_path).and_then(|mut conn| {
+        let tx = conn.transaction()?;
+        let dropped = db::delete_paths(&tx, removed)?;
+        tx.commit()?;
+        drop(conn);
+
+        // Rebuilding costs a copy of the whole index, so it happens here and only
+        // here: a cleanup is the one thing that leaves enough behind to be worth
+        // it, and only when it actually dropped rows.
+        if dropped > 0 {
+            db::compact(db_path)?;
+        }
+        Ok(dropped)
+    });
+    match dropped {
+        Ok(count) => count,
+        Err(err) => {
+            runlog::line(&format!("the index still lists the removed files: {err:#}"));
+            0
         }
     }
 }
@@ -2064,7 +2163,7 @@ mod tests {
             set_id: 7,
             members: vec![member(1, "a.jpg", 500), member(2, "b.jpg", 300)],
         }];
-        app.keep.insert(7, 1);
+        app.keep.insert(7, Keep::One(1));
         app
     }
 
@@ -2099,20 +2198,29 @@ mod tests {
             set_id: 9,
             members: vec![member(3, "c.jpg", 400), member(4, "d.jpg", 100)],
         });
-        assert_eq!(app.keep.get(&7), Some(&1), "the fixture starts keeping the first");
+        assert_eq!(app.keep.get(&7), Some(&Keep::One(1)), "the fixture starts keeping the first");
 
         app.selected = Some(2);
         app.keep_selected();
-        assert_eq!(app.keep.get(&7), Some(&2), "it did not move the keeper");
+        assert_eq!(app.keep.get(&7), Some(&Keep::One(2)), "it did not move the keeper");
 
         app.selected = Some(4);
         app.keep_selected();
-        assert_eq!(app.keep.get(&9), Some(&4), "the other set was not given a keeper");
-        assert_eq!(app.keep.get(&7), Some(&2), "it changed a set it was not on");
+        assert_eq!(app.keep.get(&9), Some(&Keep::One(4)), "the other set was not given a keeper");
+        assert_eq!(app.keep.get(&7), Some(&Keep::One(2)), "it changed a set it was not on");
 
         app.selected = None;
         app.keep_selected();
         assert_eq!(app.keep.len(), 2, "nothing was selected and something changed");
+
+        // Again on the one already kept takes the mark off, and again puts it
+        // back, so the key is a toggle rather than a one way door.
+        app.selected = Some(2);
+        app.keep_selected();
+        assert_eq!(app.keep.get(&7), None, "the mark did not come off");
+        assert_eq!(app.keep.get(&9), Some(&Keep::One(4)), "it changed a set it was not on");
+        app.keep_selected();
+        assert_eq!(app.keep.get(&7), Some(&Keep::One(2)), "the mark did not go back on");
     }
 
     /// Starting a second pass while one is going means nothing, so everything
@@ -2143,11 +2251,11 @@ mod tests {
             removed: Vec::new(),
             failed: vec![("b.jpg".to_string(), "no recycle bin here".to_string())],
             bytes_freed: 0,
-        });
+        }, 0);
 
         assert_eq!(app.view, View::Cleanup, "it left the page with the destinations on it");
         assert_eq!(app.sets.len(), 1, "the sets went even though the files did not");
-        assert_eq!(app.keep.get(&7), Some(&1), "the keeper was thrown away");
+        assert_eq!(app.keep.get(&7), Some(&Keep::One(1)), "the keeper was thrown away");
         assert_eq!(app.cleanup_failures.len(), 1);
         assert_eq!(app.cleanup_failures[0].0, "b.jpg");
     }
@@ -2163,7 +2271,7 @@ mod tests {
             removed: vec!["b.jpg".to_string()],
             failed: Vec::new(),
             bytes_freed: 300,
-        });
+        }, 1);
 
         assert_eq!(app.view, View::Scan);
         assert!(app.sets.is_empty());
@@ -2182,7 +2290,7 @@ mod tests {
             removed: vec!["b.jpg".to_string()],
             failed: vec![("c.jpg".to_string(), "no recycle bin here".to_string())],
             bytes_freed: 300,
-        });
+        }, 1);
 
         assert_eq!(app.view, View::Cleanup);
         assert_eq!(app.sets.len(), 1, "the set lost more than the file that went");
@@ -2240,15 +2348,16 @@ mod tests {
             DuplicateSet { set_id: 7, members: vec![member(1, "a.jpg", 500)] },
             DuplicateSet { set_id: 9, members: vec![member(3, "c.jpg", 400)] },
         ];
-        app.keep.insert(7, 1);
-        app.keep.insert(9, 3);
+        app.keep.insert(7, Keep::One(1));
+        app.keep.insert(9, Keep::One(3));
 
         app.preselect_first_keeper();
         assert_eq!(app.selected, Some(1));
 
+        // With no keeper there is still a picture to show: the first one.
         app.keep.remove(&7);
         app.preselect_first_keeper();
-        assert_eq!(app.selected, None, "a first set with no keeper selected something");
+        assert_eq!(app.selected, Some(1), "a first set with no keeper showed nothing");
 
         app.sets.clear();
         app.preselect_first_keeper();
@@ -2330,10 +2439,146 @@ mod tests {
         assert_eq!(app.selected, None, "nothing was selected and something moved");
     }
 
-    /// The keys follow what is on screen. A set hidden by the size filter is not
-    /// somewhere the preview can walk into.
+    /// Dropping the removed files rewrites the index, which is seconds of work on
+    /// a large folder. It happens on the removal's thread, and the frame that
+    /// takes the outcome is handed the count rather than working it out, or the
+    /// window stops painting at exactly the moment the cleanup looks finished.
     #[test]
-    fn walking_skips_sets_the_filter_is_hiding() {
+    fn taking_the_outcome_does_not_touch_the_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let conn = db::open(&db_path).expect("an index");
+        for path in ["a.jpg", "b.jpg"] {
+            conn.execute(
+                "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
+                 VALUES (?1, 1, 1, 1, 1)",
+                [path],
+            )
+            .expect("insert");
+        }
+        drop(conn);
+
+        let dropped = forget_rows(Some(&db_path), &[String::from("b.jpg")]);
+        assert_eq!(dropped, 1, "the removed file is still in the index");
+
+        // And the frame only reports what it was given. No index is open here, so
+        // if it went looking for one it would say nothing was dropped.
+        let mut app = app_with_one_set();
+        app.db_path = None;
+        app.view = View::Cleanup;
+        app.finish_cleanup(
+            &cleanup::Outcome {
+                removed: vec!["b.jpg".to_string()],
+                failed: Vec::new(),
+                bytes_freed: 300,
+            },
+            dropped,
+        );
+        let said = app.cleanup_result.expect("a result");
+        assert!(said.contains("1 dropped from the index"), "{said}");
+    }
+
+    /// Files that were not pictures, and files that could not be read, are not
+    /// pictures this pass found. A folder whose only unindexed files are of those
+    /// two kinds has found nothing, however many times it reads them.
+    #[test]
+    fn what_was_skipped_and_what_broke_are_not_counted_as_found() {
+        let mut scan = ScanState { done: 13, ignored: 13, ..ScanState::default() };
+        assert_eq!(scan.found(), 0, "files that are not pictures were counted as found");
+
+        scan = ScanState { done: 20, ignored: 5, ..ScanState::default() };
+        scan.failures.push(("broken.jpg".to_string(), "truncated".to_string()));
+        assert_eq!(scan.found(), 14);
+        assert_eq!(scan.failures.len(), 1, "the failure is its own number");
+
+        // A report that arrives before the failures do cannot go negative.
+        scan = ScanState { done: 0, ignored: 3, ..ScanState::default() };
+        assert_eq!(scan.found(), 0);
+    }
+
+    /// A set's tiles are as wide as that set's own widest picture. Nothing about
+    /// another set reaches into this one.
+    #[test]
+    fn a_set_of_portraits_is_not_given_the_width_of_a_landscape() {
+        let portrait = fitted(900, 1200);
+        let landscape = fitted(1600, 900);
+        assert!(portrait.x < landscape.x, "the two shapes fitted to the same width");
+        assert!(portrait.y <= TILE.y && landscape.y <= TILE.y, "a picture came out too tall");
+        assert!(portrait.x <= TILE.x && landscape.x <= TILE.x, "a picture came out too wide");
+
+        let of = |width: u32, height: u32| {
+            let mut member = member(1, "a.jpg", 100);
+            member.width = width;
+            member.height = height;
+            member
+        };
+        // The column is the picture plus room for the border and the ring drawn
+        // around it, or the neighbouring tile clips them.
+        let around = TILE_BORDER + TILE_RING * 2.0;
+        assert!(around >= 12.0, "there is not enough room around a picture for its ring");
+        assert_eq!(tile_width(&[of(900, 1200), of(600, 800)]), portrait.x + around);
+        assert_eq!(
+            tile_width(&[of(900, 1200), of(1600, 900)]),
+            landscape.x + around,
+            "a set is as wide as its own widest picture"
+        );
+        assert!(tile_width(&[]) > 0.0, "an empty set produced a zero width column");
+    }
+
+    /// The tally beside the set and duplicate counts: every picture that is not
+    /// marked to keep, which is exactly what a cleanup would take. It follows the
+    /// marks, so it moves as the marks do.
+    #[test]
+    fn the_selected_tally_is_every_picture_that_is_not_kept() {
+        let mut app = app_with_one_set();
+        app.sets.push(DuplicateSet {
+            set_id: 9,
+            members: vec![member(3, "c.jpg", 400), member(4, "d.jpg", 100)],
+        });
+        app.keep.insert(9, Keep::One(3));
+
+        // Four pictures, two kept.
+        assert_eq!(app.selected_for_removal(), (2, 300 + 100));
+
+        // Keeping all of one set takes its picture out of the tally.
+        app.keep.insert(9, Keep::All);
+        assert_eq!(app.selected_for_removal(), (1, 300));
+
+        // Keeping nothing in the other puts both of its pictures in.
+        app.keep.remove(&7);
+        assert_eq!(app.selected_for_removal(), (2, 500 + 300));
+
+        // And it is the same count the plan carries out.
+        assert_eq!(app.build_plan().files(), 2);
+    }
+
+    /// What the toolbar counts: pictures that would go if every set kept one, not
+    /// pictures that are in a set.
+    #[test]
+    fn the_duplicate_count_is_every_picture_but_the_one_each_set_keeps() {
+        assert_eq!(duplicate_count(&[]), 0);
+
+        let sets = vec![
+            DuplicateSet {
+                set_id: 7,
+                members: vec![member(1, "a.jpg", 500), member(2, "b.jpg", 300)],
+            },
+            DuplicateSet {
+                set_id: 8,
+                members: vec![
+                    member(3, "c.jpg", 500),
+                    member(4, "d.jpg", 300),
+                    member(5, "e.jpg", 300),
+                ],
+            },
+        ];
+        assert_eq!(duplicate_count(&sets), 3, "five pictures in two sets is three copies");
+    }
+
+    /// The keys follow what is on screen. A set that is not in the list the walk
+    /// was given is not somewhere the preview can go.
+    #[test]
+    fn walking_only_visits_the_sets_it_was_given() {
         let mut app = App::from_settings(crate::settings::Settings::default());
         app.sets = vec![
             DuplicateSet { set_id: 7, members: vec![member(1, "a.jpg", 500)] },
@@ -2349,24 +2594,35 @@ mod tests {
     /// A row the cursor keys reached must be brought into sight, and one already
     /// in sight must not shift the list under the pointer.
     #[test]
-    fn a_row_off_the_screen_is_scrolled_to_and_one_on_it_is_left_alone() {
+    fn the_row_walked_to_is_brought_to_the_middle() {
         let (height, spacing, viewport) = (240.0, 8.0, 700.0);
-        let show = |row: usize, offset: f32| scroll_to_show(row, height, spacing, offset, viewport);
+        let rows = 40;
+        let show =
+            |row: usize, offset: f32| scroll_to_show(row, rows, height, spacing, offset, viewport);
 
-        assert_eq!(show(1, 0.0), None, "a row already in sight was scrolled to");
+        // Rows are 248 apart and 700 is on screen, so a row in the middle sits
+        // with its own middle at 350. Row one's middle is 368, so the list moves
+        // by 18 even though the whole row was already in sight.
+        assert_eq!(show(1, 0.0), Some(18.0), "a row in sight but off centre did not move");
+        assert_eq!(show(2, 0.0), Some(616.0 - 350.0));
+        assert_eq!(show(3, 0.0), Some(864.0 - 350.0));
 
-        // Two rows fit in 700, so row two runs from 496 to 736 and hangs off the
-        // bottom by 36. Only that much moves, not a whole row.
-        assert_eq!(show(2, 0.0), Some(36.0));
+        // Where it was reached from makes no difference: the row ends up in the
+        // same place walking down to it or up to it.
+        assert_eq!(show(3, 0.0), show(3, 5_000.0));
 
-        // Row three starts at 744 and ends at 984, past the 700 on screen.
-        assert_eq!(show(3, 0.0), Some(984.0 - viewport));
+        // Nothing to do when it is already in the middle.
+        assert_eq!(show(1, 18.0), None, "the list was moved to where it already was");
 
-        // Scrolled down past row one, which starts at 248.
-        assert_eq!(show(1, 400.0), Some(248.0));
-
-        // The first row never scrolls to a negative place.
-        assert_eq!(show(0, 100.0), Some(0.0));
+        // The ends are the exception. Row zero's middle is 120 and half a screen
+        // above that is off the top, so it stops there.
+        assert_eq!(show(0, 100.0), Some(0.0), "the first row scrolled past the top");
+        let content = rows as f32 * (height + spacing) - spacing;
+        assert_eq!(
+            show(rows - 1, 0.0),
+            Some(content - viewport),
+            "the last row pulled the list past its own end"
+        );
     }
 
     #[test]
@@ -2431,16 +2687,16 @@ mod tests {
 
         let mut app = App::from_settings(crate::settings::Settings::default());
         app.db_path = Some(db_path.clone());
-        app.destination = Destination::Quarantine;
-        app.quarantine_dir = String::from("D:\\held");
+        app.destination = Destination::MoveTo;
+        app.move_dir = String::from("D:\\held");
         app.remember_disposal();
 
         let mut opened = App::from_settings(crate::settings::Settings::default());
         opened.db_path = Some(db_path);
         assert_eq!(opened.destination, Destination::Trash, "the test started from the default");
         opened.load_disposal();
-        assert_eq!(opened.destination, Destination::Quarantine);
-        assert_eq!(opened.quarantine_dir, "D:\\held");
+        assert_eq!(opened.destination, Destination::MoveTo);
+        assert_eq!(opened.move_dir, "D:\\held");
     }
 
     #[test]
@@ -2453,21 +2709,21 @@ mod tests {
         app.db_path = Some(db_path);
         app.load_disposal();
         assert_eq!(app.destination, Destination::Trash);
-        assert_eq!(app.quarantine_dir, "");
+        assert_eq!(app.move_dir, "");
     }
 
     /// Moving files to a folder is not removing them, and the button that does it
     /// says so.
     #[test]
     fn the_button_says_what_the_chosen_destination_actually_does() {
-        assert_eq!(Destination::Quarantine.verb(), "Move");
+        assert_eq!(Destination::MoveTo.verb(), "Move");
         assert_eq!(Destination::Trash.verb(), "Remove");
         assert_eq!(Destination::Delete.verb(), "Remove");
     }
 
     #[test]
     fn every_cleanup_choice_survives_being_written_and_read_back() {
-        for choice in [Destination::Trash, Destination::Quarantine, Destination::Delete] {
+        for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {
             assert_eq!(Destination::from_name(choice.name()), Some(choice));
         }
         assert_eq!(Destination::from_name("something else"), None);
@@ -2873,7 +3129,7 @@ mod tests {
     #[test]
     fn moving_the_keep_mark_moves_what_gets_removed() {
         let mut app = app_with_one_set();
-        app.keep.insert(7, 2);
+        app.keep.insert(7, Keep::One(2));
         let plan = app.build_plan();
         assert_eq!(plan.removals[0].rel_path, "a.jpg");
     }
@@ -2881,8 +3137,21 @@ mod tests {
     #[test]
     fn keeping_everything_in_a_set_removes_nothing_from_it() {
         let mut app = app_with_one_set();
+        app.keep.insert(7, Keep::All);
+        assert_eq!(app.build_plan().files(), 0, "a set keeping all of it produced removals");
+    }
+
+    /// What is marked is kept and everything else goes, so a set with the mark
+    /// taken off loses every picture in it.
+    #[test]
+    fn a_set_keeping_nothing_loses_all_of_it() {
+        let mut app = app_with_one_set();
         app.keep.remove(&7);
-        assert_eq!(app.build_plan().files(), 0, "a set with no keeper produced removals");
+        let plan = app.build_plan();
+        assert_eq!(plan.files(), 2, "a set that keeps nothing kept something anyway");
+        let going: Vec<&str> =
+            plan.removals.iter().map(|removal| removal.rel_path.as_str()).collect();
+        assert_eq!(going, vec!["a.jpg", "b.jpg"]);
     }
 
     #[test]
@@ -3068,9 +3337,9 @@ mod tests {
         // Held as one value, so the three cannot all read as chosen. They were
         // three separate booleans and did.
         let mut app = App::default();
-        for choice in [Destination::Trash, Destination::Quarantine, Destination::Delete] {
+        for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {
             app.destination = choice;
-            let selected = [Destination::Trash, Destination::Quarantine, Destination::Delete]
+            let selected = [Destination::Trash, Destination::MoveTo, Destination::Delete]
                 .iter()
                 .filter(|other| **other == app.destination)
                 .count();
@@ -3084,14 +3353,14 @@ mod tests {
         app.destination = Destination::Delete;
         assert_eq!(app.disposal(), Disposal::Delete);
 
-        app.destination = Destination::Quarantine;
-        app.quarantine_dir = String::from("held");
-        assert_eq!(app.disposal(), Disposal::Quarantine(PathBuf::from("held")));
+        app.destination = Destination::MoveTo;
+        app.move_dir = String::from("held");
+        assert_eq!(app.disposal(), Disposal::MoveTo(PathBuf::from("held")));
     }
 
     #[test]
     fn every_destination_has_a_label_and_a_note() {
-        for choice in [Destination::Trash, Destination::Quarantine, Destination::Delete] {
+        for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {
             assert!(!choice.label().is_empty());
             assert!(!choice.note().is_empty());
         }

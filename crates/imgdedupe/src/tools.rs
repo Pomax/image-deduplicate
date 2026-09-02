@@ -21,7 +21,7 @@ enum Destination {
     /// The operating system's recycle bin.
     Trash,
     /// A folder, keeping the relative paths.
-    Quarantine,
+    Move,
     /// Unlink. Not recoverable.
     Delete,
 }
@@ -63,9 +63,9 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Destination::Trash)]
     to: Destination,
 
-    /// Folder to move files into when `--to quarantine` is used.
+    /// Folder to move files into when `--to move` is used.
     #[arg(long)]
-    quarantine_dir: Option<PathBuf>,
+    move_dir: Option<PathBuf>,
 
     /// Write what this run did to imgdedupe.log, beside this program.
     #[arg(long)]
@@ -116,10 +116,10 @@ fn clean(folder: PathBuf, args: &Args) -> Result<()> {
     let disposal = match args.to {
         Destination::Trash => Disposal::Trash,
         Destination::Delete => Disposal::Delete,
-        Destination::Quarantine => Disposal::Quarantine(
-            args.quarantine_dir
+        Destination::Move => Disposal::MoveTo(
+            args.move_dir
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("--to quarantine needs --quarantine-dir"))?,
+                .ok_or_else(|| anyhow::anyhow!("--to move needs --move-dir"))?,
         ),
     };
     print!("{}", apply(&folder, &plan, &disposal, &db_path)?);
@@ -184,7 +184,7 @@ fn csv_field(value: &str) -> String {
 
 /// Everything the automatic pick would remove, across every set.
 fn plan_from(sets: &[DuplicateSet]) -> Plan {
-    cleanup::plan_from_sets(sets.iter().map(|set| (set.members.as_slice(), true)))
+    cleanup::plan_from_sets(sets.iter().map(|set| set.members.as_slice()))
 }
 
 fn describe(plan: &Plan) -> String {
