@@ -53,6 +53,9 @@ pub struct Thumbnails {
     /// the workers would all be inside a background picture on the frame the
     /// review opens.
     drew: bool,
+    /// Which search result these pictures belong to. A file id only names a file
+    /// for as long as the index it came from is the current one.
+    result: u64,
     lanes: Arc<Lanes>,
     results: Receiver<Decoded>,
     /// What the reading is costing, written to the run log as it goes.
@@ -65,25 +68,35 @@ struct Lanes {
     ready: Condvar,
 }
 
+/// One picture to read: which file, and which result it belongs to.
+struct Wanted {
+    key: Key,
+    path: PathBuf,
+    result: u64,
+}
+
 #[derive(Default)]
 struct Queues {
     /// The tiles the last frame drew, the first of them at the back.
-    wanted: Vec<(Key, PathBuf)>,
-    rest: VecDeque<(Key, PathBuf)>,
+    wanted: Vec<Wanted>,
+    rest: VecDeque<Wanted>,
     /// Nothing from `rest` is started while a tile on screen is still missing.
     hold_rest: bool,
     /// Keys a worker has taken. A picture can be in both lanes, and this is what
     /// stops it being decoded twice.
     started: HashSet<Key>,
+    /// Which result the queues are holding. A new one makes every key mean a
+    /// different file, so anything from an older one is thrown away.
+    result: u64,
     stop: bool,
 }
 
 impl Queues {
     /// What a worker that only ever reads the screen takes.
-    fn take_wanted(&mut self) -> Option<(Key, PathBuf)> {
-        while let Some((key, path)) = self.wanted.pop() {
-            if self.started.insert(key) {
-                return Some((key, path));
+    fn take_wanted(&mut self) -> Option<Wanted> {
+        while let Some(next) = self.wanted.pop() {
+            if self.started.insert(next.key) {
+                return Some(next);
             }
         }
         None
@@ -91,13 +104,13 @@ impl Queues {
 
     /// What a worker that only ever reads the background takes. It takes nothing
     /// at all while a tile on screen is still missing.
-    fn take_rest(&mut self) -> Option<(Key, PathBuf)> {
+    fn take_rest(&mut self) -> Option<Wanted> {
         if self.hold_rest {
             return None;
         }
-        while let Some((key, path)) = self.rest.pop_front() {
-            if self.started.insert(key) {
-                return Some((key, path));
+        while let Some(next) = self.rest.pop_front() {
+            if self.started.insert(next.key) {
+                return Some(next);
             }
         }
         None
@@ -171,6 +184,8 @@ type Key = (i64, u32);
 struct Decoded {
     key: Key,
     image: Option<ColorImage>,
+    /// The result this was asked for. One from an older result is dropped.
+    result: u64,
     /// Seconds spent reading and decoding it.
     took: f64,
 }
@@ -201,7 +216,7 @@ impl Thumbnails {
             let lanes = Arc::clone(&lanes);
             let result_tx = result_tx.clone();
             std::thread::spawn(move || loop {
-                let (key, path) = {
+                let Wanted { key, path, result } = {
                     let mut queues = lanes.queues.lock().expect("the thumbnail queues");
                     loop {
                         if queues.stop {
@@ -218,7 +233,7 @@ impl Thumbnails {
                 let started = std::time::Instant::now();
                 let image = load(&path, key.1);
                 let took = started.elapsed().as_secs_f64();
-                if result_tx.send(Decoded { key, image, took }).is_err() {
+                if result_tx.send(Decoded { key, image, result, took }).is_err() {
                     return;
                 }
             });
@@ -235,6 +250,7 @@ impl Thumbnails {
             in_front: HashSet::new(),
             holding: true,
             drew: false,
+            result: 0,
             lanes,
             results,
             tally: Tally::default(),
@@ -248,6 +264,11 @@ impl Thumbnails {
             self.painter = Some(ctx.clone());
         }
         while let Ok(decoded) = self.results.try_recv() {
+            // Asked for before the last search, so its key names whatever file
+            // holds that row now, which is not the file it was read from.
+            if decoded.result != self.result {
+                continue;
+            }
             self.pending.remove(&decoded.key);
             let Some(image) = decoded.image else {
                 self.failed.insert(decoded.key);
@@ -285,11 +306,14 @@ impl Thumbnails {
         let lanes = Arc::clone(&self.lanes);
         let mut queues = lanes.queues.lock().expect("the thumbnail queues");
         for entry in std::mem::take(&mut queues.wanted) {
-            if !self.drawing.contains(&entry.0) {
+            if !self.drawing.contains(&entry.key) {
                 queues.rest.push_front(entry);
             }
         }
-        queues.wanted.extend(self.drawn.drain(..).rev());
+        let result = self.result;
+        queues.wanted.extend(
+            self.drawn.drain(..).rev().map(|(key, path)| Wanted { key, path, result }),
+        );
         queues.hold_rest = missing;
         drop(queues);
 
@@ -350,8 +374,41 @@ impl Thumbnails {
                 continue;
             }
             self.tally.ask();
-            queues.rest.push_back((key, root.join(rel_path)));
+            queues.rest.push_back(Wanted {
+                key,
+                path: root.join(rel_path),
+                result: self.result,
+            });
         }
+        drop(queues);
+        lanes.ready.notify_all();
+    }
+
+    /// Throw away everything read for the last search result.
+    ///
+    /// A picture is named by its row in the index, and a row id only means one
+    /// file for as long as that index stands. A new result can hand the same id
+    /// to a different picture, so nothing read under the old one may be shown
+    /// under the new one.
+    pub fn forget(&mut self) {
+        self.textures.clear();
+        self.ready.clear();
+        self.pending.clear();
+        self.failed.clear();
+        self.drawn.clear();
+        self.drawing.clear();
+        self.in_front.clear();
+        self.holding = true;
+        self.drew = false;
+        self.result += 1;
+
+        let lanes = Arc::clone(&self.lanes);
+        let mut queues = lanes.queues.lock().expect("the thumbnail queues");
+        queues.wanted.clear();
+        queues.rest.clear();
+        queues.started.clear();
+        queues.hold_rest = true;
+        queues.result = self.result;
         drop(queues);
         lanes.ready.notify_all();
     }
@@ -507,6 +564,45 @@ mod tests {
         assert!(
             others < 50,
             "the picture on screen arrived in {took:.2}s, behind {others} that are not on screen"
+        );
+    }
+
+    /// A file id names a file only for as long as the index it came from is the
+    /// current one. A new result takes everything read under the old one with
+    /// it, including whatever a worker was in the middle of.
+    #[test]
+    fn a_new_result_keeps_nothing_the_last_one_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(&dir.path().join("slow.png"), 3000, 2000);
+        write(&dir.path().join("quick.png"), 300, 200);
+        let slow = (1i64, String::from("slow.png"));
+        let quick = (2i64, String::from("quick.png"));
+
+        let ctx = egui::Context::default();
+        let mut thumbs = Thumbnails::new();
+
+        // Read one picture right through, and start a slow one.
+        let (_, _) = fill(&mut thumbs, &ctx, dir.path(), std::slice::from_ref(&quick));
+        assert_eq!(thumbs.textures.len(), 1);
+        thumbs.collect(&ctx);
+        assert!(thumbs.get(slow.0, THUMB_EDGE, dir.path(), &slow.1).is_none());
+        thumbs.collect(&ctx);
+
+        thumbs.forget();
+        assert!(thumbs.textures.is_empty(), "a picture from the last result was kept");
+        assert!(thumbs.ready.is_empty());
+        assert!(thumbs.pending.is_empty());
+
+        // Whatever the workers were inside arrives after the result changed, and
+        // is thrown away rather than filed under a number that means something
+        // else now.
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while std::time::Instant::now() < until {
+            thumbs.collect(&ctx);
+        }
+        assert!(
+            thumbs.ready.is_empty() && thumbs.textures.is_empty(),
+            "a picture read for the last result was kept for this one"
         );
     }
 

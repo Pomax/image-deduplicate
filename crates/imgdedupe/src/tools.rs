@@ -299,8 +299,8 @@ mod tests {
         let conn = db::open(&db_path).expect("an index");
         for path in ["big.jpg", "small, odd.jpg", "elsewhere.jpg"] {
             conn.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
-                 VALUES (?1, 1, 1, 1, 1)",
+                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+                 VALUES (?1, 1, 1, 1)",
                 [path],
             )
             .expect("insert");

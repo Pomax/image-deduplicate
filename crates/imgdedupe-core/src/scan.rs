@@ -12,6 +12,7 @@ use crate::db::{self, Record};
 use crate::decode::{decode_at_most, SMALL_EDGE};
 use crate::fingerprint::{fingerprint, FINGERPRINT_VERSION};
 use crate::format::{self, SNIFF_LEN};
+use crate::runlog;
 use crate::frames;
 
 /// Records written per transaction. A killed run loses at most this many.
@@ -37,8 +38,9 @@ pub enum Event {
         ignored: u64,
         per_sec: u64,
     },
-    /// Rows committed to the index. The writer runs behind the decoders, so this
-    /// is still moving after the last file has been read.
+    /// Pictures turned into a record, and how many are expected to become one.
+    /// The total is what is left of the folder once the files that are not
+    /// pictures have been struck off it, so this ends on all of them.
     Writing {
         done: u64,
         total: u64,
@@ -198,10 +200,30 @@ enum Outcome {
 
 /// Read, sniff, decode and fingerprint one file. Never panics on bad input: a
 /// malformed file comes back as `Failed` and the pass continues.
-fn index_one(candidate: &Candidate) -> Outcome {
+/// Where a pass spends its time inside the files, added up over every thread.
+/// The totals are larger than the wall clock, by roughly the number of threads.
+#[derive(Default)]
+struct Spent {
+    reading: AtomicU64,
+    decoding: AtomicU64,
+    fingerprinting: AtomicU64,
+}
+
+impl Spent {
+    fn add(counter: &AtomicU64, at: Instant) {
+        counter.fetch_add(at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn seconds(counter: &AtomicU64) -> f64 {
+        counter.load(Ordering::Relaxed) as f64 / 1e9
+    }
+}
+
+fn index_one(candidate: &Candidate, spent: &Spent) -> Outcome {
     // Logged before the read, so a run that dies without unwinding still names the
     // file it was on. An allocation failure aborts the process and no panic hook
     // runs, which is what a large image on many threads at once can do.
+    let at = Instant::now();
     let bytes = match std::fs::read(&candidate.abs_path) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -211,6 +233,7 @@ fn index_one(candidate: &Candidate) -> Outcome {
             }
         }
     };
+    Spent::add(&spent.reading, at);
 
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let Some(format) = format::detect(head) else {
@@ -220,6 +243,7 @@ fn index_one(candidate: &Candidate) -> Outcome {
         return Outcome::NotAnImage;
     }
 
+    let at = Instant::now();
     let decoded = match decode_at_most(format, &bytes, SMALL_EDGE) {
         Ok(decoded) => decoded,
         Err(err) => {
@@ -229,6 +253,7 @@ fn index_one(candidate: &Candidate) -> Outcome {
             }
         }
     };
+    Spent::add(&spent.decoding, at);
     crate::runlog::line(&format!(
         "decoded {} as {format}, {}x{}, {} bytes on disk",
         candidate.rel_path,
@@ -237,14 +262,14 @@ fn index_one(candidate: &Candidate) -> Outcome {
         bytes.len()
     ));
 
-    let bytes_hash = xxhash_rust::xxh3::xxh3_64(&bytes) as u32;
+    let at = Instant::now();
     let print = fingerprint(&decoded);
+    Spent::add(&spent.fingerprinting, at);
 
     Outcome::Indexed(Box::new(Record {
         rel_path: candidate.rel_path.clone(),
         size_bytes: candidate.size_bytes,
         mtime_ns: candidate.mtime_ns,
-        bytes_hash,
         width: decoded.width,
         height: decoded.height,
         format,
@@ -262,16 +287,33 @@ pub fn run(
     report: &(dyn Fn(Event) + Sync),
 ) -> Result<Summary> {
     let started = Instant::now();
+    let at = Instant::now();
     let candidates = walk(options).context("walking the folder")?;
+    let found = candidates.len();
+    runlog::line(&format!("walk: {:.2}s, {found} files", at.elapsed().as_secs_f64()));
+
+    let at = Instant::now();
     let known = db::load_known(conn).context("reading the existing index")?;
+    runlog::line(&format!(
+        "load index: {:.2}s, {} rows",
+        at.elapsed().as_secs_f64(),
+        known.len()
+    ));
+
     let Diff { to_index, removed, unchanged } = diff(candidates, &known);
 
     let mut summary = Summary { unchanged, ..Summary::default() };
 
     if !removed.is_empty() {
+        let at = Instant::now();
         let tx = conn.transaction()?;
         summary.removed = db::delete_paths(&tx, &removed)? as u64;
         tx.commit()?;
+        runlog::line(&format!(
+            "drop gone: {:.2}s, {} rows",
+            at.elapsed().as_secs_f64(),
+            summary.removed
+        ));
     }
 
     let total = to_index.len() as u64;
@@ -279,6 +321,7 @@ pub fn run(
 
     let done = AtomicU64::new(0);
     let ignored = AtomicU64::new(0);
+    let spent = Spent::default();
     let (send, recv) = mpsc::channel::<Outcome>();
 
     let write_result = std::thread::scope(|scope| -> Result<(u64, u64)> {
@@ -292,19 +335,22 @@ pub fn run(
                 if pending.is_empty() {
                     return Ok(());
                 }
+                let rows = pending.len();
+                let at = Instant::now();
                 let tx = conn.transaction()?;
                 for record in pending.iter() {
                     db::upsert(&tx, record, scanned_at)?;
                 }
+                let inserted = at.elapsed().as_secs_f64();
+                let at = Instant::now();
                 tx.commit()?;
+                runlog::line(&format!(
+                    "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
+                    at.elapsed().as_secs_f64()
+                ));
                 pending.clear();
                 Ok(())
             };
-
-            // Against what has been handed to the writer, not against the number
-            // of files read: most of a pass can be files that turn out to need no
-            // row at all, and none of those are work left to do.
-            let mut committed = 0u64;
 
             for outcome in recv {
                 match outcome {
@@ -313,10 +359,16 @@ pub fn run(
                         pending.push(record);
                         if pending.len() >= BATCH {
                             flush(conn, &mut pending)?;
-                            committed = indexed;
                         }
                         if indexed % REPORT_EVERY == 0 {
-                            report(Event::Writing { done: committed, total: indexed });
+                            // What the pass has done, not what the database has
+                            // been told: a commit is one transaction at the end
+                            // of a folder this size and says nothing about the
+                            // work while it is happening.
+                            report(Event::Writing {
+                                done: indexed,
+                                total: total.saturating_sub(ignored.load(Ordering::Relaxed)),
+                            });
                         }
                     }
                     Outcome::NotAnImage => {}
@@ -349,7 +401,7 @@ pub fn run(
             if cancel.load(Ordering::Relaxed) {
                 return;
             }
-            let outcome = index_one(candidate);
+            let outcome = index_one(candidate, &spent);
             if matches!(outcome, Outcome::NotAnImage) {
                 ignored.fetch_add(1, Ordering::Relaxed);
             }
@@ -364,6 +416,14 @@ pub fn run(
         // The last partial group of files would otherwise never be announced and
         // the bar would stop short of the end.
         announce(done.load(Ordering::Relaxed));
+        runlog::line(&format!(
+            "read and fingerprint: {:.2}s of wall clock; over every thread, \
+             {:.1}s reading, {:.1}s decoding, {:.1}s fingerprinting",
+            started.elapsed().as_secs_f64(),
+            Spent::seconds(&spent.reading),
+            Spent::seconds(&spent.decoding),
+            Spent::seconds(&spent.fingerprinting)
+        ));
 
         writer.join().map_err(|_| anyhow::anyhow!("the index writer thread panicked"))?
     })?;
@@ -373,6 +433,9 @@ pub fn run(
     summary.cancelled = cancel.load(Ordering::Relaxed);
 
     db::set_meta(conn, "last_scan", &now_seconds().to_string())?;
+    // What the index covers, not a preference: a pass that does not descend
+    // where the last one did would drop every subfolder row as vanished.
+    db::set_meta(conn, "recurse", if options.recurse { "1" } else { "0" })?;
 
     report(Event::Done {
         indexed: summary.indexed,
@@ -427,6 +490,44 @@ mod tests {
         })
         .expect("scan");
         (summary, events.into_inner().unwrap())
+    }
+
+    /// Indexing is reported while it is happening, not once at the end. A folder
+    /// smaller than one transaction's worth commits once, so a count of commits
+    /// says nothing until the pass is over.
+    #[test]
+    fn indexing_is_reported_while_the_folder_is_still_being_read() {
+        let fx = fixture();
+        let pictures = REPORT_EVERY as u32 + 50;
+        for index in 0..pictures {
+            write_image(&fx.dir.path().join(format!("{index}.png")), 32, 24, index);
+        }
+        std::fs::write(fx.dir.path().join("notes.txt"), b"not a picture").expect("fixture");
+
+        let (summary, events) = scan(&fx);
+        assert_eq!(summary.indexed, pictures as u64);
+
+        let reported: Vec<(u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Writing { done, total } => Some((*done, *total)),
+                _ => None,
+            })
+            .collect();
+        assert!(reported.len() >= 2, "indexing was only reported once, at the end");
+        let (done, total) = reported[0];
+        assert_eq!(done, REPORT_EVERY, "the first report said nothing had been indexed");
+        // The folder holds one file that is not a picture, and the total only
+        // loses it once a reader has looked at it.
+        assert!(
+            total >= done && total <= pictures as u64 + 1,
+            "{done} of {total} is not a count of the pictures in the folder"
+        );
+        assert_eq!(
+            reported.last().copied(),
+            Some((pictures as u64, pictures as u64)),
+            "the pass did not end on all of them"
+        );
     }
 
     #[test]
@@ -537,6 +638,13 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let summary = run(&mut conn, &shallow, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1);
+
+        // How far the pass reached is written down, because a later pass that
+        // does not reach as far drops everything it cannot see.
+        assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("0"));
+        let summary = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        assert_eq!(summary.indexed, 1, "the subfolder was not picked up");
+        assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("1"));
     }
 
     #[test]

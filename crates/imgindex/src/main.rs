@@ -157,6 +157,7 @@ fn run(args: Args) -> Result<bool> {
 
     let report = |event: Event| emit(args.progress, &event);
     let summary = scan::run(&mut conn, &options, &cancel, &report)?;
+    db::close(conn)?;
 
     Ok(summary.cancelled)
 }
@@ -175,7 +176,7 @@ fn emit(progress: Progress, event: &Event) {
         Progress::Text => match event {
             Event::Start { total } => format!("indexing {total} files"),
             Event::Progress { done, per_sec, .. } => format!("{done} done, {per_sec}/s"),
-            Event::Writing { done, total } => format!("written {done} of {total}"),
+            Event::Writing { done, total } => format!("indexed {done} of {total}"),
             Event::Error { path, message } => format!("skipped {path}: {message}"),
             Event::Done { indexed, removed, failed, elapsed_ms } => format!(
                 "indexed {indexed}, removed {removed}, failed {failed}, in {:.1}s",

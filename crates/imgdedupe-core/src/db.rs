@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS files (
     rel_path        TEXT    NOT NULL UNIQUE,
     size_bytes      INTEGER NOT NULL,
     mtime_ns        INTEGER NOT NULL,
-    bytes_hash      INTEGER NOT NULL,
     last_scanned_at INTEGER NOT NULL
 );
 
@@ -46,29 +45,18 @@ CREATE TABLE IF NOT EXISTS images (
 CREATE TABLE IF NOT EXISTS fingerprints (
     file_id             INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     fingerprint_version INTEGER NOT NULL,
-    dct_hash            BLOB    NOT NULL,
     dct_hashes          BLOB    NOT NULL,
     ring_stats          BLOB    NOT NULL
 );
 
--- WITHOUT ROWID, and measured: a plain rowid table with the same two indexes was
--- slower to fill by 10 percent, slower to query by two and a half times, and
--- half again as large.
-CREATE TABLE IF NOT EXISTS phash_bands (
-    file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    variant    INTEGER NOT NULL,
-    band_index INTEGER NOT NULL,
-    band_value INTEGER NOT NULL,
-    PRIMARY KEY (file_id, variant, band_index)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS files_bytes_hash ON files(size_bytes, bytes_hash);
-CREATE INDEX IF NOT EXISTS bands_lookup     ON phash_bands(band_index, band_value);
+-- The search builds its bands from dct_hashes as it loads, so an index that
+-- held 128 rows for every picture is dropped from any file that still has one.
+DROP TABLE IF EXISTS phash_bands;
 
 CREATE VIEW IF NOT EXISTS indexed_images AS
-SELECT f.id, f.rel_path, f.size_bytes, f.mtime_ns, f.bytes_hash,
+SELECT f.id, f.rel_path, f.size_bytes, f.mtime_ns,
        i.width, i.height, i.format, i.channels,
-       p.dct_hash, p.dct_hashes, p.ring_stats
+       p.dct_hashes, p.ring_stats
 FROM files f
 JOIN images i       ON i.file_id = f.id
 JOIN fingerprints p ON p.file_id = f.id;
@@ -83,6 +71,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(SCHEMA).context("applying the schema")?;
+    drop_dead_columns(&conn)?;
 
     let existing: Option<i64> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -98,6 +87,37 @@ pub fn open(path: &Path) -> Result<Connection> {
         None => set_meta(&conn, "schema_version", &SCHEMA_VERSION.to_string())?,
     }
     Ok(conn)
+}
+
+/// Take the columns nothing reads out of an index written by an older build.
+///
+/// A file already on disk keeps whatever columns it was made with, and the ones
+/// that are `NOT NULL` would refuse every insert that no longer names them.
+fn drop_dead_columns(conn: &Connection) -> Result<()> {
+    let dead = [("files", "bytes_hash"), ("fingerprints", "dct_hash")];
+    let mut found = Vec::new();
+    for (table, column) in dead {
+        let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let present = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == column);
+        if present {
+            found.push((table, column));
+        }
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    // The view names them, and a column a view reads cannot be dropped.
+    conn.execute_batch("DROP VIEW IF EXISTS indexed_images")?;
+    conn.execute_batch("DROP INDEX IF EXISTS files_bytes_hash")?;
+    for (table, column) in found {
+        conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+            .with_context(|| format!("dropping {table}.{column}"))?;
+    }
+    conn.execute_batch(SCHEMA).context("rebuilding the schema")?;
+    Ok(())
 }
 
 /// Give back the space the deleted rows were using. Everything still indexed
@@ -182,6 +202,22 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Close a writing connection and leave one file behind.
+///
+/// A database in WAL mode keeps a `-wal` beside it holding everything written
+/// since the last checkpoint, and a `-shm` that every connection maps to find
+/// its way around that log. Folding the log back in and taking the database out
+/// of WAL mode is what removes both; deleting them by hand throws away whatever
+/// the log still holds.
+pub fn close(conn: Connection) -> Result<()> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .context("checkpointing the index")?;
+    conn.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get::<_, String>(0))
+        .context("taking the index out of WAL mode")?;
+    drop(conn);
+    Ok(())
+}
+
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO meta(key, value) VALUES (?1, ?2)
@@ -249,7 +285,6 @@ pub struct Record {
     pub rel_path: String,
     pub size_bytes: i64,
     pub mtime_ns: i64,
-    pub bytes_hash: u32,
     pub width: u32,
     pub height: u32,
     pub format: Format,
@@ -261,20 +296,13 @@ pub struct Record {
 /// transaction, which is what makes a killed run leave a consistent index.
 pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<()> {
     tx.execute(
-        "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(rel_path) DO UPDATE SET
              size_bytes = excluded.size_bytes,
              mtime_ns = excluded.mtime_ns,
-             bytes_hash = excluded.bytes_hash,
              last_scanned_at = excluded.last_scanned_at",
-        params![
-            record.rel_path,
-            record.size_bytes,
-            record.mtime_ns,
-            record.bytes_hash as i64,
-            scanned_at
-        ],
+        params![record.rel_path, record.size_bytes, record.mtime_ns, scanned_at],
     )?;
     let file_id: i64 = tx.query_row(
         "SELECT id FROM files WHERE rel_path = ?1",
@@ -300,31 +328,20 @@ pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<
     )?;
 
     tx.execute(
-        "INSERT INTO fingerprints(file_id, fingerprint_version, dct_hash, dct_hashes, ring_stats)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO fingerprints(file_id, fingerprint_version, dct_hashes, ring_stats)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(file_id) DO UPDATE SET
              fingerprint_version = excluded.fingerprint_version,
-             dct_hash = excluded.dct_hash,
              dct_hashes = excluded.dct_hashes,
              ring_stats = excluded.ring_stats",
         params![
             file_id,
             fingerprint::FINGERPRINT_VERSION,
-            record.fingerprint.dct_hash.as_slice(),
             fingerprint::pack_hashes(&record.fingerprint.dct_hashes),
             record.fingerprint.ring_stats
         ],
     )?;
 
-    tx.execute("DELETE FROM phash_bands WHERE file_id = ?1", params![file_id])?;
-    let mut insert = tx.prepare_cached(
-        "INSERT INTO phash_bands(file_id, variant, band_index, band_value) VALUES (?1, ?2, ?3, ?4)",
-    )?;
-    for (variant, hash) in record.fingerprint.dct_hashes.iter().enumerate() {
-        for (index, value) in fingerprint::bands(hash).iter().enumerate() {
-            insert.execute(params![file_id, variant as i64, index as i64, *value as i64])?;
-        }
-    }
     Ok(())
 }
 
@@ -357,13 +374,11 @@ mod tests {
             rel_path: path.to_string(),
             size_bytes: 1234,
             mtime_ns: 999,
-            bytes_hash: 0xDEAD_BEEF,
             width: 800,
             height: 600,
             format: Format::Jpeg,
             channels: 3,
             fingerprint: Fingerprint {
-                dct_hash: hash,
                 dct_hashes: [hash, hash, hash, hash, hash, hash, hash, hash],
                 ring_stats: vec![1, 2, 3, 4],
             },
@@ -420,11 +435,9 @@ mod tests {
 
         let files: i64 = conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
         let images: i64 = conn.query_row("SELECT count(*) FROM images", [], |r| r.get(0)).unwrap();
-        let bands: i64 = conn.query_row("SELECT count(*) FROM phash_bands", [], |r| r.get(0)).unwrap();
-        assert_eq!(
-            (files, images, bands),
-            (1, 1, (fingerprint::BANDS * fingerprint::VARIANTS) as i64)
-        );
+        let prints: i64 =
+            conn.query_row("SELECT count(*) FROM fingerprints", [], |r| r.get(0)).unwrap();
+        assert_eq!((files, images, prints), (1, 1, 1));
     }
 
     #[test]
@@ -441,12 +454,9 @@ mod tests {
 
         let files: i64 = conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
         let images: i64 = conn.query_row("SELECT count(*) FROM images", [], |r| r.get(0)).unwrap();
-        let prints: i64 = conn.query_row("SELECT count(*) FROM fingerprints", [], |r| r.get(0)).unwrap();
-        let bands: i64 = conn.query_row("SELECT count(*) FROM phash_bands", [], |r| r.get(0)).unwrap();
-        assert_eq!(
-            (files, images, prints, bands),
-            (1, 1, 1, (fingerprint::BANDS * fingerprint::VARIANTS) as i64)
-        );
+        let prints: i64 =
+            conn.query_row("SELECT count(*) FROM fingerprints", [], |r| r.get(0)).unwrap();
+        assert_eq!((files, images, prints), (1, 1, 1));
     }
 
     #[test]
@@ -467,8 +477,8 @@ mod tests {
     fn a_file_without_fingerprints_reads_as_stale() {
         let conn = memory_db();
         conn.execute(
-            "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
-             VALUES ('orphan.png', 1, 1, 1, 1)",
+            "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+             VALUES ('orphan.png', 1, 1, 1)",
             [],
         )
         .expect("insert");
@@ -493,8 +503,8 @@ mod tests {
         let tx = conn.transaction().expect("begin");
         for index in 0..count {
             tx.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
-                 VALUES (?1, 1, 1, 1, 1)",
+                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+                 VALUES (?1, 1, 1, 1)",
                 [format!("a-fairly-long-path-name/{index}.jpeg")],
             )
             .expect("insert");
@@ -575,8 +585,8 @@ mod tests {
         {
             let conn = open(&path).expect("open");
             conn.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
-                 VALUES ('written-late.jpeg', 1, 1, 1, 1)",
+                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+                 VALUES ('written-late.jpeg', 1, 1, 1)",
                 [],
             )
             .expect("insert");
@@ -589,6 +599,32 @@ mod tests {
 
         assert!(!log_beside(&path).exists(), "the old log was left beside the new index");
         assert_eq!(count_files(&path), 21, "the rows in the log were lost");
+    }
+
+    /// An index that has been closed is one file. The write-ahead log and the
+    /// shared-memory file beside it are what a database in WAL mode keeps while
+    /// it is open, and both go when it is closed.
+    #[test]
+    fn closing_an_index_leaves_one_file_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+
+        let mut conn = open(&path).expect("open");
+        let tx = conn.transaction().expect("tx");
+        upsert(&tx, &record("a.jpg", 1), 1).expect("insert");
+        tx.commit().expect("commit");
+        assert!(log_beside(&path).exists(), "WAL mode wrote no log to close");
+
+        close(conn).expect("close");
+        assert!(path.is_file());
+        assert!(!log_beside(&path).exists(), "the write-ahead log was left behind");
+        assert!(!index_beside(&path).exists(), "the shared-memory file was left behind");
+
+        // And what was written is in the file it was closed into.
+        let conn = open_read_only(&path).expect("reopen");
+        let rows: i64 =
+            conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
+        assert_eq!(rows, 1, "closing the index lost what it held");
     }
 
     #[test]

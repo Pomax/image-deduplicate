@@ -576,11 +576,10 @@ fn unwrapped(text: egui::RichText) -> egui::Label {
 struct ScanState {
     total: u64,
     done: u64,
-    /// Rows committed, and how many the writer has been handed. A pass can read
-    /// thousands of files and have nothing to write, and then there is nothing
-    /// outstanding.
-    written: u64,
-    to_write: u64,
+    /// Pictures turned into a record, and how many of the folder are expected to
+    /// become one.
+    indexed: u64,
+    to_index: u64,
     per_sec: u64,
     unchanged: u64,
     removed: u64,
@@ -603,6 +602,9 @@ pub struct App {
     view: View,
     folder: Option<PathBuf>,
     db_path: Option<PathBuf>,
+    /// Whether this folder is written down for the next run. Off until it is
+    /// asked for, and off again the moment another folder is chosen.
+    remember_folder: bool,
     recurse: bool,
     ignore_colour: bool,
     /// How far apart two pictures may be and still count as the same one, as a
@@ -681,6 +683,7 @@ impl App {
             view: View::Scan,
             folder: saved.folder,
             db_path,
+            remember_folder: saved.remember_folder,
             recurse: saved.recurse,
             ignore_colour: saved.ignore_colour,
             sensitivity: saved.sensitivity,
@@ -704,7 +707,9 @@ impl App {
             scroll_to: None,
             list_offset: 0.0,
             list_viewport: 0.0,
-            scan_on_open: indexed_already,
+            // A folder nobody asked to keep is shown but not acted on. The scan
+            // button is there for that.
+            scan_on_open: indexed_already && saved.remember_folder,
             window: saved.window,
             preview_width: saved.preview_width,
             error: None,
@@ -833,8 +838,8 @@ impl App {
                     self.scan.ignored = ignored;
                 }
                 Update::Writing { done, total } => {
-                    self.scan.written = done;
-                    self.scan.to_write = total;
+                    self.scan.indexed = done;
+                    self.scan.to_index = total;
                 }
                 Update::Failed { path, message } => self.scan.failures.push((path, message)),
                 Update::Done { indexed, removed, failed, elapsed_ms } => {
@@ -926,7 +931,24 @@ impl App {
                 !busy,
                 egui::Checkbox::new(&mut self.recurse, "Include subfolders"),
             );
-            if subfolders.changed() {
+            let remember = ui
+                .add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.remember_folder, "Remember this location"),
+                )
+                .on_hover_text("Open this folder again the next time the window opens");
+            if remember.changed() && !self.remember_folder {
+                // The index is what remembering a folder amounts to, so taking
+                // the tick off takes the index with it.
+                discard_index(self.db_path.as_deref());
+                self.thumbs.forget();
+                self.sets.clear();
+                self.keep.clear();
+                self.selected = None;
+                self.showing = None;
+                self.scan = ScanState::default();
+            }
+            if subfolders.changed() || remember.changed() {
                 self.remember();
             }
         })
@@ -972,7 +994,10 @@ impl App {
         if elsewhere {
             self.sensitivity = matching::DEFAULT_SENSITIVITY;
             self.ignore_colour = false;
-            self.recurse = true;
+            self.recurse = false;
+            // An index in the folder is what remembering a folder amounts to,
+            // so a folder that has one arrives with the box already ticked.
+            self.remember_folder = indexed_already;
             self.destination = Destination::Trash;
             self.move_dir = String::new();
         }
@@ -980,11 +1005,15 @@ impl App {
         self.keep.clear();
         self.selected = None;
         self.showing = None;
-        self.remember();
+        // A folder with an index is brought up to date on sight. One without is
+        // a folder nothing is known about, and it waits for the Scan button.
         if indexed_already {
             self.load_disposal();
         }
-        self.start_scan();
+        self.remember();
+        if indexed_already {
+            self.start_scan();
+        }
     }
 
     /// Write everything the window was left set to, so the next run opens the
@@ -992,6 +1021,7 @@ impl App {
     fn remember(&self) {
         crate::settings::Settings {
             folder: self.folder.clone(),
+            remember_folder: self.remember_folder,
             recurse: self.recurse,
             sensitivity: self.sensitivity,
             ignore_colour: self.ignore_colour,
@@ -1090,8 +1120,11 @@ impl App {
         section(ui, "Progress", |ui| {
             let width = ui.available_width();
             // Nothing to do is done, so an empty total is a full bar.
+            // Nothing counted yet is nothing done. A pass that finds nothing at
+            // all ends with both totals at zero and both bars empty, which is
+            // what happened: nothing.
             let bar = |ui: &mut egui::Ui, label: &str, count: u64, out_of: u64| {
-                let fraction = if out_of == 0 { 1.0 } else { count as f32 / out_of as f32 };
+                let fraction = if out_of == 0 { 0.0 } else { count as f32 / out_of as f32 };
                 ui.add(
                     egui::ProgressBar::new(fraction)
                         .text(format!("{label} {:.0}%", fraction * 100.0))
@@ -1100,7 +1133,7 @@ impl App {
             };
             bar(ui, "read", self.scan.done, self.scan.total);
             ui.add_space(4.0);
-            bar(ui, "indexed", self.scan.written, self.scan.to_write);
+            bar(ui, "indexed", self.scan.indexed, self.scan.to_index);
             ui.add_space(6.0);
             egui::Grid::new("scan counts")
                 .num_columns(5)
@@ -1232,6 +1265,10 @@ impl App {
         self.keep.clear();
         self.selected = None;
         self.showing = None;
+        // The pictures were read against the index as it stood for the last
+        // result. This one names them by the same numbers and can mean other
+        // files by them.
+        self.thumbs.forget();
 
         // Nothing was found, so there is nothing to review. Say so and stay here.
         if sets.is_empty() {
@@ -1384,20 +1421,31 @@ impl App {
         }
     }
 
+    /// Take back what this folder's index records: where a cleanup sends what it
+    /// removes, and how far down the folder the index reaches.
     fn load_disposal(&mut self) {
         let Some(db_path) = &self.db_path else {
             return;
         };
         let read = headless::open_index(db_path).and_then(|conn| {
-            Ok((db::get_meta(&conn, "disposal")?, db::get_meta(&conn, "move_dir")?))
+            Ok((
+                db::get_meta(&conn, "disposal")?,
+                db::get_meta(&conn, "move_dir")?,
+                db::get_meta(&conn, "recurse")?,
+            ))
         });
         match read {
-            Ok((disposal, move_dir)) => {
+            Ok((disposal, move_dir, recurse)) => {
                 if let Some(choice) = disposal.as_deref().and_then(Destination::from_name) {
                     self.destination = choice;
                 }
                 if let Some(folder) = move_dir {
                     self.move_dir = folder;
+                }
+                // An index built over the subfolders has to be scanned that way
+                // again, or the next pass drops every row under them.
+                if let Some(setting) = recurse {
+                    self.recurse = setting == "1";
                 }
             }
             Err(err) => runlog::line(&format!("the cleanup choice could not be read: {err:#}")),
@@ -1996,6 +2044,7 @@ impl App {
         let (send, receive) = std::sync::mpsc::channel::<Removal>();
         let steps = send.clone();
         let db_path = self.db_path.clone();
+        let keep_index = self.remember_folder;
         std::thread::spawn(move || {
             let result = cleanup::apply_reporting(&root, &plan, &disposal, &|done| {
                 let _ = steps.send(Removal::Progress(done));
@@ -2006,7 +2055,11 @@ impl App {
                     // rebuilds the index file, which on a large folder is seconds
                     // of copying, and the window would not paint for that long.
                     let _ = steps.send(Removal::Tidying);
-                    let forgotten = forget_rows(db_path.as_deref(), &outcome.removed);
+                    let forgotten = if keep_index {
+                        forget_rows(db_path.as_deref(), &outcome.removed)
+                    } else {
+                        discard_index(db_path.as_deref())
+                    };
                     Removal::Done(Box::new(outcome), forgotten)
                 }
                 Err(err) => Removal::Failed(format!("{err:#}")),
@@ -2052,14 +2105,19 @@ impl App {
         for (path, message) in &outcome.failed {
             runlog::line(&format!("  could not remove {path}: {message}"));
         }
+        let index = if self.remember_folder {
+            format!("{forgotten} dropped from the index")
+        } else {
+            String::from("the index was deleted")
+        };
         runlog::line(&format!(
-            "cleanup finished: {} removed, {} failed, {:.1} MB, {forgotten} rows dropped",
+            "cleanup finished: {} removed, {} failed, {:.1} MB, {index}",
             outcome.removed.len(),
             outcome.failed.len(),
             outcome.bytes_freed as f64 / 1_000_000.0
         ));
         self.cleanup_result = Some(format!(
-            "removed {} files, freed {:.1} MB, {} failed, {forgotten} dropped from the index",
+            "removed {} files, freed {:.1} MB, {} failed, {index}",
             outcome.removed.len(),
             outcome.bytes_freed as f64 / 1_000_000.0,
             outcome.failed.len()
@@ -2076,6 +2134,12 @@ impl App {
             self.selected = None;
             self.showing = None;
             self.view = View::Scan;
+            // The index is gone with it, so nothing on screen describes anything
+            // that still exists. The folder stays chosen and Scan builds it again.
+            if !self.remember_folder {
+                self.thumbs.forget();
+                self.scan = ScanState::default();
+            }
             self.scan.finished = Some(String::from("cleanup done."));
         }
     }
@@ -2105,6 +2169,44 @@ impl App {
 
 }
 
+/// Take the index away entirely, for a folder nobody asked to keep.
+///
+/// Nothing is going to read it again: the next run opens on no folder, and a
+/// scan of this one builds it from nothing. Deleting the file is what dropping
+/// the rows and rebuilding around them was for, without the copy.
+fn discard_index(db_path: Option<&Path>) -> usize {
+    let Some(db_path) = db_path else {
+        return 0;
+    };
+    let at = std::time::Instant::now();
+    let mut gone = 0;
+    for path in [
+        db_path.to_path_buf(),
+        with_suffix(db_path, "-wal"),
+        with_suffix(db_path, "-shm"),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => gone += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => runlog::line(&format!("{} would not go: {err}", path.display())),
+        }
+    }
+    runlog::line(&format!(
+        "delete index: {:.2}s, {gone} files, {}",
+        at.elapsed().as_secs_f64(),
+        db_path.display()
+    ));
+    0
+}
+
+/// The index's write-ahead log and shared memory file sit beside it under the
+/// same name with a suffix.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 /// Take the files that were removed out of the index. Deleted or moved, they are
 /// not at those paths any more, and an index that still lists them offers
 /// duplicates of files that are gone.
@@ -2120,16 +2222,23 @@ fn forget_rows(db_path: Option<&Path>, removed: &[String]) -> usize {
         return 0;
     }
     let dropped = db::open_for_notes(db_path).and_then(|mut conn| {
+        let at = std::time::Instant::now();
         let tx = conn.transaction()?;
         let dropped = db::delete_paths(&tx, removed)?;
         tx.commit()?;
         drop(conn);
+        runlog::line(&format!(
+            "drop removed: {:.2}s, {dropped} rows",
+            at.elapsed().as_secs_f64()
+        ));
 
         // Rebuilding costs a copy of the whole index, so it happens here and only
         // here: a cleanup is the one thing that leaves enough behind to be worth
         // it, and only when it actually dropped rows.
         if dropped > 0 {
+            let at = std::time::Instant::now();
             db::compact(db_path)?;
+            runlog::line(&format!("rebuild index: {:.2}s", at.elapsed().as_secs_f64()));
         }
         Ok(dropped)
     });
@@ -2443,6 +2552,47 @@ mod tests {
         assert_eq!(app.selected, None, "nothing was selected and something moved");
     }
 
+    /// A folder nobody asked to keep has no use for its index once the cleanup is
+    /// over: the next run opens on nothing and a scan builds it again. The file
+    /// goes, with the write-ahead log beside it.
+    #[test]
+    fn a_folder_that_is_not_remembered_loses_its_index_when_the_cleanup_is_done() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let conn = db::open(&db_path).expect("an index");
+        conn.execute(
+            "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+             VALUES ('a.jpg', 1, 1, 1)",
+            [],
+        )
+        .expect("insert");
+        drop(conn);
+        assert!(db_path.is_file());
+
+        discard_index(Some(&db_path));
+        assert!(!db_path.exists(), "the index was left behind");
+        assert!(!with_suffix(&db_path, "-wal").exists());
+        assert!(!with_suffix(&db_path, "-shm").exists());
+
+        // And the window goes back to the scan with nothing on it, so the only
+        // way on is another folder or another scan.
+        let mut app = app_with_one_set();
+        app.remember_folder = false;
+        app.view = View::Cleanup;
+        app.scan.total = 900;
+        app.finish_cleanup(
+            &cleanup::Outcome {
+                removed: vec!["b.jpg".to_string()],
+                failed: Vec::new(),
+                bytes_freed: 0,
+            },
+            0,
+        );
+        assert_eq!(app.view, View::Scan);
+        assert!(app.sets.is_empty());
+        assert_eq!(app.scan.total, 0, "the last scan's numbers are still on screen");
+    }
+
     /// Dropping the removed files rewrites the index, which is seconds of work on
     /// a large folder. It happens on the removal's thread, and the frame that
     /// takes the outcome is handed the count rather than working it out, or the
@@ -2454,8 +2604,8 @@ mod tests {
         let conn = db::open(&db_path).expect("an index");
         for path in ["a.jpg", "b.jpg"] {
             conn.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, bytes_hash, last_scanned_at)
-                 VALUES (?1, 1, 1, 1, 1)",
+                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+                 VALUES (?1, 1, 1, 1)",
                 [path],
             )
             .expect("insert");
@@ -2469,6 +2619,7 @@ mod tests {
         // if it went looking for one it would say nothing was dropped.
         let mut app = app_with_one_set();
         app.db_path = None;
+        app.remember_folder = true;
         app.view = View::Cleanup;
         app.finish_cleanup(
             &cleanup::Outcome {
@@ -2704,6 +2855,30 @@ mod tests {
         opened.load_disposal();
         assert_eq!(opened.destination, Destination::MoveTo);
         assert_eq!(opened.move_dir, "D:\\held");
+    }
+
+    /// How far down the folder an index reaches is a fact about the index, not a
+    /// preference. Opening it with the box clear would drop every row under a
+    /// subfolder as vanished on the next pass.
+    #[test]
+    fn an_index_built_over_the_subfolders_opens_with_the_box_ticked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("index.sqlite");
+        let conn = imgdedupe_core::db::open(&db_path).expect("an index");
+        imgdedupe_core::db::set_meta(&conn, "recurse", "1").expect("write");
+        drop(conn);
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        assert!(!app.recurse, "the window starts on the folder itself");
+        app.db_path = Some(db_path.clone());
+        app.load_disposal();
+        assert!(app.recurse, "the index reaches into the subfolders and the box does not");
+
+        let conn = imgdedupe_core::db::open(&db_path).expect("an index");
+        imgdedupe_core::db::set_meta(&conn, "recurse", "0").expect("write");
+        drop(conn);
+        app.load_disposal();
+        assert!(!app.recurse, "the index is the folder itself and the box says otherwise");
     }
 
     #[test]
@@ -3177,6 +3352,7 @@ mod tests {
     fn saved_settings_reach_the_window() {
         let saved = crate::settings::Settings {
             folder: Some(PathBuf::from("/photos")),
+            remember_folder: true,
             recurse: false,
             sensitivity: 7.5,
             ignore_colour: true,
@@ -3199,14 +3375,15 @@ mod tests {
         assert!(app.db_path.is_some(), "the index path was not derived");
     }
 
-    /// A folder that has been indexed before is brought up to date without being
-    /// asked. One that has not been indexed waits for the button.
+    /// A remembered folder that has been indexed before is brought up to date
+    /// without being asked. One that has not been indexed waits for the button.
     #[test]
     fn a_folder_with_an_index_is_scanned_on_opening_and_one_without_is_not() {
         let dir = tempfile::tempdir().expect("tempdir");
         let folder = dir.path().to_path_buf();
         let settings = |folder: &std::path::Path| crate::settings::Settings {
             folder: Some(folder.to_path_buf()),
+            remember_folder: true,
             ..crate::settings::Settings::default()
         };
 
@@ -3216,12 +3393,50 @@ mod tests {
         std::fs::write(headless::default_db_path(&folder), b"").expect("index");
         let app = App::from_settings(settings(&folder));
         assert!(app.scan_on_open, "the index was there and was left alone");
+
+        let app = App::from_settings(crate::settings::Settings {
+            remember_folder: false,
+            ..settings(&folder)
+        });
+        assert!(
+            !app.scan_on_open,
+            "a folder nobody asked to keep was scanned without being asked"
+        );
     }
 
-    /// Picking a folder starts a pass on it, index or no index. Whatever was on
-    /// screen belonged to the folder before it and goes.
+    /// The location is written down only while the box is ticked. Another folder
+    /// clears it, unless that folder already has an index, which is what being
+    /// remembered comes to.
     #[test]
-    fn picking_a_folder_starts_a_pass_and_drops_what_the_last_one_found() {
+    fn a_location_is_only_remembered_while_it_is_asked_for() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut app = app_with_one_set();
+        app.remember_folder = true;
+        app.recurse = true;
+
+        app.open_folder(dir.path().to_path_buf());
+        assert!(!app.remember_folder, "the last folder's choice was carried over");
+        assert!(!app.recurse, "the last folder's subfolder setting was carried over");
+
+        app.remember_folder = true;
+        app.open_folder(dir.path().to_path_buf());
+        assert!(app.remember_folder, "opening the same folder cleared the choice");
+
+        let indexed = tempfile::tempdir().expect("tempdir");
+        std::fs::write(headless::default_db_path(indexed.path()), b"").expect("index");
+        app.remember_folder = false;
+        app.open_folder(indexed.path().to_path_buf());
+        assert!(
+            app.remember_folder,
+            "a folder that already holds an index is a folder being remembered"
+        );
+    }
+
+    /// Picking a folder drops whatever was on screen, which belonged to the
+    /// folder before it. A folder with an index is brought up to date on sight;
+    /// one without waits for the button.
+    #[test]
+    fn picking_a_folder_drops_what_the_last_one_found_and_only_scans_a_known_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut app = app_with_one_set();
         app.selected = Some(1);
@@ -3233,8 +3448,16 @@ mod tests {
         assert!(app.keep.is_empty());
         assert_eq!(app.selected, None);
         assert!(
+            app.running.is_none() && app.error.is_none(),
+            "a folder nothing is known about was scanned without being asked"
+        );
+
+        let known = tempfile::tempdir().expect("tempdir");
+        db::open(&headless::default_db_path(known.path())).expect("an index");
+        app.open_folder(known.path().to_path_buf());
+        assert!(
             app.running.is_some() || app.error.is_some(),
-            "no pass was started for the folder that was picked"
+            "a folder with an index was not brought up to date"
         );
     }
 
@@ -3276,7 +3499,7 @@ mod tests {
         let app = App::from_settings(crate::settings::Settings::default());
         assert_eq!(app.folder, None);
         assert_eq!(app.db_path, None);
-        assert!(app.recurse);
+        assert!(!app.recurse, "a folder is the folder, not everything under it");
     }
 
     #[test]
@@ -3287,13 +3510,6 @@ mod tests {
     }
 
     #[test]
-    fn the_colour_setting_reaches_the_thresholds() {
-        let mut thresholds = Thresholds::at(matching::DEFAULT_SENSITIVITY);
-        assert!(!thresholds.ignore_colour);
-        thresholds.ignore_colour = true;
-        assert!(thresholds.ignore_colour);
-    }
-
     #[test]
     fn the_app_starts_on_the_default_setting() {
         // Not `App::default`, which reads whatever this machine was last left

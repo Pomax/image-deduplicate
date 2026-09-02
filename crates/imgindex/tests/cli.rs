@@ -64,11 +64,10 @@ fn every_json_line_is_one_object_the_gui_can_parse() {
     }
 }
 
-/// The reading bar used to stop short of the end, because the last partial group
-/// of files was never announced, and there was nothing at all for the writer,
-/// which is still committing after the last file has been read.
+/// Both counts reach the end of the folder. The reading one used to stop short,
+/// because the last partial group of files was never announced.
 #[test]
-fn reading_and_writing_both_report_reaching_every_file() {
+fn reading_and_indexing_both_report_reaching_every_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     for index in 0..5 {
         write_image(&dir.path().join(format!("{index}.png")), 32, 32, index);
@@ -89,11 +88,11 @@ fn reading_and_writing_both_report_reaching_every_file() {
     assert_eq!(last("writing")["total"], 5);
 }
 
-/// A pass that reads files and finds nothing to write has finished writing. The
-/// count is against what reached the writer, not against the files read, or a
-/// folder of things that are not images reports writing as untouched.
+/// A pass over a folder holding no pictures has indexed all none of them. The
+/// count is against the pictures, not the files read, or a folder of things that
+/// are not images reports its indexing as untouched.
 #[test]
-fn a_pass_with_nothing_to_write_reports_writing_as_complete() {
+fn a_pass_over_nothing_to_index_reports_indexing_as_complete() {
     let dir = tempfile::tempdir().expect("tempdir");
     for index in 0..3 {
         std::fs::write(dir.path().join(format!("{index}.txt")), b"not an image").expect("write");

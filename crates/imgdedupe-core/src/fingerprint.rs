@@ -29,18 +29,15 @@ const RING_VALUES: usize = 4;
 pub const VARIANTS: usize = 8;
 
 pub struct Fingerprint {
-    /// The hash of the image as it sits. Everything is indexed against this one.
-    pub dct_hash: Hash,
-    /// That hash and the seven for its rotations and mirrors, in a fixed order.
+    /// The image as it sits, then the seven for its rotations and mirrors, in a
+    /// fixed order.
     pub dct_hashes: [Hash; VARIANTS],
     pub ring_stats: Vec<u8>,
 }
 
 pub fn fingerprint(decoded: &Decoded) -> Fingerprint {
-    let dct_hashes = variant_hashes(&grid(&decoded.small));
     Fingerprint {
-        dct_hash: dct_hashes[0],
-        dct_hashes,
+        dct_hashes: variant_hashes(&grid(&decoded.small)),
         ring_stats: ring_stats(&decoded.small),
     }
 }
@@ -487,7 +484,7 @@ mod tests {
     }
 
     fn hash_of(image: &RgbImage) -> Hash {
-        fingerprint(&decoded_from(image)).dct_hash
+        fingerprint(&decoded_from(image)).dct_hashes[0]
     }
 
     fn hashes_of(image: &RgbImage) -> [Hash; VARIANTS] {
@@ -682,7 +679,7 @@ mod tests {
             .write_to(&mut buffer, image::ImageFormat::Jpeg)
             .expect("encode");
         let decoded = decode_at_most(Format::Jpeg, &buffer.into_inner(), 320).expect("decode");
-        let apart = hamming_any(&hashes_of(&image), &fingerprint(&decoded).dct_hash);
+        let apart = hamming_any(&hashes_of(&image), &fingerprint(&decoded).dct_hashes[0]);
         assert!(
             apart <= within(SAME_PICTURE),
             "recompression moved the hash by {apart} of {HASH_BITS} bits"

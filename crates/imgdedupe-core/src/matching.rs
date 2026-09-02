@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
@@ -583,60 +582,6 @@ impl Timing {
     }
 }
 
-/// Paths that share a size and a content hash, which is a candidate for being
-/// byte-identical and not yet a verdict.
-pub fn exact_groups(conn: &Connection) -> Result<Vec<Vec<(i64, String)>>> {
-    let mut statement = conn.prepare(
-        "SELECT f.size_bytes, f.bytes_hash, f.id, f.rel_path
-         FROM files f
-         WHERE (f.size_bytes, f.bytes_hash) IN (
-             SELECT size_bytes, bytes_hash FROM files
-             GROUP BY size_bytes, bytes_hash HAVING count(*) > 1
-         )
-         ORDER BY f.size_bytes, f.bytes_hash, f.rel_path",
-    )?;
-    let rows = statement.query_map([], |row| {
-        Ok((
-            (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?),
-            (row.get::<_, i64>(2)?, row.get::<_, String>(3)?),
-        ))
-    })?;
-
-    let mut groups: Vec<Vec<(i64, String)>> = Vec::new();
-    let mut current_key: Option<(i64, i64)> = None;
-    for row in rows {
-        let (key, entry) = row?;
-        if Some(key) == current_key {
-            groups.last_mut().expect("a group is open").push(entry);
-        } else {
-            current_key = Some(key);
-            groups.push(vec![entry]);
-        }
-    }
-    Ok(groups)
-}
-
-/// A 32-bit hash is a bucketing key, not a verdict, so a group is only reported
-/// as byte-identical after the files have actually been compared.
-pub fn verified_identical(root: &Path, group: &[(i64, String)]) -> Result<Vec<Vec<i64>>> {
-    let mut buckets: Vec<(Vec<u8>, Vec<i64>)> = Vec::new();
-    for (id, rel_path) in group {
-        let bytes = match std::fs::read(root.join(rel_path)) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        match buckets.iter_mut().find(|(known, _)| *known == bytes) {
-            Some((_, ids)) => ids.push(*id),
-            None => buckets.push((bytes, vec![*id])),
-        }
-    }
-    Ok(buckets
-        .into_iter()
-        .map(|(_, ids)| ids)
-        .filter(|ids| ids.len() > 1)
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,13 +610,11 @@ mod tests {
             rel_path: path.to_string(),
             size_bytes: size,
             mtime_ns: 1,
-            bytes_hash: 7,
             width,
             height,
             format: Format::Jpeg,
             channels: 3,
             fingerprint: Fingerprint {
-                dct_hash: hash,
                 dct_hashes: [hash, hash, hash, hash, hash, hash, hash, hash],
                 ring_stats: ring,
             },
@@ -780,8 +723,9 @@ mod tests {
         );
     }
 
+    /// The three named thresholds the debug tools take on the command line.
     #[test]
-    fn the_presets_widen_in_order_and_stay_well_below_unrelated() {
+    fn the_named_thresholds_widen_in_order_and_stay_well_below_unrelated() {
         let strict = Thresholds::strict();
         let balanced = Thresholds::balanced();
         let loose = Thresholds::loose();
@@ -793,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn a_threshold_can_be_set_anywhere_between_the_presets() {
+    fn a_threshold_can_be_set_anywhere_on_the_scale() {
         let strict = Thresholds::at(4.0);
         let between = Thresholds::at(7.0);
         let balanced = Thresholds::at(10.0);
@@ -803,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn the_presets_are_points_on_the_same_scale() {
+    fn the_named_thresholds_are_points_on_the_same_scale() {
         assert_eq!(Thresholds::strict().max_bits, Thresholds::at(4.0).max_bits);
         assert_eq!(Thresholds::balanced().max_bits, Thresholds::at(10.0).max_bits);
         assert_eq!(Thresholds::loose().max_bits, Thresholds::at(16.0).max_bits);
@@ -998,31 +942,5 @@ mod tests {
         reported.sort();
 
         assert_eq!(reported, expected, "the band search and comparing everything disagree");
-    }
-
-    #[test]
-    fn exact_groups_are_grouped_by_size_and_hash() {
-        let mut conn = open();
-        insert(&mut conn, "a.jpg", 1, 800, 600, 100, ring(0.5));
-        insert(&mut conn, "b.jpg", 2, 800, 600, 100, ring(0.5));
-        insert(&mut conn, "c.jpg", 3, 800, 600, 999, ring(0.5));
-        let groups = exact_groups(&conn).expect("groups");
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 2);
-    }
-
-    #[test]
-    fn verification_splits_a_group_whose_bytes_differ() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("a.bin"), b"same").unwrap();
-        std::fs::write(dir.path().join("b.bin"), b"same").unwrap();
-        std::fs::write(dir.path().join("c.bin"), b"diff").unwrap();
-        let group = vec![
-            (1, "a.bin".to_string()),
-            (2, "b.bin".to_string()),
-            (3, "c.bin".to_string()),
-        ];
-        let verified = verified_identical(dir.path(), &group).expect("verify");
-        assert_eq!(verified, vec![vec![1, 2]]);
     }
 }
