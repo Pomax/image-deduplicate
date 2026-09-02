@@ -6,9 +6,9 @@ rust-version.workspace = true
 
 [features]
 default = ["index", "review"]
-# Walking a folder and writing the index: what `imgindex` does.
+# Walking a folder and writing the index.
 index = []
-# Matching, scoring and removing: what the window does.
+# Matching, scoring and removing.
 review = ["dep:trash"]
 
 [dependencies]

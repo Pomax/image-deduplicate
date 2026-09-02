@@ -17,21 +17,19 @@ mod tools;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(debug_assertions, derive(clap::ValueEnum))]
 pub enum Strictness {
-    /// Only files that are the same picture pixel for pixel.
-    Strict,
-    /// Resizes, recompressions and format changes.
+    /// Re-encodes and resizes of the same picture.
+    Close,
+    /// Heavier edits, crops and rotations.
     Balanced,
-    /// Also heavier edits, with more false pairs to reject by eye.
-    Loose,
+    /// Pictures of the same thing, and some that are not.
+    Wide,
+    /// Everything, including pictures with nothing to do with each other.
+    Yolo,
 }
 
 impl Strictness {
     pub fn thresholds(self, ignore_colour: bool) -> Thresholds {
-        let mut thresholds = match self {
-            Strictness::Strict => Thresholds::strict(),
-            Strictness::Balanced => Thresholds::balanced(),
-            Strictness::Loose => Thresholds::loose(),
-        };
+        let mut thresholds = Thresholds::preset(self.label());
         thresholds.ignore_colour = ignore_colour;
         thresholds
     }
@@ -51,9 +49,10 @@ impl Strictness {
 
     pub fn label(self) -> &'static str {
         match self {
-            Strictness::Strict => "strict",
+            Strictness::Close => "close",
             Strictness::Balanced => "balanced",
-            Strictness::Loose => "loose",
+            Strictness::Wide => "wide",
+            Strictness::Yolo => "yolo",
         }
     }
 }

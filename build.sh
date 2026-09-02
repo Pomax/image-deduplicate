@@ -9,18 +9,20 @@ esac
 
 # The name here goes first, or the move that follows would be onto the same file
 # cargo hard linked it from, which is refused.
-for name in imgindex imgdedupe; do
-    rm -f "$name$suffix"
-done
+rm -f "imgdedupe$suffix"
 
 cargo build --release --workspace
 
-# Cargo hard links each binary to a second name under deps. Dropping that name
+# Cargo hard links the binary to a second name under deps. Dropping that name
 # leaves the one here as the only one for it. Cargo links it again next time,
 # which measured at under a second for a binary that did not change.
-for name in imgindex imgdedupe; do
-    mv "target/release/$name$suffix" "$name$suffix"
-    rm -f "target/release/deps/$name$suffix"
-done
+mv "target/release/imgdedupe$suffix" "imgdedupe$suffix"
+rm -f "target/release/deps/imgdedupe$suffix"
 
-echo "imgindex and imgdedupe are in $(pwd)"
+# Packed, which is about 60 percent off the linked size. Without upx on the path
+# the build still produces a working binary, just a larger one.
+if command -v upx >/dev/null 2>&1; then
+    upx --best --lzma "imgdedupe$suffix"
+fi
+
+echo "imgdedupe is in $(pwd)"

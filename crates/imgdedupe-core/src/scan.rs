@@ -38,9 +38,9 @@ pub enum Event {
         ignored: u64,
         per_sec: u64,
     },
-    /// Pictures turned into a record, and how many are expected to become one.
-    /// The total is what is left of the folder once the files that are not
-    /// pictures have been struck off it, so this ends on all of them.
+    /// How much of the folder the index holds: the pictures already in it plus
+    /// the ones this pass has added, out of every picture the folder holds. A
+    /// folder with nothing to do is all of it.
     Writing {
         done: u64,
         total: u64,
@@ -200,6 +200,18 @@ enum Outcome {
 
 /// Read, sniff, decode and fingerprint one file. Never panics on bad input: a
 /// malformed file comes back as `Failed` and the pass continues.
+/// How much of the folder is in the index, as the pass sees it.
+///
+/// The files that were left alone are already in it, and the ones that turned
+/// out not to be pictures are not part of the folder as far as this is
+/// concerned, so they leave the total rather than sitting in it unindexed.
+fn indexed_so_far(indexed: u64, unchanged: u64, to_index: u64, ignored: &AtomicU64) -> Event {
+    Event::Writing {
+        done: unchanged + indexed,
+        total: unchanged + to_index.saturating_sub(ignored.load(Ordering::Relaxed)),
+    }
+}
+
 /// Where a pass spends its time inside the files, added up over every thread.
 /// The totals are larger than the wall clock, by roughly the number of threads.
 #[derive(Default)]
@@ -317,7 +329,10 @@ pub fn run(
     }
 
     let total = to_index.len() as u64;
-    report(Event::Start { total });
+    // The bar is against the folder, not against the work: a pass over a folder
+    // it has seen before still looks at every file to find what is new and what
+    // has gone.
+    report(Event::Start { total: unchanged + total });
 
     let done = AtomicU64::new(0);
     let ignored = AtomicU64::new(0);
@@ -361,14 +376,7 @@ pub fn run(
                             flush(conn, &mut pending)?;
                         }
                         if indexed % REPORT_EVERY == 0 {
-                            // What the pass has done, not what the database has
-                            // been told: a commit is one transaction at the end
-                            // of a folder this size and says nothing about the
-                            // work while it is happening.
-                            report(Event::Writing {
-                                done: indexed,
-                                total: total.saturating_sub(ignored.load(Ordering::Relaxed)),
-                            });
+                            report(indexed_so_far(indexed, unchanged, total, &ignored));
                         }
                     }
                     Outcome::NotAnImage => {}
@@ -380,14 +388,16 @@ pub fn run(
             }
 
             flush(conn, &mut pending)?;
-            report(Event::Writing { done: indexed, total: indexed });
+            report(indexed_so_far(indexed, unchanged, total, &ignored));
             Ok((indexed, failed))
         });
 
         let announce = |count: u64| {
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             report(Event::Progress {
-                done: count,
+                // Every file in the folder has been looked at, including the ones
+                // whose size and timestamp said there was nothing to do.
+                done: unchanged + count,
                 new: count,
                 changed: 0,
                 unchanged,
@@ -528,6 +538,24 @@ mod tests {
             Some((pictures as u64, pictures as u64)),
             "the pass did not end on all of them"
         );
+
+        // A second pass has nothing to do, and every picture in the folder is
+        // still in the index, which is what the bar is counting.
+        let (summary, events) = scan(&fx);
+        assert_eq!(summary.indexed, 0);
+        assert_eq!(summary.unchanged, pictures as u64);
+        let last = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Writing { done, total } => Some((*done, *total)),
+                _ => None,
+            })
+            .next_back();
+        assert_eq!(
+            last,
+            Some((pictures as u64, pictures as u64)),
+            "a folder that is already indexed did not report itself as indexed"
+        );
     }
 
     #[test]
@@ -547,13 +575,24 @@ mod tests {
         write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
         scan(&fx);
         let (summary, events) = scan(&fx);
-        assert_eq!(summary.indexed, 0);
+        assert_eq!(summary.indexed, 0, "an unchanged folder still queued work");
         assert_eq!(summary.unchanged, 1);
+
+        // The bar is against the folder, so it still counts the file it looked
+        // at and left alone.
         let start = events.iter().find_map(|e| match e {
             Event::Start { total } => Some(*total),
             _ => None,
         });
-        assert_eq!(start, Some(0), "an unchanged folder still queued work");
+        assert_eq!(start, Some(1), "the file it looked at was not counted");
+        let last = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Progress { done, .. } => Some(*done),
+                _ => None,
+            })
+            .next_back();
+        assert_eq!(last, Some(1), "the pass did not end on every file in the folder");
     }
 
     #[test]

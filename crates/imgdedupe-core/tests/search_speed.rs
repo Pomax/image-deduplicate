@@ -74,7 +74,7 @@ fn what_a_search_costs_on_a_folder_worth_running_it_on() {
     println!("built {FILES} files in {:.1}s", started.elapsed().as_secs_f64());
 
     let started = Instant::now();
-    let sets = matching::find_sets(&conn, Thresholds::balanced()).expect("search");
+    let sets = matching::find_sets(&conn, Thresholds::preset("balanced")).expect("search");
     let whole = started.elapsed().as_secs_f64();
     println!("{} sets in {whole:.2}s", sets.len());
 
@@ -88,7 +88,7 @@ fn what_a_search_costs_on_a_folder_worth_running_it_on() {
 fn check_the_work_is_not_quadratic(path: &std::path::Path, whole: f64) {
     let conn = build(path, FEW_FILES);
     let started = Instant::now();
-    let few = matching::find_sets(&conn, Thresholds::balanced()).expect("search");
+    let few = matching::find_sets(&conn, Thresholds::preset("balanced")).expect("search");
     let small = started.elapsed().as_secs_f64();
 
     let files = FILES as f64 / FEW_FILES as f64;
@@ -147,7 +147,7 @@ fn time_copies(path: &std::path::Path, copies: usize) -> f64 {
     tx.commit().expect("commit");
 
     let started = Instant::now();
-    let sets = matching::find_sets(&conn, Thresholds::balanced()).expect("search");
+    let sets = matching::find_sets(&conn, Thresholds::preset("balanced")).expect("search");
     let took = started.elapsed().as_secs_f64();
     assert_eq!(sets.len(), 1, "the copies did not come back as one set");
     assert_eq!(sets[0].members.len(), copies, "the set lost copies");

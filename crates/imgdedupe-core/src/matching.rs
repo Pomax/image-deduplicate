@@ -45,22 +45,30 @@ pub const MAX_SENSITIVITY: f64 = 50.0;
 
 /// What the window starts on, and what it goes back to for a folder it has not
 /// been set for.
-pub const DEFAULT_SENSITIVITY: f64 = 30.0;
+pub const DEFAULT_SENSITIVITY: f64 = 15.0;
+
+/// The named points on the scale. Everything between them is reachable too: a
+/// preset is a place on the slider, not a separate setting.
+pub const PRESETS: [(&str, f64); 4] = [
+    // Re-encodes and resizes of the same picture.
+    ("close", 5.0),
+    // Heavier edits, crops and rotations.
+    ("balanced", DEFAULT_SENSITIVITY),
+    // Pictures of the same thing, and some that are not.
+    ("wide", 30.0),
+    // Everything, including pictures with nothing to do with each other.
+    ("yolo", MAX_SENSITIVITY),
+];
 
 impl Thresholds {
-    /// Only files that are the same picture, allowing for a re-encode.
-    pub fn strict() -> Self {
-        Thresholds::at(4.0)
-    }
-
-    /// Resizes, recompressions, format changes and rotations.
-    pub fn balanced() -> Self {
-        Thresholds::at(10.0)
-    }
-
-    /// Also catches heavier edits, at the cost of more false pairs to reject by eye.
-    pub fn loose() -> Self {
-        Thresholds::at(16.0)
+    /// The threshold a preset stands for, or the closest one if the name is not
+    /// a preset.
+    pub fn preset(name: &str) -> Self {
+        let percent = PRESETS
+            .iter()
+            .find(|(preset, _)| *preset == name)
+            .map_or(DEFAULT_SENSITIVITY, |(_, percent)| *percent);
+        Thresholds::at(percent)
     }
 
     /// A threshold anywhere between the presets, so the recall against false
@@ -643,13 +651,13 @@ mod tests {
         }
 
         let stop = AtomicBool::new(true);
-        let outcome = find_sets_cancellable(&conn, Thresholds::balanced(), &stop)
+        let outcome = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &stop)
             .expect("the search failed rather than stopping");
         assert!(outcome.is_none(), "a stopped search still handed back sets");
 
         // And it is only stopped when it is asked: the same search finishes.
         let never = AtomicBool::new(false);
-        let sets = find_sets_cancellable(&conn, Thresholds::balanced(), &never)
+        let sets = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &never)
             .expect("find")
             .expect("a search that was not stopped came back stopped");
         assert_eq!(sets.len(), 1, "the fixture stopped finding what it used to");
@@ -660,7 +668,7 @@ mod tests {
         let mut conn = open();
         insert(&mut conn, "a.jpg", 0x1234, 800, 600, 100_000, ring(0.5));
         insert(&mut conn, "b.jpg", 0x1234, 800, 600, 90_000, ring(0.5));
-        let sets = find_sets(&conn, Thresholds::balanced()).expect("find");
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
         assert_eq!(sets.len(), 1);
         assert_eq!(sets[0].members.len(), 2);
     }
@@ -670,7 +678,7 @@ mod tests {
         let mut conn = open();
         insert(&mut conn, "a.jpg", 0x0000_0000_0000_0000, 800, 600, 100_000, ring(0.5));
         insert(&mut conn, "b.jpg", 0xFFFF_FFFF_FFFF_FFFF, 800, 600, 100_000, ring(0.5));
-        let sets = find_sets(&conn, Thresholds::balanced()).expect("find");
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
         assert!(sets.is_empty(), "unrelated images were matched");
     }
 
@@ -704,7 +712,7 @@ mod tests {
         let mut conn = open();
         insert(&mut conn, "wide.jpg", 0x1234, 1600, 400, 100_000, ring(0.5));
         insert(&mut conn, "square.jpg", 0x1234, 800, 800, 100_000, ring(0.5));
-        let sets = find_sets(&conn, Thresholds::balanced()).expect("find");
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
         assert!(sets.is_empty(), "shapes that differ were matched");
     }
 
@@ -714,7 +722,7 @@ mod tests {
         // to about 6 percent and a rotation, which re-encodes on a shifted block
         // grid, by about 8. Setting this to the pigeonhole radius instead was
         // measured to reject half of all rotated duplicates.
-        let balanced = Thresholds::balanced();
+        let balanced = Thresholds::preset("balanced");
         let eight_percent = (fingerprint::HASH_BITS as f64 * 0.08) as u32;
         assert!(
             balanced.max_bits >= eight_percent,
@@ -723,17 +731,45 @@ mod tests {
         );
     }
 
-    /// The three named thresholds the debug tools take on the command line.
+    /// The presets widen in order. Unrelated pictures were measured above 25
+    /// percent apart, so the last two are past that on purpose and the first two
+    /// are not.
     #[test]
-    fn the_named_thresholds_widen_in_order_and_stay_well_below_unrelated() {
-        let strict = Thresholds::strict();
-        let balanced = Thresholds::balanced();
-        let loose = Thresholds::loose();
-        assert!(strict.max_bits < balanced.max_bits);
-        assert!(balanced.max_bits < loose.max_bits);
-        // Unrelated pictures were measured above 25 percent apart.
+    fn the_presets_widen_in_order() {
+        let bits: Vec<u32> =
+            PRESETS.iter().map(|(_, percent)| Thresholds::at(*percent).max_bits).collect();
+        assert!(bits.windows(2).all(|pair| pair[0] < pair[1]), "{bits:?} do not widen");
+
         let unrelated = (fingerprint::HASH_BITS as f64 * 0.25) as u32;
-        assert!(loose.max_bits < unrelated, "the loosest preset reaches unrelated pictures");
+        assert!(
+            Thresholds::preset("balanced").max_bits < unrelated,
+            "balanced already reaches unrelated pictures"
+        );
+        assert!(
+            Thresholds::preset("yolo").max_bits > unrelated,
+            "yolo does not reach past what it is named for"
+        );
+    }
+
+    /// Where the window starts, and where a new folder puts the slider back to,
+    /// is the balanced preset and not a value of its own.
+    #[test]
+    fn the_default_is_the_balanced_preset() {
+        let balanced =
+            PRESETS.iter().find(|(name, _)| *name == "balanced").expect("a balanced preset");
+        assert_eq!(balanced.1, DEFAULT_SENSITIVITY);
+        assert_eq!(
+            Thresholds::preset("balanced").max_bits,
+            Thresholds::at(DEFAULT_SENSITIVITY).max_bits
+        );
+    }
+
+    #[test]
+    fn a_preset_that_is_not_one_lands_on_the_default() {
+        assert_eq!(
+            Thresholds::preset("something else").max_bits,
+            Thresholds::at(DEFAULT_SENSITIVITY).max_bits
+        );
     }
 
     #[test]
@@ -746,11 +782,17 @@ mod tests {
         assert!(strict.max_ring < between.max_ring);
     }
 
+    /// A preset is a place on the slider, so the two can never disagree about
+    /// what the search will use.
     #[test]
-    fn the_named_thresholds_are_points_on_the_same_scale() {
-        assert_eq!(Thresholds::strict().max_bits, Thresholds::at(4.0).max_bits);
-        assert_eq!(Thresholds::balanced().max_bits, Thresholds::at(10.0).max_bits);
-        assert_eq!(Thresholds::loose().max_bits, Thresholds::at(16.0).max_bits);
+    fn the_presets_are_points_on_the_same_scale() {
+        for (name, percent) in PRESETS {
+            assert_eq!(Thresholds::preset(name).max_bits, Thresholds::at(percent).max_bits);
+            assert!(
+                (Thresholds::at(percent).percent() - percent).abs() < 1.0,
+                "{name} does not round trip through the slider"
+            );
+        }
     }
 
     #[test]
@@ -789,7 +831,7 @@ mod tests {
         let mut conn = open();
         insert(&mut conn, "small.jpg", 0x1234, 400, 300, 20_000, ring(0.5));
         insert(&mut conn, "big.jpg", 0x1234, 1600, 1200, 300_000, ring(0.5));
-        let sets = find_sets(&conn, Thresholds::balanced()).expect("find");
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
         let kept: Vec<&Member> = sets[0].members.iter().filter(|m| m.auto_keep).collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].rel_path, "big.jpg");
@@ -800,7 +842,7 @@ mod tests {
         let mut conn = open();
         insert(&mut conn, "small.jpg", 0x1234, 400, 300, 20_000, ring(0.5));
         insert(&mut conn, "big.jpg", 0x1234, 1600, 1200, 300_000, ring(0.5));
-        let sets = find_sets(&conn, Thresholds::balanced()).expect("find");
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
         assert_eq!(sets[0].recoverable_bytes(), 20_000);
     }
 
@@ -858,7 +900,7 @@ mod tests {
         );
 
         // And every one of them still comes back as a duplicate of the rest.
-        let sets = find_sets(&conn, Thresholds::balanced()).expect("search");
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("search");
         assert_eq!(sets.len(), 1);
         assert_eq!(sets[0].members.len(), 50, "folding dropped copies from the set");
     }
@@ -875,7 +917,7 @@ mod tests {
         let never = AtomicBool::new(false);
         let images = load(&conn, &never).expect("load").expect("not cancelled");
         assert_eq!(fold_identical(&images).len(), 2, "two shapes were folded into one");
-        assert!(find_sets(&conn, Thresholds::balanced()).expect("search").is_empty());
+        assert!(find_sets(&conn, Thresholds::preset("balanced")).expect("search").is_empty());
     }
 
     /// The pigeonhole guarantee: inside the radius the bands are certain to put a

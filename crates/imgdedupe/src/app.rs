@@ -490,8 +490,24 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
     fitted(member.width, member.height).x.max(1.0) + TILE_BORDER + TILE_RING * 2.0
 }
 
-/// The button that keeps a whole set, drawn over the top right of its strip.
-const KEEP_ALL: egui::Vec2 = egui::vec2(90.0, 24.0);
+/// The buttons that decide a whole set at once, drawn over the right of its
+/// strip: keep all of it at the top, none of it at the bottom.
+const KEEP_BUTTON: egui::Vec2 = egui::vec2(90.0, 24.0);
+
+/// Room around a preset's name. Four of these sit under the slider and are read
+/// at a glance, so they are no bigger than the words in them.
+const PRESET_PADDING: egui::Vec2 = egui::vec2(6.0, 2.0);
+
+/// The box holding the percentage beside the slider. Wide enough for the widest
+/// value the scale reaches, so the number never changes the width of anything.
+const VALUE_WIDTH: f32 = 56.0;
+
+/// Whether the slider is sitting on a preset, which is what draws that one as
+/// pressed. The slider carries one decimal place, so anything closer than half
+/// of that is the same setting.
+fn on_preset(sensitivity: f64, percent: f64) -> bool {
+    (sensitivity - percent).abs() < 0.05
+}
 
 /// How many pictures are copies of another: every picture in a set, less the one
 /// each set keeps.
@@ -566,6 +582,51 @@ fn counter(ui: &mut egui::Ui, name: &str, value: u64) {
     });
 }
 
+/// A bar with its label inside it, filled up to `fraction`.
+///
+/// At zero nothing is filled. `egui::ProgressBar` widens its fill to the corner
+/// radius so that the rounding has something to round, which draws a bubble on a
+/// bar that has made no progress at all.
+fn progress_bar(ui: &mut egui::Ui, label: &str, fraction: f32, width: f32) -> egui::Response {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let visuals = ui.style().visuals.clone();
+    let rounding = height / 2.0;
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        rounding,
+        visuals.extreme_bg_color,
+        egui::Stroke::NONE,
+    );
+    if fraction > 0.0 {
+        let filled = (rect.width() * fraction).max(2.0 * rounding);
+        painter.rect(
+            egui::Rect::from_min_size(rect.min, egui::vec2(filled, height)),
+            rounding,
+            visuals.selection.bg_fill,
+            egui::Stroke::NONE,
+        );
+    }
+    let galley = egui::WidgetText::from(format!("{label} {:.0}%", fraction * 100.0)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
+    let at = rect.left_center() - egui::vec2(0.0, galley.size().y / 2.0)
+        + egui::vec2(ui.spacing().item_spacing.x, 0.0);
+    let ink = visuals
+        .override_text_color
+        .unwrap_or(visuals.selection.stroke.color);
+    ui.painter().with_clip_rect(rect).galley(at, galley, ink);
+    response
+}
+
 /// A label that takes the width it needs rather than breaking to fit.
 fn unwrapped(text: egui::RichText) -> egui::Label {
     egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend)
@@ -593,8 +654,13 @@ struct ScanState {
 impl ScanState {
     /// Pictures this pass actually read. What was skipped over as not an image,
     /// and what could not be read at all, are their own numbers.
+    /// Pictures this pass read. What was left alone was not read, and files that
+    /// are not pictures or would not open are counted on their own.
     fn found(&self) -> u64 {
-        self.done.saturating_sub(self.ignored).saturating_sub(self.failures.len() as u64)
+        self.done
+            .saturating_sub(self.unchanged)
+            .saturating_sub(self.ignored)
+            .saturating_sub(self.failures.len() as u64)
     }
 }
 
@@ -686,7 +752,10 @@ impl App {
             remember_folder: saved.remember_folder,
             recurse: saved.recurse,
             ignore_colour: saved.ignore_colour,
-            sensitivity: saved.sensitivity,
+            // What counts as a duplicate is a decision about the pictures in
+            // front of the person making it, so every run starts on the default
+            // rather than on whatever the last one was left at.
+            sensitivity: matching::DEFAULT_SENSITIVITY,
             running: None,
             scan: ScanState::default(),
             searching: None,
@@ -820,12 +889,13 @@ impl App {
         self.error = Some(message.to_string());
     }
 
-    /// Drain whatever the indexer has written since the last frame.
+    /// Take whatever the pass has reported since the last frame.
     fn pump_indexer(&mut self, _ctx: &egui::Context) {
         let Some(run) = self.running.as_mut() else {
             return;
         };
-        while let Ok(update) = run.updates.try_recv() {
+        let waiting: Vec<Update> = run.updates.try_iter().collect();
+        for update in waiting {
             match update {
                 Update::Start { total } => {
                     self.scan = ScanState { total, ..ScanState::default() };
@@ -837,7 +907,7 @@ impl App {
                     self.scan.removed = removed;
                     self.scan.ignored = ignored;
                 }
-                Update::Writing { done, total } => {
+                Update::Indexed { done, total } => {
                     self.scan.indexed = done;
                     self.scan.to_index = total;
                 }
@@ -848,21 +918,16 @@ impl App {
                         elapsed_ms as f64 / 1000.0
                     ));
                 }
-                Update::Exited { .. } => {}
-            }
-        }
-
-        if let Some(Update::Exited { code }) = indexer::poll_exit(run) {
-            self.running = None;
-            runlog::line(&format!("indexer exited with {code:?}"));
-            match code {
-                Some(0) => self.load_sets(),
-                Some(2) => self.scan.finished = Some(String::from("cancelled")),
-                other => {
-                    self.error = Some(format!(
-                        "the indexer stopped with {}. See imgdedupe.log.",
-                        other.map(|c| c.to_string()).unwrap_or_else(|| String::from("no exit code"))
-                    ))
+                Update::Finished { cancelled, error } => {
+                    self.running = None;
+                    match error {
+                        Some(message) => self.error = Some(message),
+                        None if cancelled => {
+                            self.scan.finished = Some(String::from("cancelled"))
+                        }
+                        None => self.load_sets(),
+                    }
+                    return;
                 }
             }
         }
@@ -1005,6 +1070,12 @@ impl App {
         self.keep.clear();
         self.selected = None;
         self.showing = None;
+        // Counters, bars and whatever the last search said were about the folder
+        // before this one, and a folder with no index does not start a pass that
+        // would clear them.
+        self.scan = ScanState::default();
+        self.error = None;
+        self.thumbs.forget();
         // A folder with an index is brought up to date on sight. One without is
         // a folder nothing is known about, and it waits for the Scan button.
         if indexed_already {
@@ -1019,16 +1090,20 @@ impl App {
     /// Write everything the window was left set to, so the next run opens the
     /// same way.
     fn remember(&self) {
+        self.settings().save();
+    }
+
+    /// What the next run would be started from. The sensitivity is not in it: it
+    /// is a decision about the pictures on screen, not a preference.
+    fn settings(&self) -> crate::settings::Settings {
         crate::settings::Settings {
             folder: self.folder.clone(),
             remember_folder: self.remember_folder,
             recurse: self.recurse,
-            sensitivity: self.sensitivity,
             ignore_colour: self.ignore_colour,
             window: self.window,
             preview_width: self.preview_width,
         }
-        .save();
     }
 
     fn matching_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
@@ -1040,6 +1115,11 @@ impl App {
             egui::vec2(width, row),
             |ui| {
             ui.spacing_mut().slider_width = 300.0;
+            // The number beside the slider is drawn in a box of this width, and
+            // the box would otherwise size to the digits in it. The row's boxes
+            // are shared out by what their contents measure, so 5.0 and 30.0
+            // would each want a different share and move all three.
+            ui.spacing_mut().interact_size.x = VALUE_WIDTH;
             let mut changed = ui
                 .add_enabled(
                     !busy,
@@ -1049,6 +1129,24 @@ impl App {
                         .text("difference allowed"),
                 )
                 .changed();
+            ui.horizontal(|ui| {
+                ui.label("presets:");
+                ui.spacing_mut().button_padding = PRESET_PADDING;
+                for (name, percent) in matching::PRESETS {
+                    let here = on_preset(self.sensitivity, percent);
+                    // The one the slider is on is drawn as pressed, so the row
+                    // says where the setting is as well as where it can go.
+                    let button = egui::Button::new(name).selected(here);
+                    if ui
+                        .add_enabled(!busy, button)
+                        .on_hover_text(format!("{percent:.0}% difference allowed"))
+                        .clicked()
+                    {
+                        self.sensitivity = percent;
+                        changed = true;
+                    }
+                }
+            });
             ui.add_space(6.0);
             changed |= ui
                 .add_enabled(
@@ -1097,13 +1195,23 @@ impl App {
                     self.cancel_work();
                 }
             });
-            if ui
-                .add_enabled(
-                    !busy && self.db_path.is_some(),
-                    egui::Button::new("Find duplicates").min_size(egui::vec2(178.0, 30.0)),
+            // A button's label sits where the layout puts it, and a row's layout
+            // starts at the left, so the width `min_size` adds all lands on the
+            // right of the text.
+            let wide = egui::vec2(178.0, 30.0);
+            let found = ui
+                .allocate_ui_with_layout(
+                    wide,
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.add_enabled(
+                            !busy && self.db_path.is_some(),
+                            egui::Button::new("Find duplicates").min_size(wide),
+                        )
+                    },
                 )
-                .clicked()
-            {
+                .inner;
+            if found.clicked() {
                 self.load_sets();
             }
         })
@@ -1125,11 +1233,7 @@ impl App {
             // what happened: nothing.
             let bar = |ui: &mut egui::Ui, label: &str, count: u64, out_of: u64| {
                 let fraction = if out_of == 0 { 0.0 } else { count as f32 / out_of as f32 };
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .text(format!("{label} {:.0}%", fraction * 100.0))
-                        .desired_width(width),
-                );
+                progress_bar(ui, label, fraction, width);
             };
             bar(ui, "read", self.scan.done, self.scan.total);
             ui.add_space(4.0);
@@ -1273,7 +1377,7 @@ impl App {
         // Nothing was found, so there is nothing to review. Say so and stay here.
         if sets.is_empty() {
             self.sets.clear();
-            self.scan.finished = Some(String::from("no duplicates found."));
+            self.scan.finished = Some(String::from("No duplicates found for current settings"));
             return;
         }
 
@@ -1658,7 +1762,7 @@ impl App {
                             ui.horizontal_top(|ui| {
                                 for member in &members {
                                     let width = tile_width(member);
-                                    self.member_tile(ui, set_id, member, keeping, root, width);
+                                    self.member_tile(ui, member, keeping, root, width);
                                 }
                             });
                         })
@@ -1667,14 +1771,28 @@ impl App {
 
                 // Over the strip rather than above it. A row of its own to hold
                 // one button is a row of the list nobody can see pictures in.
+                let edge =
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x33, 0x33, 0x33));
                 let at = egui::Rect::from_min_size(
-                    egui::pos2(inside.right() - KEEP_ALL.x, inside.top()),
-                    KEEP_ALL,
+                    egui::pos2(inside.right() - KEEP_BUTTON.x, inside.top()),
+                    KEEP_BUTTON,
                 );
-                let keep_all = egui::Button::new("keep all")
-                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x33, 0x33, 0x33)));
-                if ui.put(at, keep_all).clicked() {
+                if ui.put(at, egui::Button::new("keep all").stroke(edge)).clicked() {
                     self.keep.insert(set_id, Keep::All);
+                }
+
+                // Above the strip's own scroll bar, which has an arrow in the
+                // corner this would otherwise cover.
+                let at = egui::Rect::from_min_size(
+                    egui::pos2(
+                        inside.right() - KEEP_BUTTON.x,
+                        inside.bottom() - SCROLL_BAR - KEEP_BUTTON.y,
+                    ),
+                    KEEP_BUTTON,
+                );
+                if ui.put(at, egui::Button::new("keep none").stroke(edge)).clicked() {
+                    // Nothing marked is nothing kept, so the whole set goes.
+                    self.keep.remove(&set_id);
                 }
             });
         });
@@ -1685,7 +1803,6 @@ impl App {
     fn member_tile(
         &mut self,
         ui: &mut egui::Ui,
-        set_id: i64,
         member: &imgdedupe_core::matching::Member,
         keeping: Option<Keep>,
         root: &std::path::Path,
@@ -1756,22 +1873,16 @@ impl App {
 
                 // Centred on the picture this tile is about. The picture sits in
                 // the middle of the column, so the column's width is its width.
+                // The space is taken either way, so the rows under it line up
+                // across a set whether or not anything is marked.
                 let over_the_picture = egui::vec2(width, ui.spacing().interact_size.y);
                 ui.allocate_ui_with_layout(
                     over_the_picture,
                     egui::Layout::top_down(egui::Align::Center),
                     |ui| {
+                        ui.set_min_size(over_the_picture);
                         if kept {
                             ui.label(egui::RichText::new("KEEP").strong().color(keep_colour));
-                        } else if ui
-                            .add(
-                                egui::Button::new(egui::RichText::new("keep this").weak())
-                                    .small()
-                                    .frame(false),
-                            )
-                            .clicked()
-                        {
-                            self.keep.insert(set_id, Keep::One(member.file_id));
                         }
                     },
                 );
@@ -2270,16 +2381,6 @@ mod tests {
         }
     }
 
-    fn app_with_one_set() -> App {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.sets = vec![DuplicateSet {
-            set_id: 7,
-            members: vec![member(1, "a.jpg", 500), member(2, "b.jpg", 300)],
-        }];
-        app.keep.insert(7, Keep::One(1));
-        app
-    }
-
     /// The date on a tile is the file's own timestamp, turned into a date without
     /// a calendar library, so the arithmetic is what gets checked.
     #[test]
@@ -2306,21 +2407,39 @@ mod tests {
     /// belongs to.
     #[test]
     fn the_space_bar_keeps_the_picture_the_preview_is_showing() {
-        let mut app = app_with_one_set();
-        app.sets.push(DuplicateSet {
-            set_id: 9,
-            members: vec![member(3, "c.jpg", 400), member(4, "d.jpg", 100)],
-        });
-        assert_eq!(app.keep.get(&7), Some(&Keep::One(1)), "the fixture starts keeping the first");
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
 
-        app.selected = Some(2);
-        app.keep_selected();
-        assert_eq!(app.keep.get(&7), Some(&Keep::One(2)), "it did not move the keeper");
+        let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
+        let opened = match app.keep.get(&first) {
+            Some(Keep::One(file_id)) => *file_id,
+            other => panic!("the search gave the first set no keeper: {other:?}"),
+        };
+        let other_in_first = app.sets[0]
+            .members
+            .iter()
+            .map(|member| member.file_id)
+            .find(|file_id| *file_id != opened)
+            .expect("the set holds two pictures");
+        let one_in_second = app.sets[1].members[1].file_id;
 
-        app.selected = Some(4);
+        app.selected = Some(other_in_first);
         app.keep_selected();
-        assert_eq!(app.keep.get(&9), Some(&Keep::One(4)), "the other set was not given a keeper");
-        assert_eq!(app.keep.get(&7), Some(&Keep::One(2)), "it changed a set it was not on");
+        assert_eq!(app.keep.get(&first), Some(&Keep::One(other_in_first)), "the keeper did not move");
+
+        app.selected = Some(one_in_second);
+        app.keep_selected();
+        assert_eq!(
+            app.keep.get(&second),
+            Some(&Keep::One(one_in_second)),
+            "the other set was not given the keeper it was asked for"
+        );
+        assert_eq!(
+            app.keep.get(&first),
+            Some(&Keep::One(other_in_first)),
+            "it changed a set it was not on"
+        );
 
         app.selected = None;
         app.keep_selected();
@@ -2328,64 +2447,114 @@ mod tests {
 
         // Again on the one already kept takes the mark off, and again puts it
         // back, so the key is a toggle rather than a one way door.
-        app.selected = Some(2);
+        app.selected = Some(other_in_first);
         app.keep_selected();
-        assert_eq!(app.keep.get(&7), None, "the mark did not come off");
-        assert_eq!(app.keep.get(&9), Some(&Keep::One(4)), "it changed a set it was not on");
+        assert_eq!(app.keep.get(&first), None, "the mark did not come off");
+        assert_eq!(
+            app.keep.get(&second),
+            Some(&Keep::One(one_in_second)),
+            "it changed a set it was not on"
+        );
         app.keep_selected();
-        assert_eq!(app.keep.get(&7), Some(&Keep::One(2)), "the mark did not go back on");
+        assert_eq!(
+            app.keep.get(&first),
+            Some(&Keep::One(other_in_first)),
+            "the mark did not go back on"
+        );
     }
 
     /// Starting a second pass while one is going means nothing, so everything
     /// that would start one is off while any of the three is running.
     #[test]
     fn nothing_that_starts_work_is_offered_while_work_is_going() {
+        let scanned = folder_with_a_duplicate();
         let mut app = App::from_settings(crate::settings::Settings::default());
         assert!(!app.busy(), "a window that has done nothing is busy");
 
-        let (_send, receive) = std::sync::mpsc::channel();
-        app.searching = Some(receive);
-        assert!(app.busy(), "the search for duplicates does not count as busy");
-        app.searching = None;
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        assert!(app.busy(), "a pass over the folder does not count as busy");
+        settle(&mut app);
+        assert!(!app.busy(), "the window is still busy with a pass that finished");
 
-        let (_send, receive) = std::sync::mpsc::channel();
-        app.removing = Some(receive);
+        app.load_sets();
+        assert!(app.busy(), "the search for duplicates does not count as busy");
+        settle(&mut app);
+
+        app.destination = Destination::Delete;
+        let plan = app.build_plan();
+        app.run_cleanup(&plan);
         assert!(app.busy(), "removing files does not count as busy");
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
+        assert!(!app.busy(), "the window is still busy with a cleanup that finished");
     }
 
     /// A cleanup where nothing could be removed leaves everything as it was, on
     /// the page where another destination can be chosen, and says which files.
     #[test]
     fn a_cleanup_that_removed_nothing_stays_put_and_names_the_files() {
-        let mut app = app_with_one_set();
-        app.view = View::Cleanup;
+        let scanned = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        let keeping = app.keep.clone();
 
-        app.finish_cleanup(&cleanup::Outcome {
-            removed: Vec::new(),
-            failed: vec![("b.jpg".to_string(), "no recycle bin here".to_string())],
-            bytes_freed: 0,
-        }, 0);
+        // The file the plan is about is taken away before the cleanup runs, so
+        // the removal fails the way a locked or missing file does.
+        app.destination = Destination::Delete;
+        let plan = app.build_plan();
+        let going = plan.removals[0].rel_path.clone();
+        std::fs::remove_file(scanned.path().join(&going)).expect("take the file away");
+
+        app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
 
         assert_eq!(app.view, View::Cleanup, "it left the page with the destinations on it");
         assert_eq!(app.sets.len(), 1, "the sets went even though the files did not");
-        assert_eq!(app.keep.get(&7), Some(&Keep::One(1)), "the keeper was thrown away");
+        assert_eq!(app.keep, keeping, "the keeper was thrown away");
         assert_eq!(app.cleanup_failures.len(), 1);
-        assert_eq!(app.cleanup_failures[0].0, "b.jpg");
+        assert_eq!(app.cleanup_failures[0].0, going);
     }
 
     /// A cleanup that removed everything is over: the sets are gone and so is the
     /// page for them.
     #[test]
     fn a_cleanup_that_removed_everything_leaves_the_page() {
-        let mut app = app_with_one_set();
+        let scanned = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the two copies were not found");
+
+        // Delete outright, so the test does not depend on a recycle bin.
+        app.destination = Destination::Delete;
+        let plan = app.build_plan();
+        assert_eq!(plan.files(), 1, "the plan is not the copy the set does not keep");
+        let going = plan.removals[0].rel_path.clone();
         app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
 
-        app.finish_cleanup(&cleanup::Outcome {
-            removed: vec!["b.jpg".to_string()],
-            failed: Vec::new(),
-            bytes_freed: 300,
-        }, 1);
-
+        assert!(!scanned.path().join(&going).exists(), "{going} is still on disk");
         assert_eq!(app.view, View::Scan);
         assert!(app.sets.is_empty());
         assert!(app.cleanup_failures.is_empty());
@@ -2395,21 +2564,47 @@ mod tests {
     /// stays on screen to be tried another way.
     #[test]
     fn a_cleanup_that_half_worked_keeps_what_is_still_there() {
-        let mut app = app_with_one_set();
-        app.sets[0].members.push(member(3, "c.jpg", 200));
-        app.view = View::Cleanup;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let picture = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([((x * 3) % 256) as u8, ((y * 5) % 256) as u8, 40])
+        }));
+        for name in ["one.png", "two.png", "three.png"] {
+            picture
+                .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+                .expect("a fixture");
+        }
 
-        app.finish_cleanup(&cleanup::Outcome {
-            removed: vec!["b.jpg".to_string()],
-            failed: vec![("c.jpg".to_string(), "no recycle bin here".to_string())],
-            bytes_freed: 300,
-        }, 1);
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(dir.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        assert_eq!(app.sets[0].members.len(), 3, "the three copies were not one set");
+
+        // One of the two the plan would remove is taken away first, so that one
+        // fails and the other goes.
+        app.destination = Destination::Delete;
+        let plan = app.build_plan();
+        assert_eq!(plan.files(), 2);
+        let fails = plan.removals[0].rel_path.clone();
+        let goes = plan.removals[1].rel_path.clone();
+        std::fs::remove_file(dir.path().join(&fails)).expect("take the file away");
+
+        app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
 
         assert_eq!(app.view, View::Cleanup);
         assert_eq!(app.sets.len(), 1, "the set lost more than the file that went");
         let left: Vec<&str> =
             app.sets[0].members.iter().map(|member| member.rel_path.as_str()).collect();
-        assert_eq!(left, vec!["a.jpg", "c.jpg"], "the file that went is still listed");
+        assert!(!left.contains(&goes.as_str()), "the file that went is still listed");
+        assert!(left.contains(&fails.as_str()), "the file that would not go was dropped");
         assert_eq!(app.cleanup_failures.len(), 1);
     }
 
@@ -2417,60 +2612,80 @@ mod tests {
     /// a new search sits under the word "cancelled" from the one before it.
     #[test]
     fn starting_a_pass_clears_what_the_last_one_ended_with() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("index.sqlite");
-        imgdedupe_core::db::open(&db_path).expect("an index");
-
+        let scanned = folder_with_a_duplicate();
         let mut app = App::from_settings(crate::settings::Settings::default());
-        app.folder = Some(dir.path().to_path_buf());
-        app.db_path = Some(db_path);
+        app.open_folder(scanned.path().to_path_buf());
+
+        // A finished pass and search leave their outcome on screen.
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        app.cancel_work();
         app.scan.finished = Some(String::from("cancelled"));
-        app.error = Some(String::from("something went wrong before"));
 
         app.load_sets();
         assert_eq!(app.scan.finished, None, "the search kept the last outcome on screen");
         assert_eq!(app.error, None, "the search kept the last error on screen");
+        settle(&mut app);
 
-        // And an indexing pass clears it too.
-        app.scan.finished = Some(String::from("cancelled"));
         app.start_scan();
         assert_eq!(app.scan.finished, None, "the scan kept the last outcome on screen");
+        settle(&mut app);
     }
 
     /// A search that finds nothing leaves the window where it is. There is
     /// nothing to review, and the Review tab stays shut.
     #[test]
     fn finding_no_duplicates_does_not_open_the_review() {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.view = View::Scan;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let picture = |seed: u32| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 7 + seed) % 256) as u8, ((y * 11 + seed) % 256) as u8, 20])
+            }))
+        };
+        for (name, seed) in [("a.png", 0), ("b.png", 128)] {
+            picture(seed)
+                .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+                .expect("a fixture");
+        }
 
-        app.accept_sets(Vec::new());
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(dir.path().to_path_buf());
+        app.sensitivity = 0.5;
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
 
         assert_eq!(app.view, View::Scan, "it went to the review with nothing in it");
         assert!(!app.have_sets(), "the tabs would be open on an empty list");
         assert_eq!(app.selected, None);
-        assert_eq!(app.scan.finished.as_deref(), Some("no duplicates found."));
+        assert_eq!(
+            app.scan.finished.as_deref(),
+            Some("No duplicates found for current settings")
+        );
     }
 
     /// The preview pane opens on the keeper of the first set, so the review view
     /// starts on a picture rather than on an empty pane.
     #[test]
     fn the_first_sets_keeper_is_what_the_preview_starts_on() {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.sets = vec![
-            DuplicateSet { set_id: 7, members: vec![member(1, "a.jpg", 500)] },
-            DuplicateSet { set_id: 9, members: vec![member(3, "c.jpg", 400)] },
-        ];
-        app.keep.insert(7, Keep::One(1));
-        app.keep.insert(9, Keep::One(3));
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
 
-        app.preselect_first_keeper();
-        assert_eq!(app.selected, Some(1));
+        let keeper = match app.keep.get(&app.sets[0].set_id) {
+            Some(Keep::One(file_id)) => *file_id,
+            other => panic!("the first set was not given a keeper: {other:?}"),
+        };
+        assert_eq!(app.selected, Some(keeper), "the preview did not open on the keeper");
 
         // With no keeper there is still a picture to show: the first one.
-        app.keep.remove(&7);
+        let first = app.sets[0].members[0].file_id;
+        app.keep.remove(&app.sets[0].set_id);
         app.preselect_first_keeper();
-        assert_eq!(app.selected, Some(1), "a first set with no keeper showed nothing");
+        assert_eq!(app.selected, Some(first), "a first set with no keeper showed nothing");
 
         app.sets.clear();
         app.preselect_first_keeper();
@@ -2524,28 +2739,33 @@ mod tests {
     /// not a place in the list.
     #[test]
     fn walking_moves_the_preview_to_the_next_picture() {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.sets = vec![
-            DuplicateSet {
-                set_id: 7,
-                members: vec![member(1, "a.jpg", 500), member(2, "b.jpg", 300)],
-            },
-            DuplicateSet { set_id: 9, members: vec![member(3, "c.jpg", 400)] },
-        ];
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
+        let ids: Vec<Vec<i64>> = app
+            .sets
+            .iter()
+            .map(|set| set.members.iter().map(|member| member.file_id).collect())
+            .collect();
         let visible = vec![0, 1];
 
-        app.selected = Some(1);
+        app.selected = Some(ids[0][0]);
         app.walk(&visible, Direction::Forward);
-        assert_eq!(app.selected, Some(2));
+        assert_eq!(app.selected, Some(ids[0][1]));
 
         app.walk(&visible, Direction::Forward);
-        assert_eq!(app.selected, Some(3), "the end of a set did not cross into the next");
+        assert_eq!(
+            app.selected,
+            Some(ids[1][0]),
+            "the end of a set did not cross into the next"
+        );
 
         app.walk(&visible, Direction::Forward);
-        assert_eq!(app.selected, Some(3), "the end of the list moved somewhere");
+        app.walk(&visible, Direction::Forward);
+        assert_eq!(app.selected, Some(ids[1][1]), "the end of the list moved somewhere");
 
         app.walk(&visible, Direction::PreviousSet);
-        assert_eq!(app.selected, Some(1));
+        assert_eq!(app.selected, Some(ids[0][1]));
 
         app.selected = None;
         app.walk(&visible, Direction::Forward);
@@ -2557,37 +2777,33 @@ mod tests {
     /// goes, with the write-ahead log beside it.
     #[test]
     fn a_folder_that_is_not_remembered_loses_its_index_when_the_cleanup_is_done() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("index.sqlite");
-        let conn = db::open(&db_path).expect("an index");
-        conn.execute(
-            "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
-             VALUES ('a.jpg', 1, 1, 1)",
-            [],
-        )
-        .expect("insert");
-        drop(conn);
-        assert!(db_path.is_file());
+        let scanned = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(scanned.path());
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        assert!(db_path.is_file(), "the pass wrote no index");
+        assert!(!app.remember_folder, "a fresh folder is not remembered");
 
-        discard_index(Some(&db_path));
+        app.destination = Destination::Delete;
+        let plan = app.build_plan();
+        app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
+
         assert!(!db_path.exists(), "the index was left behind");
         assert!(!with_suffix(&db_path, "-wal").exists());
         assert!(!with_suffix(&db_path, "-shm").exists());
 
-        // And the window goes back to the scan with nothing on it, so the only
-        // way on is another folder or another scan.
-        let mut app = app_with_one_set();
-        app.remember_folder = false;
-        app.view = View::Cleanup;
-        app.scan.total = 900;
-        app.finish_cleanup(
-            &cleanup::Outcome {
-                removed: vec!["b.jpg".to_string()],
-                failed: Vec::new(),
-                bytes_freed: 0,
-            },
-            0,
-        );
+        // And the window is back on the scan with nothing on it, so the only way
+        // on is another folder or another scan.
         assert_eq!(app.view, View::Scan);
         assert!(app.sets.is_empty());
         assert_eq!(app.scan.total, 0, "the last scan's numbers are still on screen");
@@ -2599,37 +2815,32 @@ mod tests {
     /// window stops painting at exactly the moment the cleanup looks finished.
     #[test]
     fn taking_the_outcome_does_not_touch_the_index() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("index.sqlite");
-        let conn = db::open(&db_path).expect("an index");
-        for path in ["a.jpg", "b.jpg"] {
-            conn.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
-                 VALUES (?1, 1, 1, 1)",
-                [path],
-            )
-            .expect("insert");
-        }
-        drop(conn);
-
-        let dropped = forget_rows(Some(&db_path), &[String::from("b.jpg")]);
-        assert_eq!(dropped, 1, "the removed file is still in the index");
-
-        // And the frame only reports what it was given. No index is open here, so
-        // if it went looking for one it would say nothing was dropped.
-        let mut app = app_with_one_set();
-        app.db_path = None;
+        let scanned = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(scanned.path());
+        let mut app = reviewing(scanned.path());
+        // Kept, so the cleanup drops the rows rather than deleting the index.
         app.remember_folder = true;
+        app.destination = Destination::Delete;
+        let plan = app.build_plan();
+        let going = plan.removals[0].rel_path.clone();
+
         app.view = View::Cleanup;
-        app.finish_cleanup(
-            &cleanup::Outcome {
-                removed: vec!["b.jpg".to_string()],
-                failed: Vec::new(),
-                bytes_freed: 300,
-            },
-            dropped,
-        );
-        let said = app.cleanup_result.expect("a result");
+        app.run_cleanup(&plan);
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
+
+        let conn = db::open_read_only(&db_path).expect("the index");
+        let left: i64 = conn
+            .query_row("SELECT count(*) FROM files WHERE rel_path = ?1", [&going], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(left, 0, "the removed file is still in the index");
+
+        let said = app.cleanup_result.clone().expect("a result");
         assert!(said.contains("1 dropped from the index"), "{said}");
     }
 
@@ -2638,17 +2849,33 @@ mod tests {
     /// two kinds has found nothing, however many times it reads them.
     #[test]
     fn what_was_skipped_and_what_broke_are_not_counted_as_found() {
-        let mut scan = ScanState { done: 13, ignored: 13, ..ScanState::default() };
-        assert_eq!(scan.found(), 0, "files that are not pictures were counted as found");
+        // A folder of pictures, one of which is not a picture at all, read twice:
+        // the first pass finds them, the second finds nothing new.
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["a.png", "b.png"] {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(48, 32, |x, y| {
+                image::Rgb([((x * 3) % 256) as u8, ((y * 5) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
+        std::fs::write(dir.path().join("notes.txt"), b"not a picture").expect("a fixture");
+        std::fs::write(dir.path().join("broken.png"), b"\x89PNG\r\n\x1a\ncut").expect("a fixture");
 
-        scan = ScanState { done: 20, ignored: 5, ..ScanState::default() };
-        scan.failures.push(("broken.jpg".to_string(), "truncated".to_string()));
-        assert_eq!(scan.found(), 14);
-        assert_eq!(scan.failures.len(), 1, "the failure is its own number");
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(dir.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
 
-        // A report that arrives before the failures do cannot go negative.
-        scan = ScanState { done: 0, ignored: 3, ..ScanState::default() };
-        assert_eq!(scan.found(), 0);
+        assert_eq!(app.scan.done, 4, "the pass did not look at every file");
+        assert_eq!(app.scan.ignored, 1, "the file that is not a picture was not counted");
+        assert_eq!(app.scan.failures.len(), 1, "the broken file is its own number");
+        assert_eq!(app.scan.found(), 2, "found is the pictures, not the files");
+
+        app.start_scan();
+        settle(&mut app);
+        assert_eq!(app.scan.unchanged, 2, "the two pictures were read again");
+        assert_eq!(app.scan.found(), 0, "a pass with nothing new found something");
     }
 
     /// A set's tiles are as wide as that set's own widest picture. Nothing about
@@ -2688,23 +2915,42 @@ mod tests {
     /// marks, so it moves as the marks do.
     #[test]
     fn the_selected_tally_is_every_picture_that_is_not_kept() {
-        let mut app = app_with_one_set();
-        app.sets.push(DuplicateSet {
-            set_id: 9,
-            members: vec![member(3, "c.jpg", 400), member(4, "d.jpg", 100)],
-        });
-        app.keep.insert(9, Keep::One(3));
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
+        let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
+        let bytes_of = |app: &App, set: usize, keeper: i64| -> i64 {
+            app.sets[set]
+                .members
+                .iter()
+                .filter(|member| member.file_id != keeper)
+                .map(|member| member.size_bytes)
+                .sum()
+        };
+        let keeper = |app: &App, set_id: i64| match app.keep.get(&set_id) {
+            Some(Keep::One(file_id)) => *file_id,
+            other => panic!("no keeper for {set_id}: {other:?}"),
+        };
 
-        // Four pictures, two kept.
-        assert_eq!(app.selected_for_removal(), (2, 300 + 100));
+        // Four pictures, one kept in each set.
+        let (going, bytes) = app.selected_for_removal();
+        assert_eq!(going, 2);
+        assert_eq!(
+            bytes,
+            bytes_of(&app, 0, keeper(&app, first)) + bytes_of(&app, 1, keeper(&app, second))
+        );
 
         // Keeping all of one set takes its picture out of the tally.
-        app.keep.insert(9, Keep::All);
-        assert_eq!(app.selected_for_removal(), (1, 300));
+        app.keep.insert(second, Keep::All);
+        let (going, bytes) = app.selected_for_removal();
+        assert_eq!(going, 1);
+        assert_eq!(bytes, bytes_of(&app, 0, keeper(&app, first)));
 
         // Keeping nothing in the other puts both of its pictures in.
-        app.keep.remove(&7);
-        assert_eq!(app.selected_for_removal(), (2, 500 + 300));
+        app.keep.remove(&first);
+        let (going, bytes) = app.selected_for_removal();
+        assert_eq!(going, 2);
+        assert_eq!(bytes, bytes_of(&app, 0, -1), "both pictures should be counted");
 
         // And it is the same count the plan carries out.
         assert_eq!(app.build_plan().files(), 2);
@@ -2716,37 +2962,54 @@ mod tests {
     fn the_duplicate_count_is_every_picture_but_the_one_each_set_keeps() {
         assert_eq!(duplicate_count(&[]), 0);
 
-        let sets = vec![
-            DuplicateSet {
-                set_id: 7,
-                members: vec![member(1, "a.jpg", 500), member(2, "b.jpg", 300)],
-            },
-            DuplicateSet {
-                set_id: 8,
-                members: vec![
-                    member(3, "c.jpg", 500),
-                    member(4, "d.jpg", 300),
-                    member(5, "e.jpg", 300),
-                ],
-            },
-        ];
-        assert_eq!(duplicate_count(&sets), 3, "five pictures in two sets is three copies");
+        // Five pictures in two sets: a pair and a triple.
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (name, seed) in [
+            ("a1.png", 0),
+            ("a2.png", 0),
+            ("b1.png", 120),
+            ("b2.png", 120),
+            ("b3.png", 120),
+        ] {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 3 + seed) % 256) as u8, ((y * 5 + seed) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
+
+        let app = reviewing(dir.path());
+        assert_eq!(app.sets.len(), 2, "the pair and the triple were not two sets");
+        assert_eq!(
+            duplicate_count(&app.sets),
+            3,
+            "five pictures in two sets is three copies"
+        );
     }
 
     /// The keys follow what is on screen. A set that is not in the list the walk
     /// was given is not somewhere the preview can go.
     #[test]
     fn walking_only_visits_the_sets_it_was_given() {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.sets = vec![
-            DuplicateSet { set_id: 7, members: vec![member(1, "a.jpg", 500)] },
-            DuplicateSet { set_id: 8, members: vec![member(2, "b.jpg", 300)] },
-            DuplicateSet { set_id: 9, members: vec![member(3, "c.jpg", 400)] },
-        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (name, seed) in
+            [("a1.png", 0), ("a2.png", 0), ("b1.png", 90), ("b2.png", 90), ("c1.png", 180), ("c2.png", 180)]
+        {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 3 + seed) % 256) as u8, ((y * 5 + seed) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
 
-        app.selected = Some(1);
+        let mut app = reviewing(dir.path());
+        assert_eq!(app.sets.len(), 3, "the three pairs were not three sets");
+        let last_of_first = app.sets[0].members[1].file_id;
+        let first_of_third = app.sets[2].members[0].file_id;
+
+        app.selected = Some(last_of_first);
         app.walk(&[0, 2], Direction::Forward);
-        assert_eq!(app.selected, Some(3));
+        assert_eq!(app.selected, Some(first_of_third), "the walk went into a hidden set");
     }
 
     /// A row the cursor keys reached must be brought into sight, and one already
@@ -2785,17 +3048,19 @@ mod tests {
 
     #[test]
     fn walking_asks_for_the_row_it_moved_to_to_be_shown() {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.sets = vec![
-            DuplicateSet { set_id: 7, members: vec![member(1, "a.jpg", 500)] },
-            DuplicateSet { set_id: 9, members: vec![member(2, "b.jpg", 400)] },
-        ];
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
         let visible = vec![0, 1];
 
-        app.selected = Some(1);
+        // From the last picture of the first set into the second set.
+        app.selected = Some(app.sets[0].members[1].file_id);
+        app.scroll_to = None;
         app.walk(&visible, Direction::Forward);
         assert_eq!(app.scroll_to, Some(1));
 
+        // And from the last picture of the list, which has nowhere to go.
+        app.selected = Some(app.sets[1].members[1].file_id);
         app.scroll_to = None;
         app.walk(&visible, Direction::Forward);
         assert_eq!(app.scroll_to, None, "the end of the list asked for a scroll");
@@ -2808,11 +3073,10 @@ mod tests {
     #[test]
     fn a_set_row_takes_exactly_the_height_the_list_places_it_at() {
         let ctx = egui::Context::default();
-        let mut app = app_with_one_set();
-        app.sets.push(DuplicateSet {
-            set_id: 8,
-            members: (10..16).map(|id| member(id, "wide.jpg", 100)).collect(),
-        });
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
 
         let mut taken = Vec::new();
         let _ = ctx.run(Default::default(), |ctx| {
@@ -2820,7 +3084,7 @@ mod tests {
                 for index in 0..app.sets.len() {
                     let placed = set_row_height(ui);
                     let before = ui.next_widget_position().y;
-                    app.set_row(ui, index, std::path::Path::new("."));
+                    app.set_row(ui, index, &root);
                     let spacing = ui.spacing().item_spacing.y;
                     taken.push((ui.next_widget_position().y - before - spacing, placed));
                 }
@@ -2839,22 +3103,24 @@ mod tests {
     /// lives in that folder's index and not in the application's settings.
     #[test]
     fn the_cleanup_choice_is_kept_with_the_folders_index() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("index.sqlite");
-        imgdedupe_core::db::open(&db_path).expect("an index");
-
+        // A folder the window scanned, with a destination chosen for it.
+        let scanned = folder_with_a_duplicate();
+        let held = tempfile::tempdir().expect("tempdir");
         let mut app = App::from_settings(crate::settings::Settings::default());
-        app.db_path = Some(db_path.clone());
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
         app.destination = Destination::MoveTo;
-        app.move_dir = String::from("D:\\held");
+        app.move_dir = held.path().display().to_string();
         app.remember_disposal();
 
+        // Opened again from nothing, as the next run of the window would.
         let mut opened = App::from_settings(crate::settings::Settings::default());
-        opened.db_path = Some(db_path);
         assert_eq!(opened.destination, Destination::Trash, "the test started from the default");
-        opened.load_disposal();
+        opened.open_folder(scanned.path().to_path_buf());
+        settle(&mut opened);
         assert_eq!(opened.destination, Destination::MoveTo);
-        assert_eq!(opened.move_dir, "D:\\held");
+        assert_eq!(opened.move_dir, held.path().display().to_string());
     }
 
     /// How far down the folder an index reaches is a fact about the index, not a
@@ -2862,36 +3128,54 @@ mod tests {
     /// subfolder as vanished on the next pass.
     #[test]
     fn an_index_built_over_the_subfolders_opens_with_the_box_ticked() {
+        // A folder with a picture in a subfolder, scanned with the box ticked.
         let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("index.sqlite");
-        let conn = imgdedupe_core::db::open(&db_path).expect("an index");
-        imgdedupe_core::db::set_meta(&conn, "recurse", "1").expect("write");
-        drop(conn);
+        std::fs::create_dir(dir.path().join("under")).expect("mkdir");
+        for name in ["top.png", "under/deep.png"] {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(48, 32, |x, y| {
+                image::Rgb([((x * 3) % 256) as u8, ((y * 5) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
 
         let mut app = App::from_settings(crate::settings::Settings::default());
         assert!(!app.recurse, "the window starts on the folder itself");
-        app.db_path = Some(db_path.clone());
-        app.load_disposal();
-        assert!(app.recurse, "the index reaches into the subfolders and the box does not");
+        app.open_folder(dir.path().to_path_buf());
+        app.recurse = true;
+        app.start_scan();
+        settle(&mut app);
+        assert_eq!(app.scan.done, 2, "the pass did not go into the subfolder");
 
-        let conn = imgdedupe_core::db::open(&db_path).expect("an index");
-        imgdedupe_core::db::set_meta(&conn, "recurse", "0").expect("write");
-        drop(conn);
-        app.load_disposal();
-        assert!(!app.recurse, "the index is the folder itself and the box says otherwise");
+        // Opened again from nothing, as the next run of the window would.
+        let mut opened = App::from_settings(crate::settings::Settings::default());
+        opened.open_folder(dir.path().to_path_buf());
+        settle(&mut opened);
+        assert!(opened.recurse, "the index reaches into the subfolders and the box does not");
+
+        // And a pass over the folder alone puts the box back down.
+        opened.recurse = false;
+        opened.start_scan();
+        settle(&mut opened);
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(dir.path().to_path_buf());
+        settle(&mut again);
+        assert!(!again.recurse, "the index is the folder itself and the box says otherwise");
     }
 
     #[test]
     fn an_index_that_has_never_been_cleaned_up_keeps_the_safe_default() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = dir.path().join("index.sqlite");
-        imgdedupe_core::db::open(&db_path).expect("an index");
-
+        let scanned = folder_with_a_duplicate();
         let mut app = App::from_settings(crate::settings::Settings::default());
-        app.db_path = Some(db_path);
-        app.load_disposal();
-        assert_eq!(app.destination, Destination::Trash);
-        assert_eq!(app.move_dir, "");
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+
+        let mut opened = App::from_settings(crate::settings::Settings::default());
+        opened.open_folder(scanned.path().to_path_buf());
+        settle(&mut opened);
+        assert_eq!(opened.destination, Destination::Trash);
+        assert_eq!(opened.move_dir, "");
     }
 
     /// Moving files to a folder is not removing them, and the button that does it
@@ -3301,51 +3585,268 @@ mod tests {
     /// so a set that was never touched is still cleaned up.
     #[test]
     fn a_set_removes_everything_but_the_kept_file() {
-        let app = app_with_one_set();
+        let found = folder_with_a_duplicate();
+        let app = reviewing(found.path());
+        let kept = match app.keep.get(&app.sets[0].set_id) {
+            Some(Keep::One(file_id)) => *file_id,
+            other => panic!("the search gave the set no keeper: {other:?}"),
+        };
         let plan = app.build_plan();
+
         assert_eq!(plan.files(), 1);
-        assert_eq!(plan.removals[0].rel_path, "b.jpg");
-        assert_eq!(plan.bytes(), 300);
+        let staying = app.sets[0]
+            .members
+            .iter()
+            .find(|member| member.file_id == kept)
+            .expect("the keeper is in the set");
+        assert_ne!(plan.removals[0].rel_path, staying.rel_path, "the keeper is in the plan");
+        assert_eq!(plan.bytes(), plan.removals[0].size_bytes);
     }
 
     #[test]
     fn moving_the_keep_mark_moves_what_gets_removed() {
-        let mut app = app_with_one_set();
-        app.keep.insert(7, Keep::One(2));
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let was_going = app.build_plan().removals[0].rel_path.clone();
+        let moving_to = app.sets[0]
+            .members
+            .iter()
+            .find(|member| member.rel_path == was_going)
+            .expect("the plan removes a picture in the set")
+            .file_id;
+
+        app.selected = Some(moving_to);
+        app.keep_selected();
+
         let plan = app.build_plan();
-        assert_eq!(plan.removals[0].rel_path, "a.jpg");
+        assert_eq!(plan.files(), 1);
+        assert_ne!(plan.removals[0].rel_path, was_going, "the keeper did not move");
     }
 
     #[test]
     fn keeping_everything_in_a_set_removes_nothing_from_it() {
-        let mut app = app_with_one_set();
-        app.keep.insert(7, Keep::All);
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        app.keep.insert(app.sets[0].set_id, Keep::All);
         assert_eq!(app.build_plan().files(), 0, "a set keeping all of it produced removals");
+    }
+
+    /// Everywhere a label was drawn, so a test can press a button or measure a
+    /// row without working the layout out a second time here.
+    fn label_rects(shapes: &[egui::epaint::ClippedShape], label: &str) -> Vec<egui::Rect> {
+        fn walk(shape: &egui::Shape, label: &str, found: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    found.push(text.galley.rect.translate(text.pos.to_vec2()));
+                }
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, label, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, label, &mut found);
+        }
+        found
+    }
+
+    fn label_rect(shapes: &[egui::epaint::ClippedShape], label: &str) -> Option<egui::Rect> {
+        label_rects(shapes, label).into_iter().next()
+    }
+
+    /// A set drawn from a really scanned folder, with one picture marked to keep
+    /// and one not. Only the marked one says anything, and the space is taken
+    /// either way, so the facts under the pictures stay on one line across the
+    /// set.
+    #[test]
+    fn only_the_picture_being_kept_is_labelled_and_the_others_keep_the_space() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let members = &app.sets[0].members;
+        assert_eq!(members.len(), 2, "the two copies were not found");
+        let size = format!("{}x{}", members[0].width, members[0].height);
+        assert_eq!(
+            size,
+            format!("{}x{}", members[1].width, members[1].height),
+            "the fixture pictures are not the same shape"
+        );
+        assert!(
+            app.keep.get(&app.sets[0].set_id).is_some(),
+            "the search marked nothing to keep"
+        );
+
+        let root = found.path().to_path_buf();
+        let ctx = egui::Context::default();
+        let shapes = ctx
+            .run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(900.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                },
+            )
+            .shapes;
+
+        assert_eq!(
+            label_rects(&shapes, "KEEP").len(),
+            1,
+            "the one picture being kept is not the only one saying so"
+        );
+        assert!(
+            label_rects(&shapes, "keep this").is_empty(),
+            "a picture that is not being kept was labelled anyway"
+        );
+
+        let sizes = label_rects(&shapes, &size);
+        assert_eq!(sizes.len(), 2, "both pictures should say what shape they are");
+        assert!(
+            (sizes[0].top() - sizes[1].top()).abs() < 0.5,
+            "the unmarked picture pulled its text up: {:?} against {:?}",
+            sizes[0],
+            sizes[1]
+        );
+    }
+
+    /// The two buttons on a set really pressed, in a really scanned folder. Keep
+    /// none takes every picture of the set into the plan, and keep all takes
+    /// them all back out.
+    #[test]
+    fn the_buttons_on_a_set_decide_all_of_it_or_none_of_it() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 1, "the two copies were not found");
+        assert_eq!(app.build_plan().files(), 1, "the search kept nothing to start from");
+
+        let root = found.path().to_path_buf();
+        let ctx = egui::Context::default();
+        let screen =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let frame = |app: &mut App, at: Option<egui::Pos2>, pressed: Option<bool>| {
+            let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            if let Some(pos) = at {
+                input.events.push(egui::Event::PointerMoved(pos));
+                if let Some(pressed) = pressed {
+                    input.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+            })
+            .shapes
+        };
+
+        // The pointer has to have been over a widget on an earlier frame before
+        // egui reports a click on it, so each press takes three.
+        let drawn = frame(&mut app, None, None);
+        let none_at = label_rect(&drawn, "keep none")
+            .expect("no keep none button was drawn on the set")
+            .center();
+        let all_at = label_rect(&drawn, "keep all")
+            .expect("no keep all button was drawn on the set")
+            .center();
+
+        frame(&mut app, Some(none_at), None);
+        frame(&mut app, Some(none_at), Some(true));
+        frame(&mut app, Some(none_at), Some(false));
+        assert_eq!(app.build_plan().files(), 2, "keep none left a picture behind");
+
+        frame(&mut app, Some(all_at), None);
+        frame(&mut app, Some(all_at), Some(true));
+        frame(&mut app, Some(all_at), Some(false));
+        assert_eq!(app.build_plan().files(), 0, "keep all still gave the set up");
     }
 
     /// What is marked is kept and everything else goes, so a set with the mark
     /// taken off loses every picture in it.
     #[test]
     fn a_set_keeping_nothing_loses_all_of_it() {
-        let mut app = app_with_one_set();
-        app.keep.remove(&7);
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        // The space bar on the picture already kept takes the mark off.
+        app.selected = match app.keep.get(&app.sets[0].set_id) {
+            Some(Keep::One(file_id)) => Some(*file_id),
+            other => panic!("the search gave the set no keeper: {other:?}"),
+        };
+        app.keep_selected();
+
         let plan = app.build_plan();
         assert_eq!(plan.files(), 2, "a set that keeps nothing kept something anyway");
-        let going: Vec<&str> =
+        let mut going: Vec<&str> =
             plan.removals.iter().map(|removal| removal.rel_path.as_str()).collect();
-        assert_eq!(going, vec!["a.jpg", "b.jpg"]);
+        going.sort();
+        let mut all: Vec<&str> =
+            app.sets[0].members.iter().map(|member| member.rel_path.as_str()).collect();
+        all.sort();
+        assert_eq!(going, all);
     }
 
     #[test]
     fn the_review_state_is_not_written_to_the_index() {
-        // The marks live on the app and the plan is built from them alone, which
-        // is what makes a review session something the database never hears about.
-        let mut app = app_with_one_set();
-        app.db_path = None;
+        // The marks live on the window and the plan is built from them alone,
+        // which is what makes a review something the index never hears about.
+        let found = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(found.path());
+        let mut app = reviewing(found.path());
+        let before = std::fs::metadata(&db_path).expect("the index").len();
 
+        let moving_to = app.sets[0].members[1].file_id;
+        app.selected = Some(moving_to);
+        app.keep_selected();
         let plan = app.build_plan();
-        assert_eq!(plan.files(), 1, "the plan needed a database to be built");
+
+        assert_eq!(plan.files(), 1);
         assert_eq!(app.keep.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&db_path).expect("the index").len(),
+            before,
+            "reviewing wrote to the index"
+        );
+        let conn = db::open_read_only(&db_path).expect("the index");
+        let rows: i64 =
+            conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
+        assert_eq!(rows, 3, "reviewing changed what the index holds");
+    }
+
+    /// A real pass at the top of the scale, and then the window closed and
+    /// opened again from what it wrote down. The folder comes back, the slider
+    /// does not: what counts as a duplicate is decided against the pictures on
+    /// screen and never carried over from a run that is over.
+    #[test]
+    fn the_setting_for_what_counts_as_a_duplicate_is_not_kept_across_a_restart() {
+        let folder = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(folder.path().to_path_buf());
+        app.remember_folder = true;
+        app.sensitivity = matching::MAX_SENSITIVITY;
+        app.ignore_colour = true;
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        assert!(!app.sets.is_empty(), "the pass found nothing to review");
+
+        let next = App::from_settings(app.settings());
+        assert_eq!(
+            next.sensitivity,
+            matching::DEFAULT_SENSITIVITY,
+            "the last run's sensitivity came back"
+        );
+        assert_eq!(next.folder, app.folder, "the folder was not remembered");
+        assert!(next.ignore_colour, "the colour setting was not remembered");
     }
 
     #[test]
@@ -3354,7 +3855,6 @@ mod tests {
             folder: Some(PathBuf::from("/photos")),
             remember_folder: true,
             recurse: false,
-            sensitivity: 7.5,
             ignore_colour: true,
             window: Some(crate::settings::Window {
                 x: 40.0,
@@ -3370,7 +3870,6 @@ mod tests {
         assert_eq!(app.preview_width, Some(520.0), "the divider was not restored");
         assert_eq!(app.folder, Some(PathBuf::from("/photos")));
         assert!(!app.recurse, "the subfolder setting was not restored");
-        assert_eq!(app.sensitivity, 7.5, "the sensitivity was not restored");
         assert!(app.ignore_colour, "the colour setting was not restored");
         assert!(app.db_path.is_some(), "the index path was not derived");
     }
@@ -3390,7 +3889,13 @@ mod tests {
         let app = App::from_settings(settings(&folder));
         assert!(!app.scan_on_open, "there is no index to bring up to date");
 
-        std::fs::write(headless::default_db_path(&folder), b"").expect("index");
+        // An index the application itself built, by scanning the folder.
+        let mut built = App::from_settings(crate::settings::Settings::default());
+        built.open_folder(folder.clone());
+        built.start_scan();
+        settle(&mut built);
+        assert!(headless::default_db_path(&folder).is_file(), "the pass wrote no index");
+
         let app = App::from_settings(settings(&folder));
         assert!(app.scan_on_open, "the index was there and was left alone");
 
@@ -3409,56 +3914,193 @@ mod tests {
     /// remembered comes to.
     #[test]
     fn a_location_is_only_remembered_while_it_is_asked_for() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut app = app_with_one_set();
+        // A folder the application scanned, so it holds an index it built.
+        let indexed = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(indexed.path().to_path_buf());
         app.remember_folder = true;
         app.recurse = true;
+        app.start_scan();
+        settle(&mut app);
 
-        app.open_folder(dir.path().to_path_buf());
+        let fresh = tempfile::tempdir().expect("tempdir");
+        app.open_folder(fresh.path().to_path_buf());
         assert!(!app.remember_folder, "the last folder's choice was carried over");
         assert!(!app.recurse, "the last folder's subfolder setting was carried over");
 
         app.remember_folder = true;
-        app.open_folder(dir.path().to_path_buf());
+        app.open_folder(fresh.path().to_path_buf());
         assert!(app.remember_folder, "opening the same folder cleared the choice");
 
-        let indexed = tempfile::tempdir().expect("tempdir");
-        std::fs::write(headless::default_db_path(indexed.path()), b"").expect("index");
         app.remember_folder = false;
         app.open_folder(indexed.path().to_path_buf());
+        settle(&mut app);
         assert!(
             app.remember_folder,
             "a folder that already holds an index is a folder being remembered"
         );
     }
 
-    /// Picking a folder drops whatever was on screen, which belonged to the
-    /// folder before it. A folder with an index is brought up to date on sight;
-    /// one without waits for the button.
-    #[test]
-    fn picking_a_folder_drops_what_the_last_one_found_and_only_scans_a_known_one() {
+    /// A folder holding two pairs, so a real pass finds two sets.
+    fn folder_with_two_sets() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut app = app_with_one_set();
-        app.selected = Some(1);
+        for (name, seed) in
+            [("a1.png", 0), ("a2.png", 0), ("b1.png", 120), ("b2.png", 120)]
+        {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 3 + seed) % 256) as u8, ((y * 5 + seed) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
+        dir
+    }
 
-        app.open_folder(dir.path().to_path_buf());
+    /// A window that has really scanned a folder and found what is in it.
+    fn reviewing(folder: &std::path::Path) -> App {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(folder.to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        app
+    }
 
-        assert_eq!(app.folder.as_deref(), Some(dir.path()));
+    /// A folder of pictures, two of them the same, so a real pass over it has
+    /// something to find.
+    fn folder_with_a_duplicate() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let picture = |seed: u32| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 3 + seed) % 256) as u8, ((y * 5) % 256) as u8, 40])
+            }))
+        };
+        for (name, seed) in [("one.png", 0), ("two.png", 0), ("other.png", 90)] {
+            picture(seed)
+                .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+                .expect("a fixture");
+        }
+        dir
+    }
+
+    /// Run the window's own frame loop until the pass and the search it starts
+    /// have both finished, or give up rather than hang.
+    fn settle(app: &mut App) {
+        let ctx = egui::Context::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < until {
+            app.pump_indexer(&ctx);
+            app.pump_search(&ctx);
+            if app.running.is_none() && app.searching.is_none() {
+                return;
+            }
+        }
+        panic!("the pass never finished");
+    }
+
+    /// The window after really using it: a folder scanned, its duplicates found,
+    /// one of them chosen. Picking another folder leaves none of it behind.
+    #[test]
+    fn a_folder_picked_after_a_real_pass_leaves_nothing_of_the_last_one() {
+        let scanned = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        assert_eq!(app.scan.done, 3, "the pass did not read the folder");
+        assert_eq!(app.scan.indexed, 3, "the pass did not index the folder");
+
+        app.load_sets();
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the two copies were not found");
+        app.selected = app.sets[0].members.first().map(|member| member.file_id);
+        assert!(app.selected.is_some());
+
+        let next = tempfile::tempdir().expect("tempdir");
+        app.open_folder(next.path().to_path_buf());
+
+        assert_eq!(app.folder.as_deref(), Some(next.path()));
         assert!(app.sets.is_empty(), "the sets from the last folder are still here");
-        assert!(app.keep.is_empty());
         assert_eq!(app.selected, None);
+        assert_eq!(app.scan.done, 0, "the last folder's counters are still on screen");
+        assert_eq!(app.scan.indexed, 0);
+        assert_eq!(app.scan.total, 0);
+        assert_eq!(app.scan.finished, None, "the last folder's outcome is still on screen");
+        assert!(app.running.is_none(), "a folder with no index was scanned unasked");
+    }
+
+    /// The scan button pressed, and the window painted before a single file has
+    /// been counted. A bar at nothing paints nothing: a rounded cap around an
+    /// empty span is still a bubble on screen saying work has begun.
+    #[test]
+    fn a_bar_with_nothing_done_paints_no_fill_at_all() {
+        let folder = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(folder.path().to_path_buf());
+        app.start_scan();
+        assert_eq!(app.scan.done, 0, "the pass had already counted something");
+        assert_eq!(app.scan.total, 0);
+
+        fn fills(app: &mut App) -> Vec<egui::Rect> {
+            let ctx = egui::Context::default();
+            let fill = ctx.style().visuals.selection.bg_fill;
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.progress_section(ui));
+            });
+            output
+                .shapes
+                .into_iter()
+                .filter_map(|clipped| match clipped.shape {
+                    egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let empty = fills(&mut app);
+        assert!(
+            empty.is_empty(),
+            "a bar with no progress painted {} filled rects: {empty:?}",
+            empty.len()
+        );
+
+        settle(&mut app);
+        assert_eq!(app.scan.done, app.scan.total, "the pass did not finish");
+        assert_eq!(
+            fills(&mut app).len(),
+            2,
+            "the read and indexed bars are not both filled once the pass is done"
+        );
+    }
+
+    /// A folder that has been scanned before is brought up to date the moment it
+    /// is opened. One that has not waits for the button.
+    #[test]
+    fn opening_a_folder_only_scans_one_that_has_been_scanned_before() {
+        let known = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+
+        app.open_folder(known.path().to_path_buf());
         assert!(
             app.running.is_none() && app.error.is_none(),
             "a folder nothing is known about was scanned without being asked"
         );
 
-        let known = tempfile::tempdir().expect("tempdir");
-        db::open(&headless::default_db_path(known.path())).expect("an index");
+        app.start_scan();
+        settle(&mut app);
+
+        let fresh = tempfile::tempdir().expect("tempdir");
+        app.open_folder(fresh.path().to_path_buf());
+        assert!(app.running.is_none(), "the empty folder was scanned unasked");
+
         app.open_folder(known.path().to_path_buf());
         assert!(
             app.running.is_some() || app.error.is_some(),
-            "a folder with an index was not brought up to date"
+            "the folder it had already scanned was not brought up to date"
         );
+        settle(&mut app);
     }
 
     /// A different folder is different pictures, so what counted as a duplicate
@@ -3466,11 +4108,21 @@ mod tests {
     /// the setting alone.
     #[test]
     fn a_different_folder_starts_on_the_default_setting() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut app = app_with_one_set();
+        // A folder really scanned at the top of the scale, with a cleanup
+        // destination chosen for it.
+        let found = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(found.path().to_path_buf());
         app.sensitivity = matching::MAX_SENSITIVITY;
         app.ignore_colour = true;
+        app.destination = Destination::Delete;
+        app.start_scan();
+        settle(&mut app);
+        app.load_sets();
+        settle(&mut app);
+        assert!(!app.sets.is_empty(), "the pass found nothing to review");
 
+        let dir = tempfile::tempdir().expect("tempdir");
         app.open_folder(dir.path().to_path_buf());
         assert_eq!(
             app.sensitivity,
@@ -3502,6 +4154,30 @@ mod tests {
         assert!(!app.recurse, "a folder is the folder, not everything under it");
     }
 
+    /// The row says which preset the setting is on, and only that one. A setting
+    /// between two of them lights up neither.
+    #[test]
+    fn the_preset_row_marks_the_one_the_slider_is_on() {
+        for (name, percent) in matching::PRESETS {
+            let lit: Vec<&str> = matching::PRESETS
+                .iter()
+                .filter(|(_, other)| on_preset(percent, *other))
+                .map(|(other, _)| *other)
+                .collect();
+            assert_eq!(lit, vec![name], "{name} at {percent} lit up {lit:?}");
+        }
+
+        let between = 20.0;
+        assert!(
+            !matching::PRESETS.iter().any(|(_, percent)| on_preset(between, *percent)),
+            "a setting between the presets was drawn as one of them"
+        );
+        assert!(
+            matching::PRESETS.iter().all(|(_, percent)| *percent <= matching::MAX_SENSITIVITY),
+            "a preset sits past the end of the slider"
+        );
+    }
+
     #[test]
     fn the_slider_widens_what_counts_as_a_duplicate() {
         assert!(Thresholds::at(4.0).max_bits < Thresholds::at(30.0).max_bits);
@@ -3509,7 +4185,6 @@ mod tests {
         assert!(Thresholds::at(4.0).max_ring < Thresholds::at(50.0).max_ring);
     }
 
-    #[test]
     #[test]
     fn the_app_starts_on_the_default_setting() {
         // Not `App::default`, which reads whatever this machine was last left

@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/imgdedupe-core",
-    "crates/imgindex",
     "crates/imgdedupe",
 ]
 
@@ -26,15 +25,15 @@ panic = "abort"
 # Drawing is not where the time goes, so the toolkit is built for size. The
 # decoding crates are left at full speed.
 [profile.release.package.egui]
-opt-level = "s"
+opt-level = "z"
 [profile.release.package.epaint]
-opt-level = "s"
+opt-level = "z"
 [profile.release.package.eframe]
-opt-level = "s"
+opt-level = "z"
 [profile.release.package.winit]
-opt-level = "s"
+opt-level = "z"
 [profile.release.package.egui-winit]
-opt-level = "s"
+opt-level = "z"
 
 [workspace.dependencies]
 anyhow = "1"

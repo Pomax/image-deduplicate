@@ -35,9 +35,6 @@ pub struct Settings {
     /// way; this decides whether there is anything to open it with.
     pub remember_folder: bool,
     pub recurse: bool,
-    /// How far apart two pictures may be and still count as the same one, as a
-    /// percentage of the hash.
-    pub sensitivity: f64,
     pub ignore_colour: bool,
     /// Where the window was and how big, or nothing the first time it is opened.
     pub window: Option<Window>,
@@ -62,7 +59,6 @@ impl Default for Settings {
             folder: None,
             remember_folder: false,
             recurse: false,
-            sensitivity: imgdedupe_core::matching::DEFAULT_SENSITIVITY,
             ignore_colour: false,
             window: None,
             preview_width: None,
@@ -95,12 +91,11 @@ impl Settings {
 
     fn describe(&self) -> String {
         format!(
-            "folder {:?} (remembered {}), recurse {}, sensitivity {}, ignore_colour {}, \
+            "folder {:?} (remembered {}), recurse {}, ignore_colour {}, \
              window {:?}, preview {:?}",
             self.folder,
             self.remember_folder,
             self.recurse,
-            self.sensitivity,
             self.ignore_colour,
             self.window,
             self.preview_width
@@ -124,11 +119,6 @@ fn read(settings: &Path) -> Settings {
             }
             "remember_folder" => out.remember_folder = value.trim() == "1",
             "recurse" => out.recurse = value.trim() == "1",
-            "sensitivity" => {
-                if let Ok(percent) = value.trim().parse::<f64>() {
-                    out.sensitivity = percent;
-                }
-            }
             "ignore_colour" => out.ignore_colour = value.trim() == "1",
             "window" => out.window = parse_window(value.trim()),
             "preview_width" => {
@@ -161,10 +151,9 @@ fn write(settings: &Path, values: &Settings) {
         .unwrap_or_default();
     let flag = |on: bool| if on { "1" } else { "0" };
     let mut text = format!(
-        "folder={folder}\nremember_folder={}\nrecurse={}\nsensitivity={}\nignore_colour={}\n",
+        "folder={folder}\nremember_folder={}\nrecurse={}\nignore_colour={}\n",
         flag(values.remember_folder),
         flag(values.recurse),
-        values.sensitivity,
         flag(values.ignore_colour)
     );
     if let Some(window) = values.window {
@@ -297,6 +286,16 @@ mod tests {
             std::fs::write(&settings, damaged).expect("write");
             assert_eq!(read(&settings).window, None, "on {damaged:?}");
         }
+    }
+
+    /// A file written by an older version still has a sensitivity line in it.
+    /// It is ignored, so the slider starts where it starts.
+    #[test]
+    fn a_sensitivity_line_left_by_an_older_version_is_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join(FILE);
+        std::fs::write(&settings, "folder=\nsensitivity=50\nignore_colour=1\n").expect("write");
+        assert_eq!(read(&settings), Settings { ignore_colour: true, ..Settings::default() });
     }
 
     #[test]

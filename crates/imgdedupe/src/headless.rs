@@ -3,14 +3,11 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use imgdedupe_core::db;
 
-/// Open an index read only and register the functions the queries call. The
-/// indexer is the only writer, so nothing here needs write access.
+/// Open an index for reading. A pass is the only writer, so nothing here needs
+/// write access.
 pub fn open_index(db_path: &Path) -> Result<db::Connection> {
     if !db_path.exists() {
-        anyhow::bail!(
-            "no index at {}. Run imgindex over the folder first.",
-            db_path.display()
-        );
+        anyhow::bail!("no index at {}. Scan the folder first.", db_path.display());
     }
     Ok(db::open_read_only(db_path)?)
 }
@@ -25,10 +22,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn opening_a_missing_index_says_to_run_the_indexer() {
+    fn opening_a_missing_index_says_to_scan_the_folder() {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = open_index(&dir.path().join("nothing.sqlite")).expect_err("should fail");
-        assert!(err.to_string().contains("Run imgindex"), "{err}");
+        assert!(err.to_string().contains("Scan the folder"), "{err}");
     }
 
     #[test]
