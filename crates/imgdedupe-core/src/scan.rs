@@ -558,6 +558,56 @@ mod tests {
         );
     }
 
+    /// A pass over a folder it has seen before knows which files it is leaving
+    /// alone before it reads anything, so every report it makes while it works
+    /// carries the whole split: what was left alone, what is being read, what has
+    /// gone. None of it may wait for the end.
+    #[test]
+    fn what_was_left_alone_is_reported_from_the_first_tick() {
+        let fx = fixture();
+        let old = 40u32;
+        for index in 0..old {
+            write_image(&fx.dir.path().join(format!("old{index}.png")), 32, 24, index);
+        }
+        let gone = fx.dir.path().join("old0.png");
+        scan(&fx);
+
+        // Enough new pictures for the pass to report while it is still reading.
+        let fresh = REPORT_EVERY as u32 + 50;
+        for index in 0..fresh {
+            write_image(&fx.dir.path().join(format!("new{index}.png")), 32, 24, 1000 + index);
+        }
+        std::fs::remove_file(&gone).expect("take one away");
+
+        let (summary, events) = scan(&fx);
+        let left_alone = old as u64 - 1;
+        assert_eq!(summary.unchanged, left_alone);
+        assert_eq!(summary.removed, 1);
+
+        let progress: Vec<(u64, u64, u64)> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Progress { done, unchanged, removed, .. } => {
+                    Some((*done, *unchanged, *removed))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(progress.len() >= 2, "the pass only reported once, at the end");
+
+        for (index, (done, unchanged, removed)) in progress.iter().enumerate() {
+            assert_eq!(
+                *unchanged, left_alone,
+                "report {index} said {unchanged} were left alone, not {left_alone}"
+            );
+            assert_eq!(*removed, 1, "report {index} had not counted the file that went");
+            assert!(
+                *done >= left_alone,
+                "report {index} counted {done} files, fewer than the {left_alone} it skipped"
+            );
+        }
+    }
+
     #[test]
     fn a_first_pass_indexes_every_image() {
         let fx = fixture();

@@ -434,6 +434,21 @@ Indexing is reported as it happens rather than once at the end, and a second pas
 over a folder that is already indexed reports the whole folder as indexed. Both
 halves run a real pass over a folder of pictures.
 
+### files_move_into_unchanged_while_the_folder_is_being_sorted
+
+Sorting the folder is itself reported. A pass over a folder of two hundred and
+fifty already indexed pictures plus one new one reports its first batch while it
+is still sorting, with almost all of that batch already counted as left alone. A
+file is one thing or the other the moment its name, size and timestamp have been
+looked at, not when the pass ends.
+
+### no_report_ever_takes_back_what_an_earlier_one_said
+
+Over a pass that has files to leave alone, files to read and a file that has
+gone, every number in every report only ever goes up, nothing counted as left
+alone exceeds what has been looked at, and the last report accounts for the whole
+folder.
+
 ### a_first_pass_indexes_every_image
 
 A pass over a folder of pictures indexes all of them.
@@ -655,6 +670,13 @@ on it.
 
 A real cleanup on a remembered folder drops the removed file's row from the index
 and reports how many rows went.
+
+### the_counters_split_the_folder_before_anything_is_read
+
+Scans a folder, adds one picture to it, and scans again, reading the counters at
+the pass's first word rather than at the end. The three pictures the index
+already holds are on the unchanged side and the new one is what was found, before
+a single file has been read.
 
 ### what_was_skipped_and_what_broke_are_not_counted_as_found
 
@@ -956,21 +978,41 @@ And one face.
 
 Nothing multiplies the text size behind the theme's back.
 
-### a_system_font_is_found_on_this_machine
+### the_bundled_face_is_the_only_one_the_window_has
 
-The font the window asks the system for is there.
+The face carried in the binary is a real TrueType file, and text really lays out
+through it: wide letters come out wider than narrow ones, which they would not if
+the layout had fallen through to an empty fallback. Nothing is read from the
+machine, so the window paints without waiting on a font database.
 
-### asking_for_a_font_that_does_not_exist_gives_nothing
+### there_is_one_face_and_both_families_use_it
 
-A missing font gives nothing rather than something arbitrary.
+One face is loaded, and the proportional and monospace families are both it. A
+second face in the binary is a second face nobody asked for.
 
-### a_light_face_is_not_accepted_as_the_interface_font
+### the_bundled_face_has_the_letters_the_window_writes
 
-A light weight is rejected, because it is unreadable at this size.
+Every letter, digit and mark the window itself writes is in the bundled subset.
+The interface must not depend on what the machine happens to have installed.
 
-### the_chosen_face_is_normal_weight
+### only_letters_the_bundled_face_lacks_send_anyone_looking
 
-What is chosen is a normal weight.
+An ordinary name, and one with accented Latin in it, need nothing from the
+machine. A name in Chinese reports exactly the letters that are missing, which is
+what sends the search for a face off to look.
+
+### a_face_is_taken_for_a_sans_serif_by_its_name
+
+Neither the font database nor the parser says what kind of face something is, so
+the name decides. The interface faces of the three platforms are taken as sans
+serif; serif and script faces are not, including one whose name also contains a
+sans serif word.
+
+### a_face_without_the_letters_is_not_taken
+
+A search over a database holding only the bundled face finds it for letters it
+has, and finds nothing for a letter it does not. A face is only ever taken when
+it covers every missing letter.
 
 ## crates/imgdedupe/src/headless.rs
 

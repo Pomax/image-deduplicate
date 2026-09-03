@@ -15,6 +15,7 @@ directories = "5"
 eframe.workspace = true
 egui.workspace = true
 fontdb = "0.22"
+ttf-parser = "0.24"
 imgdedupe-core = { path = "../imgdedupe-core", default-features = false, features = ["index", "review"] }
 rfd.workspace = true
 serde_json.workspace = true

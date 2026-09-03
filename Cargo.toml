@@ -38,8 +38,10 @@ opt-level = "z"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-egui = "0.29"
+# No "default_fonts": egui ships Ubuntu-Light, Hack and two emoji faces, about
+# 1.4 MB of them, and the window draws in the one face it carries itself.
+eframe = { version = "0.29", default-features = false, features = ["glow", "wayland", "x11"] }
+egui = { version = "0.29", default-features = false }
 # No "jpeg": JPEG decoding goes through `jpeg-decoder` for its scaled path, and
 # enabling it here links a second JPEG decoder that nothing calls.
 #

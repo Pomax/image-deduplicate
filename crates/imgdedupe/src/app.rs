@@ -468,11 +468,16 @@ const SECTION_GAP: f32 = 14.0;
 /// arithmetic below is about outer widths.
 const FRAME_EXTRA: f32 = 14.0;
 
+/// Everything a set row takes on top of its strip: the frame around it, the
+/// spacing the row sits in, and the strip's own scroll bar. Measured, because
+/// what a group frame costs is a style value and not a number to reason out.
+const ROW_EXTRA: f32 = 46.0;
+
 /// The largest a picture in a set may be drawn, and the height of the strip of
 /// them a set row holds: the picture, the keep control and the four lines under
 /// it.
 const TILE: egui::Vec2 = egui::vec2(156.0, 118.0);
-const TILE_STRIP_HEIGHT: f32 = 216.0;
+const TILE_STRIP_HEIGHT: f32 = 244.0;
 
 /// Space kept clear around a picture for what is drawn around it: the keeper's
 /// border, and the ring outside that for the one the preview is showing. The ring
@@ -503,7 +508,7 @@ const KEEP_BUTTON: egui::Vec2 = egui::vec2(90.0, 24.0);
 
 /// Kept clear at the right of the folder row for the button that lists the
 /// folders scanned before, so a long path stops short of it.
-const PREVIOUS_ROOM: f32 = 76.0;
+const PREVIOUS_ROOM: f32 = 84.0;
 
 /// Room around a preset's name. Four of these sit under the slider and are read
 /// at a glance, so they are no bigger than the words in them.
@@ -531,7 +536,7 @@ fn duplicate_count(sets: &[DuplicateSet]) -> usize {
 /// a row is built to exactly it, so a row can never be a few points out and shift
 /// the content under a scroll that is already running.
 fn set_row_height(_ui: &egui::Ui) -> f32 {
-    TILE_STRIP_HEIGHT + SCROLL_BAR + FRAME_EXTRA
+    TILE_STRIP_HEIGHT + ROW_EXTRA
 }
 
 /// Box widths for a row: each one its measured content, plus an equal share of
@@ -708,6 +713,8 @@ impl ScanState {
 pub struct App {
     view: View,
     folder: Option<PathBuf>,
+    /// The folder whose letters the window has already made sure it can draw.
+    covered: Option<PathBuf>,
     db_path: Option<PathBuf>,
     /// Whether this folder is written down for the next run. Off until it is
     /// asked for, and off again the moment another folder is chosen.
@@ -792,6 +799,7 @@ impl App {
         App {
             view: View::Scan,
             folder: saved.folder,
+            covered: None,
             db_path,
             remember_folder: saved.remember_folder,
             previous: crate::settings::sorted(&saved.previous),
@@ -836,6 +844,14 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.note_window(ctx);
+        // The folder is on screen from the moment it is chosen, and it can be in
+        // any script. Asked once per folder, not once per frame.
+        if self.covered != self.folder {
+            self.covered.clone_from(&self.folder);
+            if let Some(folder) = &self.folder {
+                crate::fonts::cover(ctx, &folder.display().to_string());
+            }
+        }
         if self.scan_on_open {
             self.scan_on_open = false;
             self.load_disposal();
@@ -1105,6 +1121,9 @@ impl App {
             &button,
             egui::PopupCloseBehavior::CloseOnClick,
             |ui| {
+                // Each folder on one line. The popup is as wide as the longest
+                // one rather than wrapping paths into paragraphs.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for folder in &self.previous {
                     let here = self.folder.as_deref() == Some(folder.as_path());
                     if ui.selectable_label(here, folder.display().to_string()).clicked() {
@@ -1454,6 +1473,16 @@ impl App {
             match found {
                 Found::Sets(sets) => {
                     self.accept_sets(sets);
+                    // The names about to go on screen. If any of them is in a
+                    // script the bundled face does not have, this is where the
+                    // machine gets asked for one that does.
+                    let names: String = self
+                        .sets
+                        .iter()
+                        .flat_map(|set| set.members.iter())
+                        .map(|member| member.rel_path.as_str())
+                        .collect();
+                    crate::fonts::cover(ctx, &names);
                     done = true;
                 }
                 Found::Cancelled => {
@@ -2484,6 +2513,17 @@ mod tests {
     use super::*;
     use imgdedupe_core::matching::Member;
 
+    /// A context set up the way the window sets one up: the face it carries and
+    /// the style it installs. A bare context has no font at all, so text measures
+    /// as nothing and every layout a test looks at is a different layout from the
+    /// one on screen.
+    fn window() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        install_style(&ctx);
+        ctx
+    }
+
     fn member(id: i64, path: &str, size: i64) -> Member {
         Member {
             file_id: id,
@@ -2602,7 +2642,7 @@ mod tests {
         let plan = app.build_plan();
         app.run_cleanup(&plan);
         assert!(app.busy(), "removing files does not count as busy");
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while app.removing.is_some() && std::time::Instant::now() < until {
             app.pump_cleanup(&ctx);
@@ -2632,7 +2672,7 @@ mod tests {
 
         app.view = View::Cleanup;
         app.run_cleanup(&plan);
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while app.removing.is_some() && std::time::Instant::now() < until {
             app.pump_cleanup(&ctx);
@@ -2665,7 +2705,7 @@ mod tests {
         let going = plan.removals[0].rel_path.clone();
         app.view = View::Cleanup;
         app.run_cleanup(&plan);
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while app.removing.is_some() && std::time::Instant::now() < until {
             app.pump_cleanup(&ctx);
@@ -2710,7 +2750,7 @@ mod tests {
 
         app.view = View::Cleanup;
         app.run_cleanup(&plan);
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while app.removing.is_some() && std::time::Instant::now() < until {
             app.pump_cleanup(&ctx);
@@ -2909,7 +2949,7 @@ mod tests {
         let plan = app.build_plan();
         app.view = View::Cleanup;
         app.run_cleanup(&plan);
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while app.removing.is_some() && std::time::Instant::now() < until {
             app.pump_cleanup(&ctx);
@@ -2943,7 +2983,7 @@ mod tests {
 
         app.view = View::Cleanup;
         app.run_cleanup(&plan);
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while app.removing.is_some() && std::time::Instant::now() < until {
             app.pump_cleanup(&ctx);
@@ -3189,7 +3229,7 @@ mod tests {
     /// and jumping back the way it came.
     #[test]
     fn a_set_row_takes_exactly_the_height_the_list_places_it_at() {
-        let ctx = egui::Context::default();
+        let ctx = window();
         let found = folder_with_two_sets();
         let mut app = reviewing(found.path());
         let root = found.path().to_path_buf();
@@ -3316,7 +3356,7 @@ mod tests {
     /// colour nobody can see counts as missing. Twice now it has been invisible
     /// while the space for it was there.
     fn painted_rects() -> Vec<egui::epaint::RectShape> {
-        let ctx = egui::Context::default();
+        let ctx = window();
         install_style(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -3369,13 +3409,11 @@ mod tests {
 
     fn review_rects_sized(
         visuals: egui::Visuals,
-        window: egui::Vec2,
+        screen: egui::Vec2,
         preview_width: Option<f32>,
     ) -> Vec<egui::epaint::RectShape> {
-        let ctx = egui::Context::default();
+        let ctx = window();
         ctx.set_visuals(visuals);
-        install_style(&ctx);
-        crate::fonts::install(&ctx);
 
         let mut app = App::from_settings(crate::settings::Settings {
             folder: Some(PathBuf::from(".")),
@@ -3394,7 +3432,7 @@ mod tests {
             .collect();
 
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), window)),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), screen)),
             ..Default::default()
         };
 
@@ -3472,7 +3510,7 @@ mod tests {
     /// to be checked: a track, a handle inside it, and a triangle at each end.
     #[test]
     fn the_bar_has_a_track_a_handle_and_a_button_at_each_end() {
-        let ctx = egui::Context::default();
+        let ctx = window();
         ctx.set_visuals(egui::Visuals::light());
         install_style(&ctx);
 
@@ -3522,7 +3560,7 @@ mod tests {
     /// the pointer moved. It must not jump so its middle is under the pointer.
     #[test]
     fn pressing_the_handle_holds_it_where_it_was_and_drags_from_there() {
-        let ctx = egui::Context::default();
+        let ctx = window();
         ctx.set_visuals(egui::Visuals::light());
 
         let strip = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(12.0, 312.0));
@@ -3594,7 +3632,7 @@ mod tests {
     /// buttons point the way they scroll.
     #[test]
     fn a_sideways_bar_has_the_same_parts_lying_down() {
-        let ctx = egui::Context::default();
+        let ctx = window();
         ctx.set_visuals(egui::Visuals::light());
 
         let strip = egui::Rect::from_min_size(egui::pos2(0.0, 288.0), egui::vec2(400.0, 12.0));
@@ -3820,7 +3858,7 @@ mod tests {
         );
 
         let root = found.path().to_path_buf();
-        let ctx = egui::Context::default();
+        let ctx = window();
         let shapes = ctx
             .run(
                 egui::RawInput {
@@ -3875,7 +3913,7 @@ mod tests {
         let mut app = reviewing(found.path());
         let root = found.path().to_path_buf();
 
-        let ctx = egui::Context::default();
+        let ctx = window();
         let mut taken = 0.0;
         let output = ctx.run(
             egui::RawInput {
@@ -3950,11 +3988,11 @@ mod tests {
         let mut app = reviewing(found.path());
         let root = found.path().to_path_buf();
 
-        let ctx = egui::Context::default();
+        let ctx = window();
         install_style(&ctx);
         let screen =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
-        let mut frame = |app: &mut App, at: egui::Pos2, pressed: Option<bool>| {
+        let frame = |app: &mut App, at: egui::Pos2, pressed: Option<bool>| {
             let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
             input.events.push(egui::Event::PointerMoved(at));
             if let Some(pressed) = pressed {
@@ -4012,11 +4050,11 @@ mod tests {
         let root = dir.path().to_path_buf();
         assert_eq!(app.sets.len(), 1, "the two copies were not found");
 
-        let ctx = egui::Context::default();
+        let ctx = window();
         install_style(&ctx);
         let screen =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
-        let mut frame = |app: &mut App, at: Option<egui::Pos2>, time: f64| {
+        let frame = |app: &mut App, at: Option<egui::Pos2>, time: f64| {
             let mut input = egui::RawInput {
                 screen_rect: Some(screen),
                 time: Some(time),
@@ -4075,7 +4113,7 @@ mod tests {
         let mut app = reviewing(found.path());
         let root = found.path().to_path_buf();
 
-        let ctx = egui::Context::default();
+        let ctx = window();
         let shapes = ctx
             .run(
                 egui::RawInput {
@@ -4125,7 +4163,7 @@ mod tests {
             .find(|file_id| app.keep.get(&set_id) != Some(&Keep::One(*file_id)))
             .expect("both pictures are the keeper");
 
-        let ctx = egui::Context::default();
+        let ctx = window();
         let screen =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
         // The clock has to move between the two pairs, or four clicks that close
@@ -4204,7 +4242,7 @@ mod tests {
         assert_eq!(app.build_plan().files(), 1, "the search kept nothing to start from");
 
         let root = found.path().to_path_buf();
-        let ctx = egui::Context::default();
+        let ctx = window();
         let screen =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
         let frame = |app: &mut App, at: Option<egui::Pos2>, pressed: Option<bool>| {
@@ -4386,7 +4424,7 @@ mod tests {
         }
         assert_eq!(app.previous.len(), 2, "the scanned folders were not listed");
 
-        let ctx = egui::Context::default();
+        let ctx = window();
         let screen =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
         let frame = |app: &mut App, at: Option<egui::Pos2>, pressed: Option<bool>| {
@@ -4421,7 +4459,7 @@ mod tests {
         let path = label_rect(&drawn, &app.folder.as_ref().unwrap().display().to_string())
             .expect("the folder was not shown");
         assert!(
-            box_rect.left() > path.right(),
+            box_rect.left() >= path.right(),
             "the box is not right of the folder it belongs to: {box_rect:?} against {path:?}"
         );
         // The row was given 600 points, and the button belongs against the far
@@ -4597,7 +4635,7 @@ mod tests {
     /// Run the window's own frame loop until the pass and the search it starts
     /// have both finished, or give up rather than hang.
     fn settle(app: &mut App) {
-        let ctx = egui::Context::default();
+        let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while std::time::Instant::now() < until {
             app.pump_indexer(&ctx);
@@ -4654,7 +4692,7 @@ mod tests {
         assert_eq!(app.scan.total, 0);
 
         fn fills(app: &mut App) -> Vec<egui::Rect> {
-            let ctx = egui::Context::default();
+            let ctx = window();
             let fill = ctx.style().visuals.selection.bg_fill;
             let output = ctx.run(Default::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| app.progress_section(ui));
