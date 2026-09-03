@@ -12,7 +12,7 @@ use imgdedupe_core::{db, runlog};
 pub enum Update {
     Start { total: u64 },
     Progress { done: u64, per_sec: u64, unchanged: u64, removed: u64, ignored: u64 },
-    Indexed { done: u64, total: u64 },
+    Indexed { done: u64, total: u64, read: u64, unchanged: u64, ignored: u64 },
     Failed { path: String, message: String },
     Done { indexed: u64, removed: u64, failed: u64, elapsed_ms: u64 },
     /// The pass is over, one way or another. Nothing else follows it.
@@ -97,7 +97,9 @@ fn update(event: Event) -> Update {
         Event::Progress { done, per_sec, unchanged, removed, ignored, .. } => {
             Update::Progress { done, per_sec, unchanged, removed, ignored }
         }
-        Event::Writing { done, total } => Update::Indexed { done, total },
+        Event::Writing { done, total, read, unchanged, ignored } => {
+            Update::Indexed { done, total, read, unchanged, ignored }
+        }
         Event::Error { path, message } => Update::Failed { path, message },
         Event::Done { indexed, removed, failed, elapsed_ms } => {
             Update::Done { indexed, removed, failed, elapsed_ms }

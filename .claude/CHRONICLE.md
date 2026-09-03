@@ -130,6 +130,12 @@ Each entry: what was asked, what happened, what was wrong with it, what fixed it
 
 **Also asked:** store the subfolder setting in the database, because it decides which files the index describes.
 
+**What went wrong later, and was told off for:** a folder opened at startup showed 6742 unchanged files with the checkbox unticked. Two faults. First, the rule that opening a folder with an index ticks the checkbox was applied in `open_folder` but not at startup, where the checkbox was read back from the settings file instead. Second, when the label was changed to "Save an index database for this folder" I changed the string and nothing else: the field was still called `remember_folder`, the settings key was still `remember_folder=`, and the comments still described the checkbox as remembering a location, which is a different thing from whether the folder's index is kept.
+
+**Fixed by:** startup now looks in the saved folder for an index file, ticks the checkbox if one is there, and scans on sight, the same as choosing the folder. The field is `keep_index`. The setting is gone from the settings file, since the checkbox is set from the folder every time it is opened and the saved value was never read. The tests are renamed to say what they check.
+
+**Rules:** when a label changes meaning, the code behind it changes name in the same edit, or the next reader is misled. A rule that applies "when a folder is opened" applies at startup too, because starting with a saved folder opens that folder.
+
 ### Dropping the separate indexing tool
 
 **Asked:** how much does `imgindex` still do, and can it move into the window.
@@ -423,7 +429,9 @@ A folder whose "Save an index database for this folder" box is unticked has its 
 
 Written by `settings.rs` to the platform's configuration directory (`%APPDATA%\imgdedupe\config` on Windows, `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` or `~/.config` elsewhere), as `key=value` lines.
 
-Saved: the folder, whether that folder keeps an index, whether subfolders count, the colour setting, the window place and size, the divider position, and one `previous=` line per folder that has been scanned.
+Saved: the folder, whether subfolders count, the colour setting, the window place and size, the divider position, and one `previous=` line per folder that has been scanned.
+
+Not saved: whether the folder's index is kept. That checkbox is set from the folder itself every time it is opened, at startup included: an index file in the folder ticks it, none unticks it.
 
 Not saved: the sensitivity. What counts as a duplicate is decided against the pictures on screen, so every run starts at the default. An old file with a `sensitivity=` line in it is read and ignored.
 

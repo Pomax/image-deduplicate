@@ -44,6 +44,11 @@ pub enum Event {
     Writing {
         done: u64,
         total: u64,
+        /// The read side as it stands at the same moment, so the counters that
+        /// come from it move with this bar as well as with the other.
+        read: u64,
+        unchanged: u64,
+        ignored: u64,
     },
     Error {
         path: String,
@@ -205,10 +210,20 @@ enum Outcome {
 /// The files that were left alone are already in it, and the ones that turned
 /// out not to be pictures are not part of the folder as far as this is
 /// concerned, so they leave the total rather than sitting in it unindexed.
-fn indexed_so_far(indexed: u64, unchanged: u64, to_index: u64, ignored: &AtomicU64) -> Event {
+fn indexed_so_far(
+    indexed: u64,
+    unchanged: u64,
+    to_index: u64,
+    read: &AtomicU64,
+    ignored: &AtomicU64,
+) -> Event {
+    let ignored = ignored.load(Ordering::Relaxed);
     Event::Writing {
         done: unchanged + indexed,
-        total: unchanged + to_index.saturating_sub(ignored.load(Ordering::Relaxed)),
+        total: unchanged + to_index.saturating_sub(ignored),
+        read: unchanged + read.load(Ordering::Relaxed),
+        unchanged,
+        ignored,
     }
 }
 
@@ -376,7 +391,7 @@ pub fn run(
                             flush(conn, &mut pending)?;
                         }
                         if indexed % REPORT_EVERY == 0 {
-                            report(indexed_so_far(indexed, unchanged, total, &ignored));
+                            report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
                         }
                     }
                     Outcome::NotAnImage => {}
@@ -388,7 +403,7 @@ pub fn run(
             }
 
             flush(conn, &mut pending)?;
-            report(indexed_so_far(indexed, unchanged, total, &ignored));
+            report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
             Ok((indexed, failed))
         });
 
@@ -520,7 +535,7 @@ mod tests {
         let reported: Vec<(u64, u64)> = events
             .iter()
             .filter_map(|event| match event {
-                Event::Writing { done, total } => Some((*done, *total)),
+                Event::Writing { done, total, .. } => Some((*done, *total)),
                 _ => None,
             })
             .collect();
@@ -547,7 +562,7 @@ mod tests {
         let last = events
             .iter()
             .filter_map(|event| match event {
-                Event::Writing { done, total } => Some((*done, *total)),
+                Event::Writing { done, total, .. } => Some((*done, *total)),
                 _ => None,
             })
             .next_back();

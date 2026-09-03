@@ -31,9 +31,6 @@ pub struct Settings {
     /// setting on the strength of it loses the choice for good on the next save.
     /// If the folder cannot be read, the scan says so.
     pub folder: Option<PathBuf>,
-    /// Whether that folder keeps an index. The folder itself comes back either
-    /// way; this decides whether there is anything to open it with.
-    pub remember_folder: bool,
     pub recurse: bool,
     /// Folders that have been scanned, in alphabetical order. Opening a folder
     /// does not put one here: scanning it does.
@@ -60,7 +57,6 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             folder: None,
-            remember_folder: false,
             recurse: false,
             previous: Vec::new(),
             ignore_colour: false,
@@ -101,10 +97,9 @@ impl Settings {
 
     fn describe(&self) -> String {
         format!(
-            "folder {:?} (remembered {}), recurse {}, {} scanned before, ignore_colour {}, \
+            "folder {:?}, recurse {}, {} scanned before, ignore_colour {}, \
              window {:?}, preview {:?}",
             self.folder,
-            self.remember_folder,
             self.recurse,
             self.previous.len(),
             self.ignore_colour,
@@ -141,7 +136,6 @@ fn read(settings: &Path) -> Settings {
                 let folder = value.trim();
                 out.folder = (!folder.is_empty()).then(|| PathBuf::from(folder));
             }
-            "remember_folder" => out.remember_folder = value.trim() == "1",
             "recurse" => out.recurse = value.trim() == "1",
             "previous" => {
                 let folder = value.trim();
@@ -182,8 +176,7 @@ fn write(settings: &Path, values: &Settings) {
         .unwrap_or_default();
     let flag = |on: bool| if on { "1" } else { "0" };
     let mut text = format!(
-        "folder={folder}\nremember_folder={}\nrecurse={}\nignore_colour={}\n",
-        flag(values.remember_folder),
+        "folder={folder}\nrecurse={}\nignore_colour={}\n",
         flag(values.recurse),
         flag(values.ignore_colour)
     );
@@ -223,13 +216,11 @@ mod tests {
         let settings = dir.path().join(FILE);
         let chosen = folder_in(dir.path(), "pictures");
 
-        // The folder comes back either way. What the tick decides is whether it
-        // has an index to open with.
         let saved = Settings { folder: Some(chosen.clone()), recurse: false, ..Settings::default() };
         write(&settings, &saved);
         assert_eq!(read(&settings), saved);
 
-        let saved = Settings { folder: Some(chosen), remember_folder: true, recurse: true, ..Settings::default() };
+        let saved = Settings { folder: Some(chosen), recurse: true, ..Settings::default() };
         write(&settings, &saved);
         assert_eq!(read(&settings), saved);
     }
@@ -247,7 +238,6 @@ mod tests {
             &settings,
             &Settings {
                 folder: Some(chosen.clone()),
-                remember_folder: true,
                 ..Settings::default()
             },
         );
@@ -268,7 +258,6 @@ mod tests {
             &settings,
             &Settings {
                 folder: Some(share.clone()),
-                remember_folder: true,
                 ..Settings::default()
             },
         );
@@ -387,7 +376,7 @@ mod tests {
         let settings = dir.path().join(FILE);
         let chosen = folder_in(dir.path(), "sexy pictures");
 
-        write(&settings, &Settings { folder: Some(chosen.clone()), remember_folder: true, recurse: true, ..Settings::default() });
+        write(&settings, &Settings { folder: Some(chosen.clone()), recurse: true, ..Settings::default() });
         assert_eq!(read(&settings).folder, Some(chosen));
     }
 
@@ -403,7 +392,7 @@ mod tests {
             "/mnt/photos",
         ] {
             let given = PathBuf::from(path);
-            write(&settings, &Settings { folder: Some(given.clone()), remember_folder: true, recurse: true, ..Settings::default() });
+            write(&settings, &Settings { folder: Some(given.clone()), recurse: true, ..Settings::default() });
             assert_eq!(read(&settings).folder, Some(given), "on {path}");
         }
     }
@@ -415,12 +404,11 @@ mod tests {
         let first = folder_in(dir.path(), "one");
         let second = folder_in(dir.path(), "two");
 
-        write(&settings, &Settings { folder: Some(first), remember_folder: true, recurse: true, ..Settings::default() });
+        write(&settings, &Settings { folder: Some(first), recurse: true, ..Settings::default() });
         write(
             &settings,
             &Settings {
                 folder: Some(second.clone()),
-                remember_folder: true,
                 ..Settings::default()
             },
         );

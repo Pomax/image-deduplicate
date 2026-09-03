@@ -434,20 +434,12 @@ Indexing is reported as it happens rather than once at the end, and a second pas
 over a folder that is already indexed reports the whole folder as indexed. Both
 halves run a real pass over a folder of pictures.
 
-### files_move_into_unchanged_while_the_folder_is_being_sorted
+### what_was_left_alone_is_reported_from_the_first_tick
 
-Sorting the folder is itself reported. A pass over a folder of two hundred and
-fifty already indexed pictures plus one new one reports its first batch while it
-is still sorting, with almost all of that batch already counted as left alone. A
-file is one thing or the other the moment its name, size and timestamp have been
-looked at, not when the pass ends.
-
-### no_report_ever_takes_back_what_an_earlier_one_said
-
-Over a pass that has files to leave alone, files to read and a file that has
-gone, every number in every report only ever goes up, nothing counted as left
-alone exceeds what has been looked at, and the last report accounts for the whole
-folder.
+A second pass over a folder with unchanged files, new files and a removed file.
+Every progress report the pass makes, from the first one, carries the full
+unchanged and removed counts, because they are known before any file is read.
+Nothing about them waits for the end.
 
 ### a_first_pass_indexes_every_image
 
@@ -660,23 +652,16 @@ Walking an empty list does nothing.
 On a real result, a cursor key moves the preview from the picture it is on, into
 the next set at the end of one, and nowhere at the end of the list.
 
-### a_folder_that_is_not_remembered_loses_its_index_when_the_cleanup_is_done
+### an_unticked_folder_loses_its_index_when_the_cleanup_is_done
 
-A real scan, search and cleanup on a folder nobody asked to keep: the index and
-its write-ahead log are deleted and the window is left on the scan with nothing
-on it.
+A scan, search and cleanup on a folder with the checkbox unticked: the index and
+its write-ahead log are deleted and the window is left on the scan tab with
+nothing on it.
 
 ### taking_the_outcome_does_not_touch_the_index
 
-A real cleanup on a remembered folder drops the removed file's row from the index
-and reports how many rows went.
-
-### the_counters_split_the_folder_before_anything_is_read
-
-Scans a folder, adds one picture to it, and scans again, reading the counters at
-the pass's first word rather than at the end. The three pictures the index
-already holds are on the unchanged side and the new one is what was found, before
-a single file has been read.
+A cleanup on a folder whose index is kept drops the removed file's row from the
+index and reports how many rows went.
 
 ### what_was_skipped_and_what_broke_are_not_counted_as_found
 
@@ -876,13 +861,16 @@ pictures on screen.
 
 ### a_folder_with_an_index_is_scanned_on_opening_and_one_without_is_not
 
-A remembered folder with an index the application built is brought up to date on
-opening; one with no index, and one nobody asked to keep, are not.
+At startup the window opens the saved folder and looks in it for an index file.
+If there is one, the checkbox is ticked and a scan starts at once. If there is
+not, the checkbox is unticked and nothing happens until Scan is pressed. The
+settings file has no say in either.
 
-### a_location_is_only_remembered_while_it_is_asked_for
+### the_checkbox_follows_the_folder_that_is_opened
 
-Opening another folder clears the tick and the subfolder box; opening the same
-folder again keeps them; opening a folder that already holds an index ticks it.
+Opening a different folder resets the checkbox and the subfolder setting.
+Opening the same folder again leaves them alone. Opening a folder that contains
+an index ticks the checkbox whatever it was before.
 
 ### a_folder_picked_after_a_real_pass_leaves_nothing_of_the_last_one
 

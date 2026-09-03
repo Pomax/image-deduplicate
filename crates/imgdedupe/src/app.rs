@@ -716,9 +716,12 @@ pub struct App {
     /// The folder whose letters the window has already made sure it can draw.
     covered: Option<PathBuf>,
     db_path: Option<PathBuf>,
-    /// Whether this folder is written down for the next run. Off until it is
-    /// asked for, and off again the moment another folder is chosen.
-    remember_folder: bool,
+    /// The "Save an index database for this folder" box. Ticked when the folder
+    /// is opened with an index file in it, unticked when it is opened without
+    /// one; unticking it deletes the index, and a cleanup on a folder with it
+    /// unticked deletes the index when it is done. It is not saved: the folder
+    /// itself says whether it has an index.
+    keep_index: bool,
     /// Folders that have been scanned, alphabetically. Choosing a folder does not
     /// put one here; scanning it does.
     previous: Vec<PathBuf>,
@@ -795,13 +798,16 @@ impl App {
     /// machine, so tests do not depend on what the last real run left behind.
     fn from_settings(saved: crate::settings::Settings) -> Self {
         let db_path = saved.folder.as_deref().map(headless::default_db_path);
-        let indexed_already = db_path.as_deref().is_some_and(Path::is_file);
+        // Look in the remembered folder for an index file. Whether one is there
+        // decides whether the folder counts as remembered and whether it is
+        // scanned on sight; the settings file is not asked.
+        let has_index = db_path.as_deref().is_some_and(Path::is_file);
         App {
             view: View::Scan,
             folder: saved.folder,
             covered: None,
             db_path,
-            remember_folder: saved.remember_folder,
+            keep_index: has_index,
             previous: crate::settings::sorted(&saved.previous),
             recurse: saved.recurse,
             ignore_colour: saved.ignore_colour,
@@ -829,9 +835,9 @@ impl App {
             scroll_to: None,
             list_offset: 0.0,
             list_viewport: 0.0,
-            // A folder nobody asked to keep is shown but not acted on. The scan
-            // button is there for that.
-            scan_on_open: indexed_already && saved.remember_folder,
+            // A folder with an index is brought up to date on sight. One without
+            // is shown and waits for the Scan button.
+            scan_on_open: has_index,
             window: saved.window,
             preview_width: saved.preview_width,
             error: None,
@@ -966,9 +972,14 @@ impl App {
                     self.scan.removed = removed;
                     self.scan.ignored = ignored;
                 }
-                Update::Indexed { done, total } => {
+                Update::Indexed { done, total, read, unchanged, ignored } => {
                     self.scan.indexed = done;
                     self.scan.to_index = total;
+                    // The counters under the bars come from the read side, and
+                    // they move whichever bar it was that moved.
+                    self.scan.done = read;
+                    self.scan.unchanged = unchanged;
+                    self.scan.ignored = ignored;
                 }
                 Update::Failed { path, message } => self.scan.failures.push((path, message)),
                 Update::Done { indexed, removed, failed, elapsed_ms } => {
@@ -1077,11 +1088,11 @@ impl App {
             let remember = ui.add_enabled(
                 !busy,
                 egui::Checkbox::new(
-                    &mut self.remember_folder,
+                    &mut self.keep_index,
                     "Save an index database for this folder",
                 ),
             );
-            if remember.changed() && !self.remember_folder {
+            if remember.changed() && !self.keep_index {
                 // The index is what remembering a folder amounts to, so taking
                 // the tick off takes the index with it.
                 discard_index(self.db_path.as_deref());
@@ -1175,7 +1186,7 @@ impl App {
     /// that has not waits for the Scan button.
     fn open_folder(&mut self, folder: PathBuf) {
         let db_path = headless::default_db_path(&folder);
-        let indexed_already = db_path.is_file();
+        let has_index = db_path.is_file();
         let elsewhere = self.folder.as_deref() != Some(folder.as_path());
         self.db_path = Some(db_path);
         self.folder = Some(folder);
@@ -1186,9 +1197,8 @@ impl App {
             self.sensitivity = matching::DEFAULT_SENSITIVITY;
             self.ignore_colour = false;
             self.recurse = false;
-            // An index in the folder is what remembering a folder amounts to,
-            // so a folder that has one arrives with the box already ticked.
-            self.remember_folder = indexed_already;
+            // A folder that has an index arrives with the box already ticked.
+            self.keep_index = has_index;
             self.destination = Destination::Trash;
             self.move_dir = String::new();
         }
@@ -1204,11 +1214,11 @@ impl App {
         self.thumbs.forget();
         // A folder with an index is brought up to date on sight. One without is
         // a folder nothing is known about, and it waits for the Scan button.
-        if indexed_already {
+        if has_index {
             self.load_disposal();
         }
         self.remember();
-        if indexed_already {
+        if has_index {
             self.start_scan();
         }
     }
@@ -1224,7 +1234,6 @@ impl App {
     fn settings(&self) -> crate::settings::Settings {
         crate::settings::Settings {
             folder: self.folder.clone(),
-            remember_folder: self.remember_folder,
             previous: self.previous.clone(),
             recurse: self.recurse,
             ignore_colour: self.ignore_colour,
@@ -2301,7 +2310,7 @@ impl App {
         let (send, receive) = std::sync::mpsc::channel::<Removal>();
         let steps = send.clone();
         let db_path = self.db_path.clone();
-        let keep_index = self.remember_folder;
+        let keep_index = self.keep_index;
         std::thread::spawn(move || {
             let result = cleanup::apply_reporting(&root, &plan, &disposal, &|done| {
                 let _ = steps.send(Removal::Progress(done));
@@ -2362,7 +2371,7 @@ impl App {
         for (path, message) in &outcome.failed {
             runlog::line(&format!("  could not remove {path}: {message}"));
         }
-        let index = if self.remember_folder {
+        let index = if self.keep_index {
             format!("{forgotten} dropped from the index")
         } else {
             String::from("the index was deleted")
@@ -2393,7 +2402,7 @@ impl App {
             self.view = View::Scan;
             // The index is gone with it, so nothing on screen describes anything
             // that still exists. The folder stays chosen and Scan builds it again.
-            if !self.remember_folder {
+            if !self.keep_index {
                 self.thumbs.forget();
                 self.scan = ScanState::default();
             }
@@ -2929,11 +2938,11 @@ mod tests {
         assert_eq!(app.selected, None, "nothing was selected and something moved");
     }
 
-    /// A folder nobody asked to keep has no use for its index once the cleanup is
-    /// over: the next run opens on nothing and a scan builds it again. The file
-    /// goes, with the write-ahead log beside it.
+    /// With the checkbox unticked, the index is deleted once the cleanup is over,
+    /// along with its write-ahead log. The next run opens the folder with no
+    /// index and a scan builds it again.
     #[test]
-    fn a_folder_that_is_not_remembered_loses_its_index_when_the_cleanup_is_done() {
+    fn an_unticked_folder_loses_its_index_when_the_cleanup_is_done() {
         let scanned = folder_with_a_duplicate();
         let db_path = headless::default_db_path(scanned.path());
         let mut app = App::from_settings(crate::settings::Settings::default());
@@ -2943,7 +2952,7 @@ mod tests {
         app.load_sets();
         settle(&mut app);
         assert!(db_path.is_file(), "the pass wrote no index");
-        assert!(!app.remember_folder, "a fresh folder is not remembered");
+        assert!(!app.keep_index, "a fresh folder is not remembered");
 
         app.destination = Destination::Delete;
         let plan = app.build_plan();
@@ -2976,7 +2985,7 @@ mod tests {
         let db_path = headless::default_db_path(scanned.path());
         let mut app = reviewing(scanned.path());
         // Kept, so the cleanup drops the rows rather than deleting the index.
-        app.remember_folder = true;
+        app.keep_index = true;
         app.destination = Destination::Delete;
         let plan = app.build_plan();
         let going = plan.removals[0].rel_path.clone();
@@ -4345,7 +4354,7 @@ mod tests {
         let folder = folder_with_a_duplicate();
         let mut app = App::from_settings(crate::settings::Settings::default());
         app.open_folder(folder.path().to_path_buf());
-        app.remember_folder = true;
+        app.keep_index = true;
         app.sensitivity = matching::MAX_SENSITIVITY;
         app.ignore_colour = true;
         app.start_scan();
@@ -4495,7 +4504,6 @@ mod tests {
     fn saved_settings_reach_the_window() {
         let saved = crate::settings::Settings {
             folder: Some(PathBuf::from("/photos")),
-            remember_folder: true,
             previous: vec![PathBuf::from("/photos"), PathBuf::from("/more photos")],
             recurse: false,
             ignore_colour: true,
@@ -4522,71 +4530,64 @@ mod tests {
         assert!(app.db_path.is_some(), "the index path was not derived");
     }
 
-    /// A remembered folder that has been indexed before is brought up to date
-    /// without being asked. One that has not been indexed waits for the button.
+    /// At startup the window opens the saved folder and checks whether it
+    /// contains an index file. If it does, the checkbox is ticked and a scan
+    /// starts immediately. If it does not, the checkbox is unticked and nothing
+    /// happens until the Scan button is pressed. The settings file has no say
+    /// in this.
     #[test]
     fn a_folder_with_an_index_is_scanned_on_opening_and_one_without_is_not() {
         let dir = tempfile::tempdir().expect("tempdir");
         let folder = dir.path().to_path_buf();
         let settings = |folder: &std::path::Path| crate::settings::Settings {
             folder: Some(folder.to_path_buf()),
-            remember_folder: true,
             ..crate::settings::Settings::default()
         };
 
         let app = App::from_settings(settings(&folder));
-        assert!(!app.scan_on_open, "there is no index to bring up to date");
+        assert!(!app.scan_on_open, "a scan started although there is no index");
+        assert!(!app.keep_index, "the checkbox was ticked although there is no index");
 
-        // An index the application itself built, by scanning the folder.
+        // Scan the folder so that it has an index.
         let mut built = App::from_settings(crate::settings::Settings::default());
         built.open_folder(folder.clone());
         built.start_scan();
         settle(&mut built);
-        assert!(headless::default_db_path(&folder).is_file(), "the pass wrote no index");
+        assert!(headless::default_db_path(&folder).is_file(), "the scan did not write an index");
 
         let app = App::from_settings(settings(&folder));
-        assert!(app.scan_on_open, "the index was there and was left alone");
-
-        let app = App::from_settings(crate::settings::Settings {
-            remember_folder: false,
-            ..settings(&folder)
-        });
-        assert!(
-            !app.scan_on_open,
-            "a folder nobody asked to keep was scanned without being asked"
-        );
+        assert!(app.scan_on_open, "an index exists but no scan started");
+        assert!(app.keep_index, "an index exists but the checkbox was not ticked");
     }
 
-    /// The location is written down only while the box is ticked. Another folder
-    /// clears it, unless that folder already has an index, which is what being
-    /// remembered comes to.
+    /// The checkbox belongs to the folder that is open. Opening a different
+    /// folder resets it and the subfolder setting; opening the same folder again
+    /// leaves them alone; and opening a folder that contains an index ticks the
+    /// checkbox whatever it was before.
     #[test]
-    fn a_location_is_only_remembered_while_it_is_asked_for() {
-        // A folder the application scanned, so it holds an index it built.
+    fn the_checkbox_follows_the_folder_that_is_opened() {
+        // Scan a folder so that it contains an index.
         let indexed = folder_with_a_duplicate();
         let mut app = App::from_settings(crate::settings::Settings::default());
         app.open_folder(indexed.path().to_path_buf());
-        app.remember_folder = true;
+        app.keep_index = true;
         app.recurse = true;
         app.start_scan();
         settle(&mut app);
 
         let fresh = tempfile::tempdir().expect("tempdir");
         app.open_folder(fresh.path().to_path_buf());
-        assert!(!app.remember_folder, "the last folder's choice was carried over");
-        assert!(!app.recurse, "the last folder's subfolder setting was carried over");
+        assert!(!app.keep_index, "the checkbox was carried over from the last folder");
+        assert!(!app.recurse, "the subfolder setting was carried over from the last folder");
 
-        app.remember_folder = true;
+        app.keep_index = true;
         app.open_folder(fresh.path().to_path_buf());
-        assert!(app.remember_folder, "opening the same folder cleared the choice");
+        assert!(app.keep_index, "opening the same folder again cleared the checkbox");
 
-        app.remember_folder = false;
+        app.keep_index = false;
         app.open_folder(indexed.path().to_path_buf());
         settle(&mut app);
-        assert!(
-            app.remember_folder,
-            "a folder that already holds an index is a folder being remembered"
-        );
+        assert!(app.keep_index, "the folder contains an index but the checkbox was not ticked");
     }
 
     /// A folder holding two pairs, so a real pass finds two sets.
