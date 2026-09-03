@@ -785,7 +785,64 @@ unchanged, byte for byte and row for row.
 ### saved_settings_reach_the_window
 
 Everything in the settings file arrives in the window: folder, subfolders,
-colour, window place and divider.
+colour, the folders scanned before, window place and divider.
+
+### a_folder_joins_the_previous_list_by_being_scanned_and_not_by_being_opened
+
+Really scans two folders, one of them twice, and opens a third without scanning
+it. The list of previous locations holds the two that were scanned, in
+alphabetical order, once each. The one that was only opened is not in it.
+
+### one_of_something_is_written_in_the_singular
+
+The counts above the review list read "1 set" and "1 duplicate" rather than "1
+sets" and "1 duplicates", and keep the plural for none and for more than one.
+
+### holding_the_pointer_over_a_set_pops_nothing_up
+
+Scans a folder whose file names are far too long to fit under a picture, then
+rests the pointer on every point of the set a dozen points apart, waiting at each
+one long enough for a tooltip to appear. The name is on screen twice throughout,
+once per tile, so nothing popped up over the top of it.
+
+### dragging_across_the_window_selects_no_text
+
+Presses on the lines under a picture in a scanned folder and drags across them.
+Labels are not selectable and the pointer never becomes a text cursor: this is a
+window, not a document.
+
+### nothing_in_the_window_shows_a_tooltip
+
+The window's source contains no hover text at all, and no label that cuts its own
+text: egui puts the whole string in a tooltip of its own making whenever a label
+has to elide, so the lines that need cutting are painted rather than added as
+widgets. What a control does is written on it. This is a guard against tooltips
+creeping back in one at a time.
+
+### keep_none_sits_level_with_the_last_line_under_the_pictures
+
+Draws a set from a really scanned folder and compares where the keep none button
+ends with the lowest line of text under the pictures. They finish level, so the
+button reads as the foot of the set rather than floating above it.
+
+### a_set_box_is_not_taller_than_the_tiles_in_it
+
+Draws a set from a really scanned folder and measures the height the row took
+against the lowest line of text painted in it. What is left over is the strip's
+scroll bar and the frame's own padding, not a band of empty space under the file
+names in every row of the list.
+
+### two_clicks_on_a_picture_keep_it_the_way_the_space_bar_does
+
+Really clicks twice on the picture in a scanned set that the search did not
+choose. It becomes the one being kept, and two more clicks a moment later let it
+go again, which is what the space bar does on the picture being shown.
+
+### the_last_entry_of_the_previous_list_empties_it
+
+Scans two folders, then really opens the previous box and clicks its last entry.
+The box is drawn right of the picker button and right of the folder path. The
+list is emptied, and with nothing left to offer the box is not drawn at all.
 
 ### the_setting_for_what_counts_as_a_duplicate_is_not_kept_across_a_restart
 
@@ -971,6 +1028,18 @@ The review's divider is remembered.
 ### no_window_line_means_no_remembered_place_rather_than_a_broken_one
 
 A settings file with no window line gives no remembered place.
+
+### the_folders_scanned_before_come_back_in_order
+
+The list of previous locations survives being written and read back. Whatever
+order it went in, it comes back alphabetically with letter case ignored, and a
+folder listed twice comes back once.
+
+### no_folders_scanned_before_is_an_empty_list_rather_than_a_blank_entry
+
+Settings with nothing scanned yet read back as an empty list, and a file whose
+previous lines have nothing after the equals sign gives an empty list rather
+than entries pointing at nowhere.
 
 ### a_sensitivity_line_left_by_an_older_version_is_ignored
 

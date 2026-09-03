@@ -40,7 +40,7 @@ fn start_window() -> Result<()> {
         options,
         Box::new(|cc| {
             crate::fonts::install(&cc.egui_ctx);
-            install_scroll_style(&cc.egui_ctx);
+            install_style(&cc.egui_ctx);
             Ok(Box::new(App::from_settings(saved)))
         }),
     )
@@ -433,20 +433,27 @@ fn paint_scroll_bar(
     Some(wanted * furthest)
 }
 
-/// A strip of `SCROLL_BAR` points at the edge of anything that scrolls, with the
-/// handle filling it when there is something to scroll.
+/// How the window looks and what it lets the pointer do.
 ///
+/// Scrolling gets a strip of `SCROLL_BAR` points at the edge of anything that
+/// scrolls, with the handle filling it when there is something to scroll.
 /// `solid` is the preset that takes that space rather than floating over the
 /// content. Its handle is drawn in the widget background colour, which is pale
 /// grey on a near white track and comes out invisible; the foreground colour is
 /// what makes a handle that can be seen.
-fn install_scroll_style(ctx: &egui::Context) {
-    ctx.style_mut(|style| {
+fn install_style(ctx: &egui::Context) {
+    // Both of them. `style_mut` changes the theme in use at the time, and the
+    // window is handed the machine's theme after this runs, which would leave the
+    // other one as egui ships it.
+    ctx.all_styles_mut(|style| {
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_width = SCROLL_BAR;
         style.spacing.scroll.bar_inner_margin = 0.0;
         style.spacing.scroll.bar_outer_margin = 0.0;
         style.spacing.scroll.foreground_color = true;
+        // Nothing here is a text field. Labels are what the window says, not
+        // something to drag a cursor through.
+        style.interaction.selectable_labels = false;
     });
 }
 
@@ -465,7 +472,7 @@ const FRAME_EXTRA: f32 = 14.0;
 /// them a set row holds: the picture, the keep control and the four lines under
 /// it.
 const TILE: egui::Vec2 = egui::vec2(156.0, 118.0);
-const TILE_STRIP_HEIGHT: f32 = 226.0;
+const TILE_STRIP_HEIGHT: f32 = 216.0;
 
 /// Space kept clear around a picture for what is drawn around it: the keeper's
 /// border, and the ring outside that for the one the preview is showing. The ring
@@ -493,6 +500,10 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
 /// The buttons that decide a whole set at once, drawn over the right of its
 /// strip: keep all of it at the top, none of it at the bottom.
 const KEEP_BUTTON: egui::Vec2 = egui::vec2(90.0, 24.0);
+
+/// Kept clear at the right of the folder row for the button that lists the
+/// folders scanned before, so a long path stops short of it.
+const PREVIOUS_ROOM: f32 = 76.0;
 
 /// Room around a preset's name. Four of these sit under the slider and are read
 /// at a glance, so they are no bigger than the words in them.
@@ -627,6 +638,36 @@ fn progress_bar(ui: &mut egui::Ui, label: &str, fraction: f32, width: f32) -> eg
     response
 }
 
+/// A number and the word for it, which is not the same word when there is one of
+/// them.
+fn counted(how_many: u64, one: &str, more: &str) -> String {
+    format!("{how_many} {}", if how_many == 1 { one } else { more })
+}
+
+/// A line of text cut to the room it is given.
+///
+/// `egui::Label` puts the whole string in a tooltip whenever it has to cut one,
+/// and nothing in this window explains itself by being hovered over. Painting the
+/// text rather than adding a widget leaves nothing to hover over.
+fn clipped_line(ui: &mut egui::Ui, text: egui::RichText) {
+    let room = ui.available_width();
+    clipped_line_in(ui, text, room);
+}
+
+/// The same, in the room given rather than in whatever is left.
+fn clipped_line_in(ui: &mut egui::Ui, text: egui::RichText, room: f32) {
+    let room = room.max(0.0);
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        room,
+        egui::TextStyle::Body,
+    );
+    let (rect, _) = ui.allocate_exact_size(galley.size(), egui::Sense::hover());
+    let ink = ui.visuals().text_color();
+    ui.painter().with_clip_rect(rect).galley(rect.min, galley, ink);
+}
+
 /// A label that takes the width it needs rather than breaking to fit.
 fn unwrapped(text: egui::RichText) -> egui::Label {
     egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend)
@@ -671,6 +712,9 @@ pub struct App {
     /// Whether this folder is written down for the next run. Off until it is
     /// asked for, and off again the moment another folder is chosen.
     remember_folder: bool,
+    /// Folders that have been scanned, alphabetically. Choosing a folder does not
+    /// put one here; scanning it does.
+    previous: Vec<PathBuf>,
     recurse: bool,
     ignore_colour: bool,
     /// How far apart two pictures may be and still count as the same one, as a
@@ -750,6 +794,7 @@ impl App {
             folder: saved.folder,
             db_path,
             remember_folder: saved.remember_folder,
+            previous: crate::settings::sorted(&saved.previous),
             recurse: saved.recurse,
             ignore_colour: saved.ignore_colour,
             // What counts as a duplicate is a decision about the pictures in
@@ -822,11 +867,9 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(folder) = &self.folder {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(folder.display().to_string()).weak(),
-                            )
-                            .truncate(),
+                        clipped_line(
+                            ui,
+                            egui::RichText::new(folder.display().to_string()).weak(),
                         );
                     }
                 });
@@ -973,35 +1016,55 @@ impl App {
     fn folder_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
         let busy = self.busy();
         sized_section(ui, "Folder", egui::vec2(width, self.scan_row), |ui| {
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!busy, egui::Button::new("Choose folder")).clicked() {
-                    if let Some(folder) = crate::folder_picker::pick(self.folder.as_deref()) {
-                        self.open_folder(folder);
+            let inner = ui.max_rect();
+            let row = ui
+                .horizontal(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new("Choose folder")).clicked() {
+                        if let Some(folder) = crate::folder_picker::pick(self.folder.as_deref()) {
+                            self.open_folder(folder);
+                        }
                     }
-                }
-                match &self.folder {
-                    Some(folder) => ui
-                        .add(
-                            egui::Label::new(
-                                egui::RichText::new(folder.display().to_string()).strong(),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(folder.display().to_string()),
-                    None => ui.label(egui::RichText::new("none chosen").weak()),
-                };
-            });
+                    // The previous button sits over the right end of this row, so
+                    // the path stops before it rather than running under it.
+                    let reserved = if self.previous.is_empty() { 0.0 } else { PREVIOUS_ROOM };
+                    match &self.folder {
+                        Some(folder) => clipped_line_in(
+                            ui,
+                            egui::RichText::new(folder.display().to_string()).strong(),
+                            ui.available_width() - reserved,
+                        ),
+                        None => {
+                            ui.label(egui::RichText::new("none chosen").weak());
+                        }
+                    };
+                })
+                .response
+                .rect;
+            // Against the right edge of the box, in a space of its own. Laying it
+            // out with the row would count it as content, and the box is sized
+            // from what its content measures.
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(inner.left(), row.top()),
+                egui::pos2(inner.right(), row.bottom()),
+            );
+            let mut against_the_edge = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(strip)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            self.previous_folders(&mut against_the_edge, busy);
             ui.add_space(6.0);
             let subfolders = ui.add_enabled(
                 !busy,
                 egui::Checkbox::new(&mut self.recurse, "Include subfolders"),
             );
-            let remember = ui
-                .add_enabled(
-                    !busy,
-                    egui::Checkbox::new(&mut self.remember_folder, "Remember this location"),
-                )
-                .on_hover_text("Open this folder again the next time the window opens");
+            let remember = ui.add_enabled(
+                !busy,
+                egui::Checkbox::new(
+                    &mut self.remember_folder,
+                    "Save an index database for this folder",
+                ),
+            );
             if remember.changed() && !self.remember_folder {
                 // The index is what remembering a folder amounts to, so taking
                 // the tick off takes the index with it.
@@ -1017,6 +1080,50 @@ impl App {
                 self.remember();
             }
         })
+    }
+
+    /// The folders scanned before, to go back to one of them without finding it
+    /// in the file browser again. Nothing is offered until something has been
+    /// scanned.
+    fn previous_folders(&mut self, ui: &mut egui::Ui, busy: bool) {
+        if self.previous.is_empty() {
+            return;
+        }
+        let mut chosen = None;
+        let mut forget = false;
+        let button = ui.add_enabled(!busy, egui::Button::new("previous"));
+        let list = egui::Id::new("previous folders");
+        if button.clicked() {
+            ui.memory_mut(|memory| memory.toggle_popup(list));
+        }
+        // A popup rather than part of the row: it is there for as long as it
+        // takes to pick something, and it lies over the window rather than
+        // making room in it.
+        egui::popup_below_widget(
+            ui,
+            list,
+            &button,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                for folder in &self.previous {
+                    let here = self.folder.as_deref() == Some(folder.as_path());
+                    if ui.selectable_label(here, folder.display().to_string()).clicked() {
+                        chosen = Some(folder.clone());
+                    }
+                }
+                ui.separator();
+                if ui.selectable_label(false, "clear previous locations").clicked() {
+                    forget = true;
+                }
+            },
+        );
+        if forget {
+            self.previous.clear();
+            self.remember();
+        }
+        if let Some(folder) = chosen {
+            self.open_folder(folder);
+        }
     }
 
     /// Take down where the window is. A maximized window reports the size it
@@ -1099,6 +1206,7 @@ impl App {
         crate::settings::Settings {
             folder: self.folder.clone(),
             remember_folder: self.remember_folder,
+            previous: self.previous.clone(),
             recurse: self.recurse,
             ignore_colour: self.ignore_colour,
             window: self.window,
@@ -1137,11 +1245,7 @@ impl App {
                     // The one the slider is on is drawn as pressed, so the row
                     // says where the setting is as well as where it can go.
                     let button = egui::Button::new(name).selected(here);
-                    if ui
-                        .add_enabled(!busy, button)
-                        .on_hover_text(format!("{percent:.0}% difference allowed"))
-                        .clicked()
-                    {
+                    if ui.add_enabled(!busy, button).clicked() {
                         self.sensitivity = percent;
                         changed = true;
                     }
@@ -1155,9 +1259,6 @@ impl App {
                         &mut self.ignore_colour,
                         "Match colour with grayscale",
                     ),
-                )
-                .on_hover_text(
-                    "A colourised copy and its grayscale original count as duplicates",
                 )
                 .changed();
             if changed {
@@ -1288,6 +1389,13 @@ impl App {
         };
         self.scan = ScanState::default();
         self.error = None;
+        // A folder counts as one worth offering again once it has been scanned.
+        // Choosing one and thinking better of it does not put it in the list.
+        if !self.previous.contains(&folder) {
+            self.previous.push(folder.clone());
+            self.previous = crate::settings::sorted(&self.previous);
+            self.remember();
+        }
         match indexer::start(&folder, &db_path, self.recurse) {
             Ok(run) => self.running = Some(run),
             Err(err) => self.fail(&format!("{err:#}")),
@@ -1429,8 +1537,17 @@ impl App {
         egui::TopBottomPanel::top("review toolbar").show_inside(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("{} sets", visible.len())).strong());
-                ui.label(egui::RichText::new(format!("{duplicates} duplicates")).strong());
+                ui.label(
+                    egui::RichText::new(counted(visible.len() as u64, "set", "sets")).strong(),
+                );
+                ui.label(
+                    egui::RichText::new(counted(
+                        duplicates as u64,
+                        "duplicate",
+                        "duplicates",
+                    ))
+                    .strong(),
+                );
                 ui.label(egui::RichText::new(format!("{going} to remove")).strong());
                 ui.label(
                     egui::RichText::new(format!("{:.1} MB to reclaim", reclaimable as f64 / 1e6))
@@ -1443,11 +1560,7 @@ impl App {
                     )
                     .fill(egui::Color32::from_rgb(60, 110, 180))
                     .min_size(egui::vec2(120.0, 28.0));
-                    if ui
-                        .add_enabled(going > 0, go)
-                        .on_hover_text(format!("go to step 3 with the {going} pictures not kept"))
-                        .clicked()
-                    {
+                    if ui.add_enabled(going > 0, go).clicked() {
                         self.view = View::Cleanup;
                     }
                 });
@@ -1701,8 +1814,7 @@ impl App {
                         .weak(),
                     );
                 });
-                ui.add(unwrapped(egui::RichText::new(&member.rel_path).weak()))
-                    .on_hover_text(&member.rel_path);
+                ui.add(unwrapped(egui::RichText::new(&member.rel_path).weak()));
                 ui.add_space(4.0);
 
                 let room = ui.available_size();
@@ -1867,8 +1979,15 @@ impl App {
                         egui::Stroke::new(3.0_f32, ui.style().visuals.selection.bg_fill),
                     );
                 }
-                if framed.inner.on_hover_text("show this one on the right").clicked() {
+                let picked = framed.inner;
+                if picked.clicked() {
                     self.selected = Some(member.file_id);
+                }
+                // Twice on a picture keeps it, which is the space bar on the one
+                // being shown, including that it takes the mark off again.
+                if picked.double_clicked() {
+                    self.selected = Some(member.file_id);
+                    self.keep_selected();
                 }
 
                 // Centred on the picture this tile is about. The picture sits in
@@ -1896,10 +2015,7 @@ impl App {
                     .weak(),
                 );
                 ui.label(egui::RichText::new(file_date(member.mtime_ns)).weak());
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&member.rel_path).weak()).truncate(),
-                )
-                .on_hover_text(&member.rel_path);
+                clipped_line(ui, egui::RichText::new(&member.rel_path).weak());
             });
         });
     }
@@ -2076,11 +2192,12 @@ impl App {
                             let path = &plan.removals[index].rel_path;
                             match failed.get(path.as_str()) {
                                 Some(why) => {
+                                    // The reason goes on the line. There is
+                                    // nowhere else to read it.
                                     ui.label(
-                                        egui::RichText::new(path)
+                                        egui::RichText::new(format!("{path}  {why}"))
                                             .color(egui::Color32::from_rgb(200, 80, 80)),
-                                    )
-                                    .on_hover_text(*why);
+                                    );
                                 }
                                 None => {
                                     ui.label(path);
@@ -3200,7 +3317,7 @@ mod tests {
     /// while the space for it was there.
     fn painted_rects() -> Vec<egui::epaint::RectShape> {
         let ctx = egui::Context::default();
-        install_scroll_style(&ctx);
+        install_style(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -3257,7 +3374,7 @@ mod tests {
     ) -> Vec<egui::epaint::RectShape> {
         let ctx = egui::Context::default();
         ctx.set_visuals(visuals);
-        install_scroll_style(&ctx);
+        install_style(&ctx);
         crate::fonts::install(&ctx);
 
         let mut app = App::from_settings(crate::settings::Settings {
@@ -3357,7 +3474,7 @@ mod tests {
     fn the_bar_has_a_track_a_handle_and_a_button_at_each_end() {
         let ctx = egui::Context::default();
         ctx.set_visuals(egui::Visuals::light());
-        install_scroll_style(&ctx);
+        install_style(&ctx);
 
         let strip = egui::Rect::from_min_size(egui::pos2(388.0, 0.0), egui::vec2(12.0, 300.0));
         let output = ctx.run(Default::default(), |ctx| {
@@ -3658,6 +3775,29 @@ mod tests {
         label_rects(shapes, label).into_iter().next()
     }
 
+    /// Every line of text that was painted, with where it went.
+    fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, found: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => found.push((
+                    text.galley.text().to_string(),
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                )),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut found);
+        }
+        found
+    }
+
     /// A set drawn from a really scanned folder, with one picture marked to keep
     /// and one not. Only the marked one says anything, and the space is taken
     /// either way, so the facts under the pictures stay on one line across the
@@ -3714,6 +3854,343 @@ mod tests {
             sizes[0],
             sizes[1]
         );
+    }
+
+    /// One of something is not "1 sets". The counts above the review list say
+    /// what they are counting, and the word changes with the number.
+    #[test]
+    fn one_of_something_is_written_in_the_singular() {
+        assert_eq!(counted(1, "set", "sets"), "1 set");
+        assert_eq!(counted(1, "duplicate", "duplicates"), "1 duplicate");
+        assert_eq!(counted(0, "set", "sets"), "0 sets");
+        assert_eq!(counted(2, "duplicate", "duplicates"), "2 duplicates");
+    }
+
+    /// The box around a set is as tall as what it holds. The strip is a fixed
+    /// height, and any of it the tiles do not use is empty space under the file
+    /// names in every row of the list.
+    #[test]
+    fn a_set_box_is_not_taller_than_the_tiles_in_it() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+
+        let ctx = egui::Context::default();
+        let mut taken = 0.0;
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 500.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let before = ui.next_widget_position().y;
+                    app.set_row(ui, 0, &root);
+                    taken = ui.next_widget_position().y - before;
+                });
+            },
+        );
+
+        fn lowest(shape: &egui::Shape, so_far: &mut f32) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    *so_far = so_far.max(text.pos.y + text.galley.rect.height());
+                }
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        lowest(shape, so_far);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut bottom = 0.0_f32;
+        for clipped in &output.shapes {
+            lowest(&clipped.shape, &mut bottom);
+        }
+        assert!(bottom > 0.0, "the row painted no text at all");
+
+        // What is under the last line: the strip's scroll bar, and the few points
+        // of padding the frame draws inside its own edge. Nothing else.
+        let spare = taken - bottom;
+        assert!(
+            spare < SCROLL_BAR + 6.0,
+            "the box is {spare} points taller than the tiles in it"
+        );
+    }
+
+    /// Nothing in the window explains itself by being hovered over. What a
+    /// control does is written on it, or it does not belong there.
+    #[test]
+    fn nothing_in_the_window_shows_a_tooltip() {
+        // Split so this test does not find itself.
+        let hover = concat!("on_hover", "_text");
+        let window = include_str!("app.rs");
+        assert!(
+            !window.contains(hover),
+            "the window has gone back to explaining itself in tooltips"
+        );
+        // A label that has to cut its text puts the whole string in a tooltip of
+        // egui's own making, which is why the ones here paint the text instead.
+        assert!(
+            !window.contains(concat!(".trunc", "ate()")),
+            "a label is cutting its text, which egui explains in a tooltip"
+        );
+    }
+
+    /// Dragging across the file names really tried, in a scanned folder. Nothing
+    /// is a text field: no line highlights, and the pointer never becomes a
+    /// text cursor.
+    #[test]
+    fn dragging_across_the_window_selects_no_text() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+
+        let ctx = egui::Context::default();
+        install_style(&ctx);
+        let screen =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let mut frame = |app: &mut App, at: egui::Pos2, pressed: Option<bool>| {
+            let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            input.events.push(egui::Event::PointerMoved(at));
+            if let Some(pressed) = pressed {
+                input.events.push(egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+            })
+        };
+
+        // Both themes: the machine's is applied after the window is set up, and
+        // one of the two going unchanged is what shipped a selectable review tab.
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            assert!(
+                !ctx.style_of(theme).interaction.selectable_labels,
+                "labels are still text to be selected in the {theme:?} theme"
+            );
+        }
+
+        // Press on the first line under a picture and drag across the rest.
+        let start = egui::pos2(20.0, 200.0);
+        frame(&mut app, start, None);
+        frame(&mut app, start, Some(true));
+        for step in 1..8 {
+            frame(&mut app, start + egui::vec2(step as f32 * 20.0, 8.0), None);
+        }
+        let output = frame(&mut app, start + egui::vec2(160.0, 8.0), Some(false));
+
+        assert!(
+            output.platform_output.cursor_icon != egui::CursorIcon::Text,
+            "the pointer turned into a text cursor over the window"
+        );
+    }
+
+    /// The pointer really held over every part of a set, in a folder whose file
+    /// names are far too long for a tile. Nothing pops up: not over the picture,
+    /// not over the name that had to be cut, not over the buttons.
+    #[test]
+    fn holding_the_pointer_over_a_set_pops_nothing_up() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let long = "a_file_name_far_too_long_to_fit_under_a_picture_in_a_tile";
+        for name in [format!("{long}_one.png"), format!("{long}_two.png")] {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([((x * 3) % 256) as u8, ((y * 5) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
+        let mut app = reviewing(dir.path());
+        let root = dir.path().to_path_buf();
+        assert_eq!(app.sets.len(), 1, "the two copies were not found");
+
+        let ctx = egui::Context::default();
+        install_style(&ctx);
+        let screen =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let mut frame = |app: &mut App, at: Option<egui::Pos2>, time: f64| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                ..Default::default()
+            };
+            if let Some(pos) = at {
+                input.events.push(egui::Event::PointerMoved(pos));
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+            })
+            .shapes
+        };
+
+        // Every place a pointer can rest inside the row, one point apart, and
+        // twice each: egui shows a tooltip on the frame after the pointer
+        // arrives, never on the same one.
+        let drawn = frame(&mut app, None, 0.0);
+        let row = texts(&drawn)
+            .iter()
+            .map(|(_, rect)| *rect)
+            .fold(egui::Rect::NOTHING, |all, rect| all.union(rect));
+        let mut clock = 1.0;
+        let mut y = row.top();
+        while y < row.bottom() {
+            let mut x = row.left();
+            while x < row.right() {
+                let at = egui::pos2(x, y);
+                // Arrive, then wait: a tooltip is held back until the pointer has
+                // been still for a moment.
+                frame(&mut app, Some(at), clock);
+                clock += 2.0;
+                let painted = frame(&mut app, Some(at), clock);
+                clock += 2.0;
+                // One line per tile and no more. A tooltip would be a third
+                // drawing of the name, over the top of the two.
+                let names = texts(&painted)
+                    .into_iter()
+                    .filter(|(text, _)| text.contains(long))
+                    .count();
+                assert_eq!(
+                    names, 2,
+                    "the pointer at {at:?} left {names} copies of the name on screen"
+                );
+                x += 12.0;
+            }
+            y += 12.0;
+        }
+    }
+
+    /// Keep none sits at the foot of the tiles, level with the last line under
+    /// the pictures, rather than floating somewhere above it.
+    #[test]
+    fn keep_none_sits_level_with_the_last_line_under_the_pictures() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+
+        let ctx = egui::Context::default();
+        let shapes = ctx
+            .run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(900.0, 500.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                },
+            )
+            .shapes;
+
+        let painted = texts(&shapes);
+        let button = painted
+            .iter()
+            .find(|(text, _)| text == "keep none")
+            .map(|(_, rect)| *rect)
+            .expect("no keep none button was drawn");
+        let last = painted
+            .iter()
+            .filter(|(text, _)| text != "keep none")
+            .map(|(_, rect)| rect.bottom())
+            .fold(0.0_f32, f32::max);
+
+        assert!(
+            (button.bottom() - last).abs() < 8.0,
+            "keep none ends at {} and the last line under the pictures at {last}",
+            button.bottom()
+        );
+    }
+
+    /// Two clicks on a picture in a really scanned folder do what the space bar
+    /// does on it: keep that one, and on a second pair of clicks let it go again.
+    #[test]
+    fn two_clicks_on_a_picture_keep_it_the_way_the_space_bar_does() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+        let set_id = app.sets[0].set_id;
+        let other = app.sets[0]
+            .members
+            .iter()
+            .map(|member| member.file_id)
+            .find(|file_id| app.keep.get(&set_id) != Some(&Keep::One(*file_id)))
+            .expect("both pictures are the keeper");
+
+        let ctx = egui::Context::default();
+        let screen =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        // The clock has to move between the two pairs, or four clicks that close
+        // together are one gesture rather than two.
+        let frame = |app: &mut App, at: Option<egui::Pos2>, clicks: usize, time: f64| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                ..Default::default()
+            };
+            if let Some(pos) = at {
+                input.events.push(egui::Event::PointerMoved(pos));
+                for _ in 0..clicks {
+                    for pressed in [true, false] {
+                        input.events.push(egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+            })
+            .shapes
+        };
+
+        // The pictures are the tile sized rectangles, and the one wanted here is
+        // the one that is not already the keeper: the tiles are drawn in the
+        // order the set holds them.
+        let drawn = frame(&mut app, None, 0, 0.0);
+        let mut pictures: Vec<egui::Rect> = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - TILE.x).abs() < 6.0
+                        && (rect.rect.height() - TILE.y).abs() < 6.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        pictures.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        assert_eq!(pictures.len(), 2, "the two pictures were not drawn: {pictures:?}");
+        let index = app.sets[0]
+            .members
+            .iter()
+            .position(|member| member.file_id == other)
+            .expect("the set lost a picture");
+        let at = pictures[index].center();
+
+        frame(&mut app, Some(at), 0, 0.1);
+        frame(&mut app, Some(at), 2, 0.2);
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::One(other)),
+            "two clicks did not keep the picture they were on"
+        );
+
+        frame(&mut app, Some(at), 0, 2.0);
+        frame(&mut app, Some(at), 2, 2.1);
+        assert_eq!(app.keep.get(&set_id), None, "twice more did not let it go again");
     }
 
     /// The two buttons on a set really pressed, in a really scanned folder. Keep
@@ -3849,11 +4326,139 @@ mod tests {
         assert!(next.ignore_colour, "the colour setting was not remembered");
     }
 
+    /// A folder of one picture under the given name, so a test can say what
+    /// order two of them come out in.
+    fn folder_named(root: &std::path::Path, name: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).expect("mkdir");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([((x * 3) % 256) as u8, ((y * 5) % 256) as u8, 40])
+        }))
+        .save_with_format(dir.join("one.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+        dir
+    }
+
+    /// Two folders really scanned, one of them twice, and a third only opened.
+    /// The list offers what was scanned, in alphabetical order, once each.
+    #[test]
+    fn a_folder_joins_the_previous_list_by_being_scanned_and_not_by_being_opened() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let zebra = folder_named(root.path(), "Zebra");
+        let apple = folder_named(root.path(), "apple");
+        let passed_over = folder_named(root.path(), "middle");
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(zebra.clone());
+        assert!(app.previous.is_empty(), "choosing a folder was enough to list it");
+
+        app.start_scan();
+        settle(&mut app);
+        app.open_folder(apple.clone());
+        app.start_scan();
+        settle(&mut app);
+        app.open_folder(passed_over);
+        assert_eq!(
+            app.previous,
+            vec![apple.clone(), zebra.clone()],
+            "the two scanned folders are not listed alphabetically"
+        );
+
+        app.open_folder(zebra.clone());
+        app.start_scan();
+        settle(&mut app);
+        assert_eq!(app.previous, vec![apple, zebra], "scanning again listed it twice");
+    }
+
+    /// The last entry of the list really clicked, in a window that has scanned
+    /// two folders. It empties the list, and the box goes with it.
+    #[test]
+    fn the_last_entry_of_the_previous_list_empties_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let first = folder_named(root.path(), "Zebra");
+        let second = folder_named(root.path(), "apple");
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        for folder in [first, second] {
+            app.open_folder(folder);
+            app.start_scan();
+            settle(&mut app);
+        }
+        assert_eq!(app.previous.len(), 2, "the scanned folders were not listed");
+
+        let ctx = egui::Context::default();
+        let screen =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let frame = |app: &mut App, at: Option<egui::Pos2>, pressed: Option<bool>| {
+            let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            if let Some(pos) = at {
+                input.events.push(egui::Event::PointerMoved(pos));
+                if let Some(pressed) = pressed {
+                    input.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.folder_section(ui, 600.0);
+                });
+            })
+            .shapes
+        };
+
+        let drawn = frame(&mut app, None, None);
+        let box_rect =
+            label_rect(&drawn, "previous").expect("no previous box was drawn beside the folder");
+        let button = label_rect(&drawn, "Choose folder").expect("no folder button was drawn");
+        assert!(
+            box_rect.left() > button.right(),
+            "the box is not right of the folder picker: {box_rect:?} against {button:?}"
+        );
+        let path = label_rect(&drawn, &app.folder.as_ref().unwrap().display().to_string())
+            .expect("the folder was not shown");
+        assert!(
+            box_rect.left() > path.right(),
+            "the box is not right of the folder it belongs to: {box_rect:?} against {path:?}"
+        );
+        // The row was given 600 points, and the button belongs against the far
+        // edge of it rather than trailing the path.
+        assert!(
+            box_rect.right() > 560.0,
+            "the box is not against the right edge: {box_rect:?}"
+        );
+        let box_at = box_rect.center();
+        frame(&mut app, Some(box_at), None);
+        frame(&mut app, Some(box_at), Some(true));
+        frame(&mut app, Some(box_at), Some(false));
+        // The list is a popup, and it is drawn on the frame after the one that
+        // opened it.
+        let opened = frame(&mut app, Some(box_at), None);
+
+        let clear_at = label_rect(&opened, "clear previous locations")
+            .expect("the list has no entry to clear it with")
+            .center();
+        frame(&mut app, Some(clear_at), None);
+        frame(&mut app, Some(clear_at), Some(true));
+        frame(&mut app, Some(clear_at), Some(false));
+
+        assert!(app.previous.is_empty(), "the list was not emptied");
+        let after = frame(&mut app, None, None);
+        assert!(
+            label_rect(&after, "previous").is_none(),
+            "an empty list still offers a box to pick from"
+        );
+    }
+
     #[test]
     fn saved_settings_reach_the_window() {
         let saved = crate::settings::Settings {
             folder: Some(PathBuf::from("/photos")),
             remember_folder: true,
+            previous: vec![PathBuf::from("/photos"), PathBuf::from("/more photos")],
             recurse: false,
             ignore_colour: true,
             window: Some(crate::settings::Window {
@@ -3871,6 +4476,11 @@ mod tests {
         assert_eq!(app.folder, Some(PathBuf::from("/photos")));
         assert!(!app.recurse, "the subfolder setting was not restored");
         assert!(app.ignore_colour, "the colour setting was not restored");
+        assert_eq!(
+            app.previous,
+            vec![PathBuf::from("/more photos"), PathBuf::from("/photos")],
+            "the folders scanned before were not restored in order"
+        );
         assert!(app.db_path.is_some(), "the index path was not derived");
     }
 

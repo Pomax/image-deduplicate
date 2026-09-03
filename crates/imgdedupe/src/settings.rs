@@ -35,6 +35,9 @@ pub struct Settings {
     /// way; this decides whether there is anything to open it with.
     pub remember_folder: bool,
     pub recurse: bool,
+    /// Folders that have been scanned, in alphabetical order. Opening a folder
+    /// does not put one here: scanning it does.
+    pub previous: Vec<PathBuf>,
     pub ignore_colour: bool,
     /// Where the window was and how big, or nothing the first time it is opened.
     pub window: Option<Window>,
@@ -59,6 +62,7 @@ impl Default for Settings {
             folder: None,
             remember_folder: false,
             recurse: false,
+            previous: Vec::new(),
             ignore_colour: false,
             window: None,
             preview_width: None,
@@ -79,6 +83,12 @@ impl Settings {
         loaded
     }
 
+    /// Under test this writes nothing. The suite drives the window for real, and
+    /// the file it would write to is this machine's own configuration.
+    #[cfg(test)]
+    pub fn save(&self) {}
+
+    #[cfg(not(test))]
     pub fn save(&self) {
         let path = settings_path();
         write(&path, self);
@@ -91,16 +101,30 @@ impl Settings {
 
     fn describe(&self) -> String {
         format!(
-            "folder {:?} (remembered {}), recurse {}, ignore_colour {}, \
+            "folder {:?} (remembered {}), recurse {}, {} scanned before, ignore_colour {}, \
              window {:?}, preview {:?}",
             self.folder,
             self.remember_folder,
             self.recurse,
+            self.previous.len(),
             self.ignore_colour,
             self.window,
             self.preview_width
         )
     }
+}
+
+/// The folders in the order they are offered: alphabetical, letter case ignored,
+/// and each one once.
+pub fn sorted(folders: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for folder in folders {
+        if !out.contains(folder) {
+            out.push(folder.clone());
+        }
+    }
+    out.sort_by_key(|folder| folder.display().to_string().to_lowercase());
+    out
 }
 
 fn read(settings: &Path) -> Settings {
@@ -119,6 +143,12 @@ fn read(settings: &Path) -> Settings {
             }
             "remember_folder" => out.remember_folder = value.trim() == "1",
             "recurse" => out.recurse = value.trim() == "1",
+            "previous" => {
+                let folder = value.trim();
+                if !folder.is_empty() {
+                    out.previous.push(PathBuf::from(folder));
+                }
+            }
             "ignore_colour" => out.ignore_colour = value.trim() == "1",
             "window" => out.window = parse_window(value.trim()),
             "preview_width" => {
@@ -127,6 +157,7 @@ fn read(settings: &Path) -> Settings {
             _ => {}
         }
     }
+    out.previous = sorted(&out.previous);
     out
 }
 
@@ -156,6 +187,10 @@ fn write(settings: &Path, values: &Settings) {
         flag(values.recurse),
         flag(values.ignore_colour)
     );
+    // One line each, written in the order they will be shown in.
+    for folder in sorted(&values.previous) {
+        text.push_str(&format!("previous={}\n", folder.display()));
+    }
     if let Some(window) = values.window {
         text.push_str(&format!(
             "window={},{},{},{},{}\n",
@@ -286,6 +321,38 @@ mod tests {
             std::fs::write(&settings, damaged).expect("write");
             assert_eq!(read(&settings).window, None, "on {damaged:?}");
         }
+    }
+
+    /// The folders scanned before survive the round trip, come back in
+    /// alphabetical order whatever order they went in, and appear once each.
+    #[test]
+    fn the_folders_scanned_before_come_back_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join(FILE);
+        let zebra = folder_in(dir.path(), "Zebra");
+        let apple = folder_in(dir.path(), "apple");
+        let middle = folder_in(dir.path(), "Middle");
+
+        write(
+            &settings,
+            &Settings {
+                previous: vec![zebra.clone(), apple.clone(), middle.clone(), zebra.clone()],
+                ..Settings::default()
+            },
+        );
+        assert_eq!(read(&settings).previous, vec![apple, middle, zebra]);
+    }
+
+    #[test]
+    fn no_folders_scanned_before_is_an_empty_list_rather_than_a_blank_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join(FILE);
+
+        write(&settings, &Settings::default());
+        assert!(read(&settings).previous.is_empty());
+
+        std::fs::write(&settings, "previous=\nprevious=   \n").expect("write");
+        assert!(read(&settings).previous.is_empty());
     }
 
     /// A file written by an older version still has a sensitivity line in it.
