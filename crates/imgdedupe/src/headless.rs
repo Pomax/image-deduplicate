@@ -1,17 +1,22 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(any(debug_assertions, test))]
 use anyhow::Result;
 use imgdedupe_core::db;
 
 /// Open an index for reading. A pass is the only writer, so nothing here needs
 /// write access.
+///
+/// Only the development build's command line reads an index this way now. The
+/// window does not: a pass converts the index to the form the search works on and
+/// hands it over, and every search runs on that.
+#[cfg(any(debug_assertions, test))]
 pub fn open_index(db_path: &Path) -> Result<db::Connection> {
     if !db_path.exists() {
         anyhow::bail!("no index at {}. Scan the folder first.", db_path.display());
     }
     Ok(db::open_read_only(db_path)?)
 }
-
 
 /// Where the index for a folder lives unless it was put somewhere else.
 pub fn default_db_path(root: &Path) -> PathBuf {

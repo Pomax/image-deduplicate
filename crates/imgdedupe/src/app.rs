@@ -4052,7 +4052,9 @@ mod tests {
                         modifiers: Default::default(),
                     });
                 }
-                ctx.run(input, |ctx| {
+                // What the frame drew is not looked at here: this drives the bar
+                // and reads what it decided, which comes back through `wanted`.
+                let _ = ctx.run(input, |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let moved =
                             paint_scroll_bar(ui, strip, true, step, content, viewport, offset);

@@ -315,6 +315,17 @@ A cut-off file gives an answer rather than crashing the pass.
 
 ## crates/imgdedupe-core/src/matching.rs
 
+### a_search_reports_while_it_runs
+
+A search says what it is doing while it does it: reading the index, then comparing
+pairs, then grouping. It used to say nothing at all until it had the answer, so
+the window sat on whatever the pass had last put there for the whole of it. It
+also reports before counting the rows, because counting them is itself a scan of
+the whole view and gated everything behind it.
+
+Reads a real index, so it takes the folder from `IMGDEDUPE_TEST_FOLDER` and is
+marked to be asked for by name.
+
 ### a_search_stops_when_it_is_told_to_and_gives_back_nothing
 
 Cancelling a search returns nothing rather than a partial result that would look
