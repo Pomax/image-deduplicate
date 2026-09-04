@@ -809,6 +809,18 @@ unchanged, byte for byte and row for row.
 Everything in the settings file arrives in the window: folder, subfolders,
 colour, the folders scanned before, window place and divider.
 
+### a_folder_dropped_on_the_window_is_scanned_and_searched
+
+A folder dropped on a window that is sitting on the review tab is opened, scanned
+and searched without anything being pressed. The drop puts the window back on the
+scan tab while that runs, and the search leaves it on the review tab with the
+duplicates it found.
+
+### dropping_anything_but_a_folder_does_nothing
+
+A dropped file is not treated as a folder to scan, and a drop that arrives while
+a pass is already running does not change the folder.
+
 ### a_folder_joins_the_previous_list_by_being_scanned_and_not_by_being_opened
 
 Really scans two folders, one of them twice, and opens a third without scanning

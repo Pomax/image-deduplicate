@@ -45,7 +45,7 @@ impl Run {
     /// Ask the pass to stop. It puts down whatever file it is on, commits what
     /// it has, and closes the index, so what is on disk is always consistent.
     pub fn cancel(&mut self) {
-        runlog::line("cancelling the pass");
+        runlog::log_line!("cancelling the pass");
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
@@ -77,11 +77,11 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
         db_path: db_path.to_path_buf(),
         recurse,
     };
-    runlog::line(&format!(
+    runlog::log_line!(
         "indexing {} (recurse {recurse}, db {})",
         root.display(),
         db_path.display()
-    ));
+    );
 
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = Arc::clone(&cancel);
@@ -102,12 +102,13 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
 
         let mut options = options;
         say(scan::Step::StartedOpeningTheIndexForWriting);
+        #[cfg(feature = "logging")]
         let opening = std::time::Instant::now();
         let outcome = db::open(&options.db_path).and_then(|mut conn| {
-            runlog::line(&format!(
+            runlog::log_line!(
                 "  open the index for writing: {:.2}s",
                 opening.elapsed().as_secs_f64()
-            ));
+            );
             say(scan::Step::FinishedOpeningTheIndexForWriting);
 
             // Off the connection that has just read the file, rather than reading
@@ -140,7 +141,7 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
             if summary.indexed > 0 || summary.removed > 0 {
                 db::close(conn, &options.db_path)?;
             } else {
-                runlog::line("the index is unchanged, so it is not written back");
+                runlog::log_line!("the index is unchanged, so it is not written back");
                 drop(conn);
             }
             // Handed over before the pass reports itself finished, so whatever
@@ -155,7 +156,7 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
         let last = match outcome {
             Ok(summary) => Update::Finished { cancelled: summary.cancelled, error: None },
             Err(err) => {
-                runlog::line(&format!("the pass stopped: {err:#}"));
+                runlog::log_line!("the pass stopped: {err:#}");
                 Update::Finished { cancelled: false, error: Some(format!("{err:#}")) }
             }
         };

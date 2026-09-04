@@ -75,11 +75,17 @@ fn start() -> anyhow::Result<()> {
 }
 
 /// A release build is the window, and the one flag that turns the log on.
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), feature = "logging"))]
 fn start() -> anyhow::Result<()> {
     if std::env::args().skip(1).any(|arg| arg == "--log") {
         imgdedupe_core::runlog::start("imgdedupe");
     }
+    app::launch()
+}
+
+/// A release build without the log compiled in is the window and nothing else.
+#[cfg(all(not(debug_assertions), not(feature = "logging")))]
+fn start() -> anyhow::Result<()> {
     app::launch()
 }
 

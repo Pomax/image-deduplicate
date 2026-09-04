@@ -525,6 +525,7 @@ pub fn find_sets_in(
     cancel: &AtomicBool,
     report: &(dyn Fn(Progress) + Sync),
 ) -> Result<Option<Vec<DuplicateSet>>> {
+    #[cfg(feature = "logging")]
     let mut timing = Timing::new();
     let stopped = || cancel.load(Ordering::Relaxed);
 
@@ -540,11 +541,11 @@ pub fn find_sets_in(
 
     let families = fold_identical(&images);
     let one_of_each: Vec<u32> = families.iter().map(|family| family[0]).collect();
-    crate::runlog::line(&format!(
+    crate::log_line!(
         "search folding: {} images are {} different pictures",
         images.len(),
         one_of_each.len()
-    ));
+    );
 
     let by_band: Vec<Vec<(u32, u32)>> = (0..fingerprint::BANDS)
         .into_par_iter()
@@ -562,6 +563,7 @@ pub fn find_sets_in(
     let mut candidates: Vec<(u32, u32)> = by_band.concat();
     candidates.par_sort_unstable();
     candidates.dedup();
+    #[cfg(feature = "logging")]
     timing.step("pairing", candidates.len(), "candidate pairs");
 
     let bounds: Vec<usize> = (0..=COMPARE_BATCHES)
@@ -593,6 +595,7 @@ pub fn find_sets_in(
         return Ok(None);
     }
     let matches = matched.concat();
+    #[cfg(feature = "logging")]
     timing.step("comparing", matches.len(), "matches");
     report(Progress::Grouping);
 
@@ -618,10 +621,13 @@ pub fn find_sets_in(
         .map(|position| (groups.root(position), position))
         .collect();
     members.sort_unstable();
+    #[cfg(feature = "logging")]
     timing.step("grouping", members.len(), "images in a set");
 
     let sets = build_sets(&images, &members);
+    #[cfg(feature = "logging")]
     timing.step("listing", sets.len(), "sets");
+    #[cfg(feature = "logging")]
     timing.total(sets.len());
     Ok(Some(sets))
 }
@@ -685,11 +691,13 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
 /// What each step of a search cost, written to the run log. A search that is slow
 /// on someone's folder is a fact about that folder, and the only way to know
 /// which step it is spending the time in is for the run to say so.
+#[cfg(feature = "logging")]
 struct Timing {
     started: std::time::Instant,
     step_started: std::time::Instant,
 }
 
+#[cfg(feature = "logging")]
 impl Timing {
     fn new() -> Self {
         let now = std::time::Instant::now();
@@ -701,17 +709,14 @@ impl Timing {
     fn step(&mut self, name: &str, count: usize, of: &str) {
         let took = self.step_started.elapsed();
         self.step_started = std::time::Instant::now();
-        crate::runlog::line(&format!(
-            "search {name}: {:.2}s, {count} {of}",
-            took.as_secs_f64()
-        ));
+        crate::log_line!("search {name}: {:.2}s, {count} {of}", took.as_secs_f64());
     }
 
     fn total(&self, sets: usize) {
-        crate::runlog::line(&format!(
+        crate::log_line!(
             "search finished: {:.2}s, {sets} sets",
             self.started.elapsed().as_secs_f64()
-        ));
+        );
     }
 }
 

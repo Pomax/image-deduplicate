@@ -2,6 +2,21 @@
 set -e
 cd "$(dirname "$0")"
 
+# With --test the binary understands --log and writes a run log. Without it none
+# of that code is compiled in: the flag, the file, and every line the program
+# would have written are all behind the feature.
+features=""
+note=""
+if [ $# -gt 0 ]; then
+    if [ "$1" = "--test" ]; then
+        features="--features imgdedupe/logging"
+        note=" --log build"
+    else
+        echo "the only argument is --test" >&2
+        exit 1
+    fi
+fi
+
 suffix=""
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*) os="windows"; suffix=".exe" ;;
@@ -16,7 +31,7 @@ mkdir -p "$out"
 # cargo hard linked it from, which is refused.
 rm -f "$out/imgdedupe$suffix"
 
-cargo build --release --workspace
+cargo build --release --workspace $features
 
 # Cargo hard links the binary to a second name under deps. Dropping that name
 # leaves the one in dist as the only one for it. Cargo links it again next time,
@@ -34,4 +49,4 @@ fi
 # A copy at the root as well, so the one to run is where it has always been.
 cp -f "$out/imgdedupe$suffix" "imgdedupe$suffix"
 
-echo "imgdedupe is in $(pwd)/$out and $(pwd)"
+echo "imgdedupe$note is in $(pwd)/$out and $(pwd)"

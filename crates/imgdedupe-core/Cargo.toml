@@ -10,6 +10,9 @@ default = ["index", "review"]
 index = []
 # Matching, scoring and removing.
 review = ["dep:trash"]
+# The run log behind `--log`. Off here, and only turned on by `build --test`,
+# so a normal build contains none of it.
+logging = []
 
 [dependencies]
 anyhow.workspace = true

@@ -5,7 +5,6 @@ use clap::Parser;
 use imgdedupe_core::cleanup::{self, Disposal, Plan};
 use imgdedupe_core::db;
 use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
-use imgdedupe_core::runlog;
 
 use crate::headless;
 use crate::Strictness;
@@ -68,6 +67,7 @@ struct Args {
     move_dir: Option<PathBuf>,
 
     /// Write what this run did to imgdedupe.log, beside this program.
+    #[cfg(feature = "logging")]
     #[arg(long)]
     log: bool,
 }
@@ -75,8 +75,9 @@ struct Args {
 /// Read the command line, and either do what it asks or open the window.
 pub fn start() -> Result<()> {
     let args = Args::parse();
+    #[cfg(feature = "logging")]
     if args.log {
-        runlog::start("imgdedupe");
+        imgdedupe_core::runlog::start("imgdedupe");
     }
     match (&args.report, &args.clean) {
         (Some(folder), _) => report(folder.clone(), &args),

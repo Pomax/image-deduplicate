@@ -15,10 +15,11 @@ use crate::thumbs::{self, Thumbnails};
 
 pub fn launch() -> Result<()> {
     let result = start_window();
+    #[cfg(feature = "logging")]
     if let Err(err) = &result {
         // Without this a failure to open the window is invisible: a windowed
         // process has no console for the message to go to.
-        runlog::line(&format!("the window could not be opened: {err:#}"));
+        runlog::log_line!("the window could not be opened: {err:#}");
     }
     result
 }
@@ -1097,6 +1098,7 @@ impl eframe::App for App {
             // before anything had been drawn.
             self.start_scan();
         }
+        self.take_dropped_folder(ctx);
         self.pump_indexer(ctx);
         self.pump_search(ctx);
         self.pump_cleanup(ctx);
@@ -1191,7 +1193,7 @@ impl App {
     /// Show a problem and put it in the log, so a report of one has something
     /// behind it.
     fn fail(&mut self, message: &str) {
-        runlog::line(&format!("ERROR {message}"));
+        runlog::log_line!("ERROR {message}");
         self.error = Some(message.to_string());
     }
 
@@ -1510,6 +1512,35 @@ impl App {
             height: inner.height(),
             maximized: false,
         });
+    }
+
+    /// Take a folder dropped on the window: open it and scan it, which the search
+    /// for duplicates follows on its own once the pass is over.
+    ///
+    /// Anything dropped that is not a folder is ignored, and so is a drop while
+    /// there is work running, which the buttons are disabled for as well.
+    fn take_dropped_folder(&mut self, ctx: &egui::Context) {
+        if self.busy() {
+            return;
+        }
+        let dropped = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .find(|path| path.is_dir())
+        });
+        let Some(folder) = dropped else {
+            return;
+        };
+        // Wherever the drop landed, this is a new folder at step one.
+        self.view = View::Scan;
+        self.open_folder(folder);
+        // A folder that already had an index is scanning by now.
+        if self.running.is_none() {
+            self.start_scan();
+        }
     }
 
     /// A folder that has been indexed before is brought up to date on sight. One
@@ -1841,6 +1872,7 @@ impl App {
     /// that has been indexed before is fast, and the pass converts it to the form
     /// the search works on as part of loading it. If there is no such structure
     /// there is nothing to search, and the caller runs a pass first.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     fn load_sets(&mut self) {
         let Some(db_path) = self.db_path.clone() else {
             return;
@@ -1855,13 +1887,13 @@ impl App {
         self.search = SearchState { stage: Some("starting"), ..SearchState::default() };
         let mut thresholds = Thresholds::at(self.sensitivity);
         thresholds.ignore_colour = self.ignore_colour;
-        runlog::line(&format!(
+        runlog::log_line!(
             "matching {} at {:.1}% ({} bits), ignore_colour {}",
             db_path.display(),
             self.sensitivity,
             thresholds.max_bits,
             thresholds.ignore_colour
-        ));
+        );
 
         // What the last pass ended with says nothing about this one.
         self.scan.finished = None;
@@ -1937,7 +1969,7 @@ impl App {
                     done = true;
                 }
                 Found::Cancelled => {
-                    runlog::line("the search was cancelled");
+                    runlog::log_line!("the search was cancelled");
                     self.scan.finished = Some(String::from("cancelled"));
                     done = true;
                 }
@@ -1953,7 +1985,7 @@ impl App {
     }
 
     fn accept_sets(&mut self, sets: Vec<DuplicateSet>) {
-        runlog::line(&format!("found {} duplicate sets", sets.len()));
+        runlog::log_line!("found {} duplicate sets", sets.len());
         self.keep.clear();
         self.selected = None;
         self.showing = None;
@@ -2111,6 +2143,7 @@ impl App {
     /// Where this folder's duplicates go, and the folder they are moved to. This
     /// belongs to the folder that was scanned rather than to the application:
     /// what is safe to delete outright somewhere is not safe everywhere.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     fn remember_disposal(&self) {
         let Some(db_path) = &self.db_path else {
             return;
@@ -2121,7 +2154,7 @@ impl App {
             db::set_meta(&conn, "move_dir", &self.move_dir)
         });
         if let Err(err) = result {
-            runlog::line(&format!("the cleanup choice could not be written: {err:#}"));
+            runlog::log_line!("the cleanup choice could not be written: {err:#}");
         }
     }
 
@@ -2232,7 +2265,7 @@ impl App {
         // Dropping the run asks the pass to stop and does not wait for it.
         self.running = None;
         if self.searching.is_some() {
-            runlog::line("cancelling: stopping the search");
+            runlog::log_line!("cancelling: stopping the search");
             self.search_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             self.searching = None;
         }
@@ -2567,7 +2600,7 @@ impl App {
                     })
                     .min_size(egui::vec2(210.0, 28.0));
                     if ui.add_enabled(ready, button).clicked() {
-                        runlog::line("the remove button was pressed");
+                        runlog::log_line!("the remove button was pressed");
                         self.run_cleanup(&plan);
                     }
                 });
@@ -2731,28 +2764,30 @@ impl App {
     /// it silently cannot be told from one that has hung.
     fn run_cleanup(&mut self, plan: &Plan) {
         let Some(root) = self.folder.clone() else {
-            runlog::line("cleanup asked for with no folder open");
+            runlog::log_line!("cleanup asked for with no folder open");
             return;
         };
         if self.removing.is_some() {
-            runlog::line("cleanup asked for while one is already running");
+            runlog::log_line!("cleanup asked for while one is already running");
             return;
         }
         let plan = plan.clone();
         let disposal = self.disposal();
         let total = plan.files();
         self.cleanup_failures.clear();
-        runlog::line(&format!(
+        runlog::log_line!(
             "cleanup starting: {total} files, {:.1} MB, to {:?}, under {}",
             plan.bytes() as f64 / 1_000_000.0,
             disposal,
             root.display()
-        ));
+        );
+        #[cfg(feature = "logging")]
         for removal in plan.removals.iter().take(5) {
-            runlog::line(&format!("  removing {}", removal.rel_path));
+            runlog::log_line!("  removing {}", removal.rel_path);
         }
+        #[cfg(feature = "logging")]
         if total > 5 {
-            runlog::line(&format!("  and {} more", total - 5));
+            runlog::log_line!("  and {} more", total - 5);
         }
 
         let (send, receive) = std::sync::mpsc::channel::<Removal>();
@@ -2816,20 +2851,21 @@ impl App {
     fn finish_cleanup(&mut self, outcome: &cleanup::Outcome, forgotten: usize) {
         // Every file that would not go, by name and by reason. A cleanup that
         // quietly removes nothing is what this is here to explain.
+        #[cfg(feature = "logging")]
         for (path, message) in &outcome.failed {
-            runlog::line(&format!("  could not remove {path}: {message}"));
+            runlog::log_line!("  could not remove {path}: {message}");
         }
         let index = if self.keep_index {
             format!("{forgotten} dropped from the index")
         } else {
             String::from("the index was deleted")
         };
-        runlog::line(&format!(
+        runlog::log_line!(
             "cleanup finished: {} removed, {} failed, {:.1} MB, {index}",
             outcome.removed.len(),
             outcome.failed.len(),
             outcome.bytes_freed as f64 / 1_000_000.0
-        ));
+        );
         self.cleanup_result = Some(format!(
             "removed {} files, freed {:.1} MB, {} failed, {index}",
             outcome.removed.len(),
@@ -2888,10 +2924,12 @@ impl App {
 /// Nothing is going to read it again: the next run opens on no folder, and a
 /// scan of this one builds it from nothing. Deleting the file is what dropping
 /// the rows and rebuilding around them was for, without the copy.
+#[cfg_attr(not(feature = "logging"), allow(unused_variables, unused_assignments))]
 fn discard_index(db_path: Option<&Path>) -> usize {
     let Some(db_path) = db_path else {
         return 0;
     };
+    #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     let mut gone = 0;
     for path in [
@@ -2902,14 +2940,14 @@ fn discard_index(db_path: Option<&Path>) -> usize {
         match std::fs::remove_file(&path) {
             Ok(()) => gone += 1,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => runlog::line(&format!("{} would not go: {err}", path.display())),
+            Err(err) => runlog::log_line!("{} would not go: {err}", path.display()),
         }
     }
-    runlog::line(&format!(
+    runlog::log_line!(
         "delete index: {:.2}s, {gone} files, {}",
         at.elapsed().as_secs_f64(),
         db_path.display()
-    ));
+    );
     0
 }
 
@@ -2927,39 +2965,39 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 ///
 /// This runs on the removal's own thread. It rewrites the index file, which on a
 /// folder of thousands is seconds of work.
+#[cfg_attr(not(feature = "logging"), allow(unused_variables))]
 fn forget_rows(db_path: Option<&Path>, removed: &[String]) -> usize {
     let Some(db_path) = db_path else {
-        runlog::line("nothing was dropped from the index: no index is open");
+        runlog::log_line!("nothing was dropped from the index: no index is open");
         return 0;
     };
     if removed.is_empty() {
         return 0;
     }
     let dropped = db::open_for_notes(db_path).and_then(|mut conn| {
+        #[cfg(feature = "logging")]
         let at = std::time::Instant::now();
         let tx = conn.transaction()?;
         let dropped = db::delete_paths(&tx, removed)?;
         tx.commit()?;
         drop(conn);
-        runlog::line(&format!(
-            "drop removed: {:.2}s, {dropped} rows",
-            at.elapsed().as_secs_f64()
-        ));
+        runlog::log_line!("drop removed: {:.2}s, {dropped} rows", at.elapsed().as_secs_f64());
 
         // Rebuilding costs a copy of the whole index, so it happens here and only
         // here: a cleanup is the one thing that leaves enough behind to be worth
         // it, and only when it actually dropped rows.
         if dropped > 0 {
+            #[cfg(feature = "logging")]
             let at = std::time::Instant::now();
             db::compact(db_path)?;
-            runlog::line(&format!("rebuild index: {:.2}s", at.elapsed().as_secs_f64()));
+            runlog::log_line!("rebuild index: {:.2}s", at.elapsed().as_secs_f64());
         }
         Ok(dropped)
     });
     match dropped {
         Ok(count) => count,
         Err(err) => {
-            runlog::line(&format!("the index still lists the removed files: {err:#}"));
+            runlog::log_line!("the index still lists the removed files: {err:#}");
             0
         }
     }
@@ -4834,6 +4872,68 @@ mod tests {
         .save_with_format(dir.join("one.png"), image::ImageFormat::Png)
         .expect("a fixture");
         dir
+    }
+
+    /// A folder dropped on the window is opened, scanned, and searched, without
+    /// anything being pressed, from whichever tab the window happened to be on.
+    #[test]
+    fn a_folder_dropped_on_the_window_is_scanned_and_searched() {
+        let reviewed = folder_with_two_sets();
+        let mut app = reviewing(reviewed.path());
+        assert_eq!(app.view, View::Review, "the fixture did not reach the review");
+
+        let folder = folder_with_a_duplicate();
+        let ctx = window();
+
+        let input = egui::RawInput {
+            dropped_files: vec![egui::DroppedFile {
+                path: Some(folder.path().to_path_buf()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.take_dropped_folder(ctx));
+
+        assert_eq!(app.folder.as_deref(), Some(folder.path()), "the folder was not opened");
+        assert!(app.running.is_some(), "the drop did not start a scan");
+        assert_eq!(app.view, View::Scan, "the drop left the window on the old tab");
+
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the search did not follow the scan");
+        assert_eq!(app.view, View::Review, "the window did not move on to the review");
+    }
+
+    /// Only folders. A file dropped on the window is not a folder to scan, and
+    /// neither is a drop while a pass is already running.
+    #[test]
+    fn dropping_anything_but_a_folder_does_nothing() {
+        let folder = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        let ctx = window();
+
+        let drop = |app: &mut App, path: PathBuf| {
+            let input = egui::RawInput {
+                dropped_files: vec![egui::DroppedFile { path: Some(path), ..Default::default() }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| app.take_dropped_folder(ctx));
+        };
+
+        drop(&mut app, folder.path().join("one.png"));
+        assert!(app.folder.is_none(), "a dropped file was taken for a folder");
+        assert!(app.running.is_none(), "a dropped file started a scan");
+
+        // Now with a pass under way: the second folder is not taken up.
+        drop(&mut app, folder.path().to_path_buf());
+        assert!(app.running.is_some(), "the folder was not scanned");
+        let second = folder_with_a_duplicate();
+        drop(&mut app, second.path().to_path_buf());
+        assert_eq!(
+            app.folder.as_deref(),
+            Some(folder.path()),
+            "a drop during a pass changed the folder"
+        );
+        settle(&mut app);
     }
 
     /// Two folders really scanned, one of them twice, and a third only opened.

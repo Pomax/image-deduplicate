@@ -70,12 +70,12 @@ impl Settings {
     pub fn load() -> Self {
         let path = settings_path();
         let loaded = read(&path);
-        imgdedupe_core::runlog::line(&format!(
+        imgdedupe_core::log_line!(
             "settings {}: exists {}, {}",
             path.display(),
             path.exists(),
             loaded.describe()
-        ));
+        );
         loaded
     }
 
@@ -88,13 +88,12 @@ impl Settings {
     pub fn save(&self) {
         let path = settings_path();
         write(&path, self);
-        imgdedupe_core::runlog::line(&format!(
-            "saved settings to {}: {}",
-            path.display(),
-            self.describe()
-        ));
+        imgdedupe_core::log_line!("saved settings to {}: {}", path.display(), self.describe());
     }
 
+    /// What the settings say, for the run log, which is the only thing that
+    /// reads it.
+    #[cfg(feature = "logging")]
     fn describe(&self) -> String {
         format!(
             "folder {:?}, recurse {}, {} scanned before, ignore_colour {}, \

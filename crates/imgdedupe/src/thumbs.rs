@@ -155,8 +155,9 @@ impl Tally {
             return;
         }
         self.said = self.arrived;
+        #[cfg(feature = "logging")]
         let waited = self.started.map_or(0.0, |at| at.elapsed().as_secs_f64());
-        imgdedupe_core::runlog::line(&format!(
+        imgdedupe_core::log_line!(
             "thumbnails: {} of {} in {waited:.1}s, {} failed, {:.0}ms decoding and \
              {:.0}ms uploading per picture",
             self.arrived,
@@ -164,7 +165,7 @@ impl Tally {
             self.failed,
             self.decoding * 1000.0 / self.arrived as f64,
             self.uploading * 1000.0 / self.arrived as f64
-        ));
+        );
     }
 }
 

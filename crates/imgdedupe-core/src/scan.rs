@@ -312,6 +312,9 @@ fn indexed_so_far(
 
 /// Where a pass spends its time inside the files, added up over every thread.
 /// The totals are larger than the wall clock, by roughly the number of threads.
+/// They are only ever read by the run log, so a build without the log carries
+/// the empty version below and none of the timing.
+#[cfg(feature = "logging")]
 #[derive(Default)]
 struct Spent {
     reading: AtomicU64,
@@ -319,6 +322,7 @@ struct Spent {
     fingerprinting: AtomicU64,
 }
 
+#[cfg(feature = "logging")]
 impl Spent {
     fn add(counter: &AtomicU64, at: Instant) {
         counter.fetch_add(at.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -329,6 +333,11 @@ impl Spent {
     }
 }
 
+#[cfg(not(feature = "logging"))]
+#[derive(Default)]
+struct Spent;
+
+#[cfg_attr(not(feature = "logging"), allow(unused_variables))]
 fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let Some(format) = format::detect(head) else {
@@ -338,6 +347,7 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
         return Outcome::NotAnImage;
     }
 
+    #[cfg(feature = "logging")]
     let at = Instant::now();
     let decoded = match decode_at_most(format, &bytes, SMALL_EDGE) {
         Ok(decoded) => decoded,
@@ -348,17 +358,20 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
             }
         }
     };
+    #[cfg(feature = "logging")]
     Spent::add(&spent.decoding, at);
-    crate::runlog::line(&format!(
+    crate::log_line!(
         "decoded {} as {format}, {}x{}, {} bytes on disk",
         candidate.rel_path,
         decoded.width,
         decoded.height,
         bytes.len()
-    ));
+    );
 
+    #[cfg(feature = "logging")]
     let at = Instant::now();
     let print = fingerprint(&decoded);
+    #[cfg(feature = "logging")]
     Spent::add(&spent.fingerprinting, at);
 
     Outcome::Indexed(Box::new(Record {
@@ -430,13 +443,16 @@ pub fn run(
     report: &(dyn Fn(Event) + Sync),
 ) -> Result<(Summary, Option<Vec<crate::matching::Image>>)> {
     let started = Instant::now();
+    #[cfg(feature = "logging")]
     let at = Instant::now();
     let candidates = walk(options, cancel, report).context("walking the folder")?;
+    #[cfg(feature = "logging")]
     let found = candidates.len();
     report(Event::Reached(Step::FoundTheTotal));
     report(Event::Reached(Step::ListedTheFolder));
-    runlog::line(&format!("walk: {:.2}s, {found} files", at.elapsed().as_secs_f64()));
+    runlog::log_line!("walk: {:.2}s, {found} files", at.elapsed().as_secs_f64());
 
+    #[cfg(feature = "logging")]
     let at = Instant::now();
     // Read the file whole rather than through it. The log is folded in first, so
     // the file is everything that has been written. See `db::open_snapshot`.
@@ -445,24 +461,25 @@ pub fn run(
     }
     // Straight off the connection: the index is in memory from the moment it was
     // opened, so this reads nothing from anywhere.
+    #[cfg(feature = "logging")]
     let step = Instant::now();
     let known = db::load_known(conn).context("reading the existing index")?;
-    runlog::line(&format!("  known paths: {:.2}s", step.elapsed().as_secs_f64()));
+    runlog::log_line!("  known paths: {:.2}s", step.elapsed().as_secs_f64());
     report(Event::Reached(Step::LoadedIndexIntoMemory));
-    runlog::line(&format!(
+    runlog::log_line!(
         "load index: {:.2}s, {} rows",
         at.elapsed().as_secs_f64(),
         known.len()
-    ));
+    );
 
     let Diff { to_index, removed, unchanged } = diff(candidates, &known);
     report(Event::Reached(Step::CrossReferencedWithTheIndex));
     report(Event::Reached(Step::CountedWhatChanged));
-    runlog::line(&format!(
+    runlog::log_line!(
         "diff: {unchanged} unchanged, {} to index, {} gone",
         to_index.len(),
         removed.len()
-    ));
+    );
 
     // The index is loaded and nothing in the folder has moved, so it is already
     // the answer. Convert it here, off the copy that is still in memory, rather
@@ -477,25 +494,27 @@ pub fn run(
         // reporting either is reporting work that was never done.
     } else if to_index.is_empty() && removed.is_empty() {
         report(Event::Reached(Step::StartedConvertingTheIndex));
+        #[cfg(feature = "logging")]
         let step = Instant::now();
         images =
             crate::matching::load_images(conn, cancel, &|_| {}).context("converting the index")?;
-        runlog::line(&format!("  convert to memory: {:.2}s", step.elapsed().as_secs_f64()));
+        runlog::log_line!("  convert to memory: {:.2}s", step.elapsed().as_secs_f64());
         report(Event::Reached(Step::FinishedConvertingTheIndex));
     }
 
     let mut summary = Summary { unchanged, ..Summary::default() };
 
     if !removed.is_empty() {
+        #[cfg(feature = "logging")]
         let at = Instant::now();
         let tx = conn.transaction()?;
         summary.removed = db::delete_paths(&tx, &removed)? as u64;
         tx.commit()?;
-        runlog::line(&format!(
+        runlog::log_line!(
             "drop gone: {:.2}s, {} rows",
             at.elapsed().as_secs_f64(),
             summary.removed
-        ));
+        );
     }
 
     let total = to_index.len() as u64;
@@ -542,19 +561,23 @@ pub fn run(
                 if pending.is_empty() {
                     return Ok(());
                 }
+                #[cfg(feature = "logging")]
                 let rows = pending.len();
+                #[cfg(feature = "logging")]
                 let at = Instant::now();
                 let tx = conn.transaction()?;
                 for record in pending.iter() {
                     db::upsert(&tx, record, scanned_at)?;
                 }
+                #[cfg(feature = "logging")]
                 let inserted = at.elapsed().as_secs_f64();
+                #[cfg(feature = "logging")]
                 let at = Instant::now();
                 tx.commit()?;
-                runlog::line(&format!(
+                runlog::log_line!(
                     "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
                     at.elapsed().as_secs_f64()
-                ));
+                );
                 pending.clear();
                 Ok(())
             };
@@ -593,6 +616,7 @@ pub fn run(
         // that is not the speed of anything.
         let reading_since = Instant::now();
         let announce = |count: u64| {
+            #[cfg(feature = "logging")]
             let elapsed = reading_since.elapsed().as_secs_f64().max(0.001);
             // Files in the last second, worked out once a second. Not files
             // divided by the whole pass, which is an average and falls for the
@@ -608,7 +632,7 @@ pub fn run(
             // Where the time is going, while it is going, rather than once at the
             // end of a pass that takes minutes. These are summed over every
             // thread, so they are larger than the wall clock.
-            runlog::line(&format!(
+            runlog::log_line!(
                 "rate: {count} files in {elapsed:.1}s, {} in the last second; over every \
                  thread {:.1}s reading, {:.1}s decoding, {:.1}s fingerprinting; {} bytes \
                  read ahead",
@@ -617,7 +641,7 @@ pub fn run(
                 Spent::seconds(&spent.decoding),
                 Spent::seconds(&spent.fingerprinting),
                 read_ahead.held.lock().map(|held| *held).unwrap_or(0),
-            ));
+            );
             report(Event::Progress {
                 // Every file in the folder has been looked at, including the ones
                 // whose size and timestamp said there was nothing to do.
@@ -653,9 +677,11 @@ pub fn run(
                         let Some(candidate) = to_index.get(at) else {
                             return;
                         };
+                        #[cfg(feature = "logging")]
                         let started = Instant::now();
                         match dirlist::read_whole(&candidate.abs_path, candidate.size_bytes) {
                             Ok(bytes) => {
+                                #[cfg(feature = "logging")]
                                 Spent::add(&spent.reading, started);
                                 read_ahead.claim(bytes.len() as u64, cancel);
                                 if loaded_tx.send((at, bytes)).is_err() {
@@ -714,14 +740,14 @@ pub fn run(
         // The last partial group of files would otherwise never be announced and
         // the bar would stop short of the end.
         announce(done.load(Ordering::Relaxed));
-        runlog::line(&format!(
+        runlog::log_line!(
             "read and fingerprint: {:.2}s of wall clock; over every thread, \
              {:.1}s reading, {:.1}s decoding, {:.1}s fingerprinting",
             started.elapsed().as_secs_f64(),
             Spent::seconds(&spent.reading),
             Spent::seconds(&spent.decoding),
             Spent::seconds(&spent.fingerprinting)
-        ));
+        );
 
         writer.join().map_err(|_| anyhow::anyhow!("the index writer thread panicked"))?
     })?;

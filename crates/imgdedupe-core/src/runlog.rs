@@ -1,12 +1,49 @@
+//! The `--log` run log, and nothing else.
+//!
+//! Everything here is behind the `logging` feature. A build without that
+//! feature has no log file, no `--log` flag, and no call to either: the write
+//! calls are a macro, so a build without the feature does not evaluate their
+//! arguments, format them, or compile them.
+
+#[cfg(feature = "logging")]
 use std::fs::OpenOptions;
+#[cfg(feature = "logging")]
 use std::io::Write;
+#[cfg(feature = "logging")]
 use std::path::PathBuf;
+#[cfg(feature = "logging")]
 use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "logging")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use crate::log_line;
+
+/// Write one line to the log.
+///
+/// The arguments are those of `format!`. Without the `logging` feature this
+/// expands to nothing at all, which is the point of it being a macro: a
+/// function would still have its arguments built at every call site.
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! log_line {
+    ($($arg:tt)*) => {
+        $crate::runlog::line(&format!($($arg)*))
+    };
+}
+
+#[cfg(not(feature = "logging"))]
+#[macro_export]
+macro_rules! log_line {
+    ($($arg:tt)*) => {
+        ()
+    };
+}
+
+#[cfg(feature = "logging")]
 static LOG: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
 
 /// Where the log goes: beside the executable, named after it.
+#[cfg(feature = "logging")]
 fn path_for(name: &str) -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -22,6 +59,7 @@ fn path_for(name: &str) -> PathBuf {
 /// Nothing is written unless this is called. Neither program calls it without
 /// being asked to on the command line: a tool that leaves a file beside itself
 /// every time it runs was not what anyone wanted.
+#[cfg(feature = "logging")]
 pub fn start(name: &str) {
     let file = OpenOptions::new()
         .create(true)
@@ -45,12 +83,14 @@ pub fn start(name: &str) {
 
 /// Whether `start` has been called. A program that spawns another passes the
 /// flag on, so one run leaves one set of logs rather than half of them.
+#[cfg(feature = "logging")]
 pub fn is_on() -> bool {
     LOG.get().is_some()
 }
 
 /// Append one line. Never fails and never panics: a logger that can bring the
-/// program down is worse than no logger.
+/// program down is worse than no logger. Call it through `log_line!`.
+#[cfg(feature = "logging")]
 pub fn line(text: &str) {
     let Some(lock) = LOG.get() else {
         return;
@@ -69,7 +109,7 @@ pub fn line(text: &str) {
     let _ = file.flush();
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "logging"))]
 mod tests {
     use super::*;
 

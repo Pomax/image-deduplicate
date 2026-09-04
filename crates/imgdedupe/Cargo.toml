@@ -8,6 +8,11 @@ rust-version.workspace = true
 name = "imgdedupe"
 path = "src/main.rs"
 
+[features]
+# The `--log` flag and everything it writes. Off unless the build script is
+# given `--test`.
+logging = ["imgdedupe-core/logging"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

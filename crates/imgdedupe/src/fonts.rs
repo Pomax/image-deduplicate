@@ -92,25 +92,26 @@ fn find_a_face(ctx: &egui::Context, missing: Vec<char>) {
     let ctx = ctx.clone();
     let faces = FACES.get_or_init(|| Mutex::new(Vec::new()));
     std::thread::spawn(move || {
+        #[cfg(feature = "logging")]
         let at = std::time::Instant::now();
         let mut database = fontdb::Database::new();
         database.load_system_fonts();
         let Some(bytes) = sans_serif_with(&database, &missing) else {
-            runlog::line(&format!(
+            runlog::log_line!(
                 "no system face covers {missing:?}, {:.2}s",
                 at.elapsed().as_secs_f64()
-            ));
+            );
             return;
         };
         let Ok(mut held) = faces.lock() else {
             return;
         };
         held.push(bytes);
-        runlog::line(&format!(
+        runlog::log_line!(
             "fallback face for {missing:?}: {:.2}s, {} in use",
             at.elapsed().as_secs_f64(),
             held.len()
-        ));
+        );
         ctx.set_fonts(definitions(held.clone()));
         ctx.request_repaint();
     });

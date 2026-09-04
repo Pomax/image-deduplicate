@@ -71,25 +71,27 @@ pub fn open(path: &Path) -> Result<Connection> {
     // that a log needs and that a network filesystem cannot properly provide, the
     // schema, and every insert. In memory they are all free, and what reaches the
     // network is one sequential write of a file that is a few megabytes.
+    #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     let conn = match std::fs::read(path) {
         Ok(bytes) => {
             let existing = into_memory(bytes, path, false)?;
-            crate::runlog::line(&format!(
+            crate::log_line!(
                 "    read {} bytes of index: {:.2}s",
                 std::fs::metadata(path).map(|it| it.len()).unwrap_or(0),
                 at.elapsed().as_secs_f64()
-            ));
+            );
             existing
         }
         // No index yet, or none that can be read. Either way this pass builds one.
         Err(_) => Connection::open_in_memory().context("opening an index in memory")?,
     };
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     conn.execute_batch(SCHEMA).context("applying the schema")?;
     drop_dead_columns(&conn)?;
-    crate::runlog::line(&format!("    schema: {:.2}s", at.elapsed().as_secs_f64()));
+    crate::log_line!("    schema: {:.2}s", at.elapsed().as_secs_f64());
 
     let existing: Option<i64> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -342,12 +344,15 @@ pub fn checkpoint(conn: &Connection) -> Result<()> {
 /// of WAL mode is what removes both; deleting them by hand throws away whatever
 /// the log still holds.
 pub fn close(conn: Connection, path: &Path) -> Result<()> {
+    #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
+    // The byte count is only there to be logged, but the write itself is not.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     let written = write_out(&conn, path)?;
-    crate::runlog::line(&format!(
+    crate::log_line!(
         "write the index out: {:.2}s, {written} bytes",
         at.elapsed().as_secs_f64()
-    ));
+    );
     drop(conn);
     // A write-ahead log and its shared memory file, left by a version that kept
     // the index open across the network. Nothing writes them now and a stale one
