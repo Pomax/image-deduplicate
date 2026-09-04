@@ -9,6 +9,8 @@ mod folder_picker;
 mod fonts;
 mod headless;
 mod indexer;
+#[cfg(target_os = "linux")]
+mod mesa;
 mod settings;
 mod thumbs;
 #[cfg(debug_assertions)]
