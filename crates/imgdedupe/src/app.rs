@@ -6,6 +6,7 @@ use eframe::egui;
 use imgdedupe_core::cleanup::{self, Disposal, Plan};
 use imgdedupe_core::db;
 use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
+use imgdedupe_core::scan;
 use imgdedupe_core::runlog;
 
 use crate::headless;
@@ -25,8 +26,13 @@ pub fn launch() -> Result<()> {
 fn start_window() -> Result<()> {
     let saved = crate::settings::Settings::load();
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1100.0, 750.0])
-        .with_min_inner_size([700.0, 480.0])
+        // Tall enough for the scan page's own content without scrolling: the three
+        // boxes, the progress box, and one line per step of a pass. That last list
+        // is what sets the height, and a window that cannot show all of it hides
+        // exactly the part someone is watching when they want to know what is
+        // taking so long.
+        .with_inner_size([1100.0, 860.0])
+        .with_min_inner_size([700.0, 780.0])
         .with_title("imgdedupe");
     if let Some(window) = saved.window {
         viewport = viewport
@@ -67,6 +73,10 @@ enum Removal {
 
 /// What the thread searching for duplicates sends back.
 enum Found {
+    /// Where the search has got to. It used to send nothing until it was
+    /// finished, so the window sat on whatever the pass had last said for the
+    /// whole of it.
+    Progress(matching::Progress),
     Sets(Vec<DuplicateSet>),
     Cancelled,
     Failed(String),
@@ -695,6 +705,68 @@ struct ScanState {
     ignored: u64,
     failures: Vec<(String, String)>,
     finished: Option<String>,
+    /// Files the listing has found, while it is still listing. There is no total
+    /// to measure it against until the listing is over, so this is a count, and
+    /// it is the only thing there is to show for the part of a pass that used to
+    /// show nothing at all.
+    listing: Option<u64>,
+}
+
+/// What the search is doing, kept entirely apart from what the pass did.
+///
+/// The two have nothing to say about each other. When the pass has read and
+/// indexed a folder its numbers are the answer and they stay on screen until a
+/// new scan; the search reports its own work underneath them.
+#[derive(Debug, Default, Clone)]
+struct SearchState {
+    /// The stage, or nothing when no search is running.
+    stage: Option<&'static str>,
+    /// Pictures read out of the index, of how many it holds. Zero for the total
+    /// means it has not counted them yet.
+    loaded: u64,
+    to_load: u64,
+    /// Pairs compared, of how many the shortlist produced.
+    compared: u64,
+    pairs: u64,
+    /// Set when the search is over, so the bar stays full afterwards rather than
+    /// emptying because nothing is reporting any more.
+    done: bool,
+}
+
+impl SearchState {
+    /// The search as one number out of one number.
+    ///
+    /// Two stages of very different lengths, and the second's size is not known
+    /// until the first has finished, so they share a bar rather than each having
+    /// one that is empty for half the time. Reading the index is the first half
+    /// of the bar and comparing is the second.
+    fn progress(&self) -> (u64, u64) {
+        const HALF: u64 = 1000;
+        if self.done {
+            // A search over nothing is not a finished search. Filling the bar for
+            // it says the work was done.
+            if self.to_load == 0 && self.pairs == 0 {
+                return (0, 0);
+            }
+            return (HALF * 2, HALF * 2);
+        }
+        if self.stage.is_none() {
+            return (0, 0);
+        }
+        let read = fraction(self.loaded, self.to_load, HALF);
+        if self.pairs == 0 && self.compared == 0 {
+            return (read, HALF * 2);
+        }
+        (HALF + fraction(self.compared, self.pairs, HALF), HALF * 2)
+    }
+}
+
+/// `part` of `whole`, scaled onto `out_of`. Nothing of nothing is nothing.
+fn fraction(part: u64, whole: u64, out_of: u64) -> u64 {
+    if whole == 0 {
+        return 0;
+    }
+    (part.min(whole) * out_of) / whole
 }
 
 impl ScanState {
@@ -707,6 +779,125 @@ impl ScanState {
             .saturating_sub(self.unchanged)
             .saturating_sub(self.ignored)
             .saturating_sub(self.failures.len() as u64)
+    }
+}
+
+/// The things a pass goes through, each with a lamp on the scan page. Red until
+/// the thing happens, green after.
+///
+/// The order here is the order they are drawn in, which is the order they were
+/// asked for and not the order they happen in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Lamp {
+    CheckedForIndexFile,
+    StartedReadingTheIndexSettings,
+    FinishedReadingTheIndexSettings,
+    StartedOpeningTheIndexForWriting,
+    FinishedOpeningTheIndexForWriting,
+    StartedLookingForTheTotal,
+    FoundTheTotal,
+    LoadedIndexIntoMemory,
+    ListedTheFolder,
+    CrossReferencedWithTheIndex,
+    CountedWhatChanged,
+    StartedReadingNewFiles,
+    FinishedReadingNewFiles,
+    StartedIndexingNewFiles,
+    FinishedIndexingNewFiles,
+    StartedBuildingTheMemoryIndex,
+    FinishedBuildingTheMemoryIndex,
+    StartedFindingDuplicates,
+    FinishedFindingDuplicates,
+}
+
+/// In the order a pass goes through them, which is also the order they read in.
+///
+/// One thing sits out of its running order: on a folder where nothing has
+/// changed, the conversion happens as soon as the counting says there is nothing
+/// to index, so those two lamps turn before the four about reading and indexing,
+/// which then turn immediately and together because there is no work in them.
+const LAMPS: [(Lamp, &str); 19] = [
+    (Lamp::CheckedForIndexFile, "Checked for sqlite file in this folder"),
+    (
+        Lamp::StartedReadingTheIndexSettings,
+        "Started reading the index's own settings",
+    ),
+    (
+        Lamp::FinishedReadingTheIndexSettings,
+        "Finished reading the index's own settings",
+    ),
+    (Lamp::StartedOpeningTheIndexForWriting, "Started opening the index for writing"),
+    (Lamp::FinishedOpeningTheIndexForWriting, "Finished opening the index for writing"),
+    (Lamp::StartedLookingForTheTotal, "Started looking for total number of files"),
+    (Lamp::FoundTheTotal, "Found total number of files"),
+    (Lamp::ListedTheFolder, "Retrieved full file list in the folder"),
+    (
+        Lamp::LoadedIndexIntoMemory,
+        "Loaded sqlite file into memory and constructed in-memory index",
+    ),
+    (
+        Lamp::CrossReferencedWithTheIndex,
+        "Cross referenced file list in folder with index from memory",
+    ),
+    (
+        Lamp::CountedWhatChanged,
+        "Finished finding number of new, unchanged, and removed files",
+    ),
+    (
+        Lamp::StartedReadingNewFiles,
+        "Starting individual file reads for any new file not in the index yet",
+    ),
+    (
+        Lamp::FinishedReadingNewFiles,
+        "Finished individual file reads for any new file not in the index yet",
+    ),
+    (
+        Lamp::StartedIndexingNewFiles,
+        "Starting indexing for new files not in the index yet",
+    ),
+    (
+        Lamp::FinishedIndexingNewFiles,
+        "Finished indexing for new files not in the index yet",
+    ),
+    (
+        Lamp::StartedBuildingTheMemoryIndex,
+        "Starting index conversion to in-memory datastructure",
+    ),
+    (
+        Lamp::FinishedBuildingTheMemoryIndex,
+        "Finished converting index to in-memory datastructure",
+    ),
+    (
+        Lamp::StartedFindingDuplicates,
+        "Started duplication computation given current settings",
+    ),
+    (Lamp::FinishedFindingDuplicates, "Finished duplication computation"),
+];
+
+impl From<scan::Step> for Lamp {
+    fn from(step: scan::Step) -> Self {
+        match step {
+            scan::Step::StartedReadingTheIndexSettings => Lamp::StartedReadingTheIndexSettings,
+            scan::Step::FinishedReadingTheIndexSettings => Lamp::FinishedReadingTheIndexSettings,
+            scan::Step::StartedOpeningTheIndexForWriting => {
+                Lamp::StartedOpeningTheIndexForWriting
+            }
+            scan::Step::FinishedOpeningTheIndexForWriting => {
+                Lamp::FinishedOpeningTheIndexForWriting
+            }
+            scan::Step::StartedConvertingTheIndex => Lamp::StartedBuildingTheMemoryIndex,
+            scan::Step::FinishedConvertingTheIndex => Lamp::FinishedBuildingTheMemoryIndex,
+            scan::Step::StartedLookingForTheTotal => Lamp::StartedLookingForTheTotal,
+            scan::Step::FoundTheTotal => Lamp::FoundTheTotal,
+            scan::Step::LoadedIndexIntoMemory => Lamp::LoadedIndexIntoMemory,
+            scan::Step::ListedTheFolder => Lamp::ListedTheFolder,
+            scan::Step::CrossReferencedWithTheIndex => Lamp::CrossReferencedWithTheIndex,
+            scan::Step::CountedWhatChanged => Lamp::CountedWhatChanged,
+            scan::Step::StartedReadingNewFiles => Lamp::StartedReadingNewFiles,
+            scan::Step::FinishedReadingNewFiles => Lamp::FinishedReadingNewFiles,
+            scan::Step::StartedIndexingNewFiles => Lamp::StartedIndexingNewFiles,
+            scan::Step::FinishedIndexingNewFiles => Lamp::FinishedIndexingNewFiles,
+        }
     }
 }
 
@@ -785,6 +976,30 @@ pub struct App {
     /// How tall the scan row's three boxes were last frame, so they end level
     /// with each other without any of them being a fixed height.
     scan_row: f32,
+    /// What the search is doing, when one is running.
+    search: SearchState,
+    /// The index in the form the search works on, once it has been read.
+    ///
+    /// Nothing in it changes while the folder does not, so it is read out of the
+    /// database once and kept. Moving the sensitivity and looking again costs the
+    /// comparing and no storage at all. Dropped when the folder is changed or a
+    /// pass rewrites the index, because then it is describing something else.
+    images: Option<std::sync::Arc<Vec<matching::Image>>>,
+    /// Which of the lamps on the scan page are green, and how many milliseconds
+    /// into the run each one turned. The times are what say where the wait
+    /// actually is.
+    lit: HashMap<Lamp, u128>,
+    /// What the lamp times are measured from: the start of this run.
+    ///
+    /// A folder that already has an index is scanned the moment the window opens,
+    /// so for that run the start of the run is the start of the application and
+    /// the window's own setup is part of the wait. A folder without one waits for
+    /// the Scan button, and its clock starts there. Every run after that, whether
+    /// it follows a cancel or not, starts its own.
+    started: std::time::Instant,
+    /// Whether the run about to start is the one the window opened with, whose
+    /// clock is already running.
+    opened_with_a_scan: bool,
 }
 
 impl Default for App {
@@ -802,6 +1017,9 @@ impl App {
         // decides whether the folder counts as remembered and whether it is
         // scanned on sight; the settings file is not asked.
         let has_index = db_path.as_deref().is_some_and(Path::is_file);
+        // Whether the folder was looked in at all, which is what the first lamp
+        // reports. A window opened with no folder has looked in nothing.
+        let db_path_checked = db_path.is_some();
         App {
             view: View::Scan,
             folder: saved.folder,
@@ -841,6 +1059,19 @@ impl App {
             window: saved.window,
             preview_width: saved.preview_width,
             error: None,
+            lit: {
+                let mut lit = HashMap::new();
+                // Looking in the folder for an index is what decided `has_index`
+                // a few lines above, so this one is already true.
+                if db_path_checked {
+                    lit.insert(Lamp::CheckedForIndexFile, 0);
+                }
+                lit
+            },
+            search: SearchState::default(),
+            images: None,
+            started: std::time::Instant::now(),
+            opened_with_a_scan: has_index,
             scan_content: vec![0.0; 3],
             scan_row: 0.0,
         }
@@ -860,7 +1091,10 @@ impl eframe::App for App {
         }
         if self.scan_on_open {
             self.scan_on_open = false;
-            self.load_disposal();
+            // What the index says about itself is read by the pass, on the pass's
+            // own thread. Reading it here opened the index across the network for
+            // three small values and held the window for as long as that took,
+            // before anything had been drawn.
             self.start_scan();
         }
         self.pump_indexer(ctx);
@@ -947,6 +1181,13 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Turn a lamp green, noting how far into the run it happened. The first time
+    /// only: a step that is reported twice keeps the time it first reached.
+    fn light(&mut self, lamp: Lamp) {
+        let at = self.started.elapsed().as_millis();
+        self.lit.entry(lamp).or_insert(at);
+    }
+
     /// Show a problem and put it in the log, so a report of one has something
     /// behind it.
     fn fail(&mut self, message: &str) {
@@ -962,8 +1203,55 @@ impl App {
         let waiting: Vec<Update> = run.updates.try_iter().collect();
         for update in waiting {
             match update {
+                Update::Reached(step) => self.light(step.into()),
+                Update::Images(images) => self.images = Some(images),
+                Update::Settings { recurse, disposal, move_dir } => {
+                    // An index built over the subfolders has to be scanned that
+                    // way again, or the next pass drops every row under them.
+                    if let Some(setting) = recurse {
+                        self.recurse = setting;
+                    }
+                    if let Some(choice) = disposal.as_deref().and_then(Destination::from_name) {
+                        self.destination = choice;
+                    }
+                    if let Some(folder) = move_dir {
+                        self.move_dir = folder;
+                    }
+                }
+                Update::Walking { found, of } => {
+                    self.scan.listing = Some(found);
+                    // The read bar is how much of the folder has been looked at,
+                    // and listing it is looking at every file in it. This is the
+                    // longest stretch of a pass over a folder that has not
+                    // changed, and the bar stood still for all of it.
+                    self.scan.done = found;
+                    if let Some(total) = of {
+                        self.scan.total = total;
+                    }
+                }
+                Update::Start { total: 0 } => {
+                    // Nothing in the folder. Everything lit up to here was the
+                    // pass finding that out, and leaving those green claims a
+                    // scan happened. It did not: there was nothing to scan.
+                    self.lit.clear();
+                    self.scan = ScanState {
+                        finished: Some(String::from("No images found in this folder")),
+                        ..ScanState::default()
+                    };
+                    self.search = SearchState::default();
+                }
                 Update::Start { total } => {
-                    self.scan = ScanState { total, ..ScanState::default() };
+                    // The listing is over, so its line comes off the screen. The
+                    // read bar is not emptied: the listing has been over every
+                    // file in the folder, and a file that has been looked at does
+                    // not stop having been looked at because the next stage
+                    // started. Emptying it here is what made the whole listing
+                    // look like nothing had happened.
+                    self.scan.total = total;
+                    self.scan.done = self.scan.done.max(total);
+                    self.scan.listing = None;
+                    self.scan.indexed = 0;
+                    self.scan.to_index = 0;
                 }
                 Update::Progress { done, per_sec, unchanged, removed, ignored } => {
                     self.scan.done = done;
@@ -995,6 +1283,10 @@ impl App {
                         None if cancelled => {
                             self.scan.finished = Some(String::from("cancelled"))
                         }
+                        // Nothing was read, so there is nothing to look through.
+                        // Searching an empty folder lights two more lamps and
+                        // fills a bar for work that cannot have happened.
+                        None if self.scan.total == 0 => {}
                         None => self.load_sets(),
                     }
                     return;
@@ -1035,9 +1327,39 @@ impl App {
                     self.scan_content = measured;
                     self.scan_row = tallest;
                     self.progress_section(ui);
+                    self.lamps(ui);
                 })
             },
         );
+    }
+
+    /// One lamp per thing a pass goes through: red until it happens, green after,
+    /// with the milliseconds since the application started at the end of the
+    /// line. The gaps between those numbers are where the wait is.
+    fn lamps(&mut self, ui: &mut egui::Ui) {
+        const RED: egui::Color32 = egui::Color32::from_rgb(196, 62, 54);
+        const GREEN: egui::Color32 = egui::Color32::from_rgb(58, 160, 78);
+        const DOT: f32 = 5.0;
+
+        ui.add_space(SECTION_GAP);
+        for (lamp, label) in LAMPS {
+            let at = self.lit.get(&lamp).copied();
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(DOT * 3.0, ui.spacing().interact_size.y),
+                    egui::Sense::hover(),
+                );
+                ui.painter().circle_filled(
+                    rect.center(),
+                    DOT,
+                    if at.is_some() { GREEN } else { RED },
+                );
+                match at {
+                    Some(at) => ui.label(format!("{label}  {at} ms")),
+                    None => ui.label(egui::RichText::new(label).weak()),
+                };
+            });
+        }
     }
 
     fn folder_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
@@ -1094,8 +1416,16 @@ impl App {
             );
             if remember.changed() && !self.keep_index {
                 // The index is what remembering a folder amounts to, so taking
-                // the tick off takes the index with it.
-                discard_index(self.db_path.as_deref());
+                // the tick off takes the index with it. On its own thread: this
+                // is up to three files removed, and when the folder is on another
+                // machine that is three round trips the window would otherwise
+                // sit through with the pointer as a spinning wheel. Nothing here
+                // waits on the answer, and the box is already unticked.
+                if let Some(db_path) = self.db_path.clone() {
+                    std::thread::spawn(move || {
+                        discard_index(Some(&db_path));
+                    });
+                }
                 self.thumbs.forget();
                 self.sets.clear();
                 self.keep.clear();
@@ -1188,6 +1518,10 @@ impl App {
         let db_path = headless::default_db_path(&folder);
         let has_index = db_path.is_file();
         let elsewhere = self.folder.as_deref() != Some(folder.as_path());
+        // What was read into memory describes the folder it was read from.
+        if elsewhere {
+            self.images = None;
+        }
         self.db_path = Some(db_path);
         self.folder = Some(folder);
         // Everything about the last folder was about its pictures. A different
@@ -1214,9 +1548,6 @@ impl App {
         self.thumbs.forget();
         // A folder with an index is brought up to date on sight. One without is
         // a folder nothing is known about, and it waits for the Scan button.
-        if has_index {
-            self.load_disposal();
-        }
         self.remember();
         if has_index {
             self.start_scan();
@@ -1341,7 +1672,15 @@ impl App {
                 )
                 .inner;
             if found.clicked() {
-                self.load_sets();
+                // Looking for duplicates in a folder that has not been read is
+                // looking at nothing. The pass comes first and searches when it
+                // is done, which is the same thing that happens when a folder
+                // with an index is opened.
+                if self.images.is_some() {
+                    self.load_sets();
+                } else {
+                    self.start_scan();
+                }
             }
         })
     }
@@ -1355,6 +1694,14 @@ impl App {
 
         ui.add_space(SECTION_GAP);
         section(ui, "Progress", |ui| {
+            // Before the folder has been listed there is no total, so there is no
+            // fraction and the bars have nothing to show. The count is what there
+            // is, and it is the difference between a window that is working and a
+            // window that looks stopped.
+            if let Some(found) = self.scan.listing {
+                ui.label(format!("listing the folder: {}", counted(found, "file", "files")));
+                ui.add_space(6.0);
+            }
             let width = ui.available_width();
             // Nothing to do is done, so an empty total is a full bar.
             // Nothing counted yet is nothing done. A pass that finds nothing at
@@ -1367,12 +1714,31 @@ impl App {
             bar(ui, "read", self.scan.done, self.scan.total);
             ui.add_space(4.0);
             bar(ui, "indexed", self.scan.indexed, self.scan.to_index);
+            ui.add_space(4.0);
+            // The search's own bar, under the pass's two and driven by nothing
+            // they touch. It is two stages of very different lengths, so it runs
+            // over both: reading the index fills the first part of it, comparing
+            // the pairs that reading produced fills the rest.
+            let (duplicates, of) = self.search.progress();
+            bar(ui, "duplicates", duplicates, of);
             ui.add_space(6.0);
+            // How many files the folder holds. The listing is what produces that
+            // number, so before it is over the count it has reached so far is
+            // what there is.
+            let in_folder = if self.scan.total > 0 {
+                self.scan.total
+            } else {
+                self.scan.listing.unwrap_or(0)
+            };
             egui::Grid::new("scan counts")
-                .num_columns(5)
+                .num_columns(6)
                 .spacing([24.0, 4.0])
                 .show(ui, |ui| {
-                    counter(ui, "found", self.scan.found());
+                    counter(ui, "found", in_folder);
+                    // Files this pass has read, which are the ones the index did
+                    // not already have. This was labelled "found", which is the
+                    // folder's count, not this.
+                    counter(ui, "new", self.scan.found());
                     counter(ui, "unchanged", self.scan.unchanged);
                     counter(ui, "removed", self.scan.removed);
                     counter(ui, "failed to read", self.scan.failures.len() as u64);
@@ -1415,8 +1781,44 @@ impl App {
         let (Some(folder), Some(db_path)) = (self.folder.clone(), self.db_path.clone()) else {
             return;
         };
+        // The clock the lamps are timed against. The run that a window with an
+        // index opens with has been running since the application started, and
+        // the window's own setup is part of what the person waited for. Every
+        // other run starts its clock here, including one that follows a cancel.
+        if self.opened_with_a_scan {
+            self.opened_with_a_scan = false;
+        } else {
+            self.started = std::time::Instant::now();
+        }
+        self.lit.clear();
+
         self.scan = ScanState::default();
+        // The duplicates bar is drawn from this, and it is a different set of
+        // numbers from the pass's. Leaving it alone left the last run's finished
+        // bar full while a new run started underneath it.
+        self.search = SearchState::default();
         self.error = None;
+        // A pass rewrites the index, so what was read out of it before describes
+        // a folder that no longer exists in that form, and so does everything
+        // that came out of it: the sets, what was marked to keep in them, what is
+        // selected, and the pictures loaded for them.
+        self.images = None;
+        self.sets.clear();
+        self.keep.clear();
+        self.selected = None;
+        self.showing = None;
+        self.thumbs.forget();
+
+        // Look for an index every time a pass starts, not only when the folder is
+        // opened. One may have been put there since, by hand or by a copy of the
+        // folder, and finding it is the difference between reading nine thousand
+        // files and reading none of them. A folder that has one keeps it, which
+        // is what the checkbox means.
+        let has_index = db_path.is_file();
+        self.light(Lamp::CheckedForIndexFile);
+        if has_index {
+            self.keep_index = true;
+        }
         // A folder counts as one worth offering again once it has been scanned.
         // Choosing one and thinking better of it does not put it in the list.
         if !self.previous.contains(&folder) {
@@ -1433,13 +1835,24 @@ impl App {
     /// Start the search for duplicates. It runs on its own thread: it is several
     /// seconds of SQLite on a large folder, and doing it here would stop the
     /// window painting, so nothing could be shown about it while it happened.
+    /// Search the index that is in memory.
+    ///
+    /// The database is not a source for this. It exists so that opening a folder
+    /// that has been indexed before is fast, and the pass converts it to the form
+    /// the search works on as part of loading it. If there is no such structure
+    /// there is nothing to search, and the caller runs a pass first.
     fn load_sets(&mut self) {
         let Some(db_path) = self.db_path.clone() else {
+            return;
+        };
+        let Some(held) = self.images.clone() else {
             return;
         };
         if self.searching.is_some() {
             return;
         }
+        self.light(Lamp::StartedFindingDuplicates);
+        self.search = SearchState { stage: Some("starting"), ..SearchState::default() };
         let mut thresholds = Thresholds::at(self.sensitivity);
         thresholds.ignore_colour = self.ignore_colour;
         runlog::line(&format!(
@@ -1457,9 +1870,12 @@ impl App {
         let (send, receive) = std::sync::mpsc::channel::<Found>();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let asked = std::sync::Arc::clone(&stop);
+        let telling = send.clone();
         std::thread::spawn(move || {
-            let result = headless::open_index(&db_path)
-                .and_then(|conn| matching::find_sets_cancellable(&conn, thresholds, &asked));
+            let report = |progress| {
+                let _ = telling.send(Found::Progress(progress));
+            };
+            let result = matching::find_sets_in(&held, thresholds, &asked, &report);
             let _ = send.send(match result {
                 Ok(Some(sets)) => Found::Sets(sets),
                 Ok(None) => Found::Cancelled,
@@ -1480,7 +1896,33 @@ impl App {
         let mut done = false;
         for found in waiting {
             match found {
+                Found::Progress(progress) => match progress {
+                    matching::Progress::Loading { done, total } => {
+                        self.light(Lamp::StartedBuildingTheMemoryIndex);
+                        self.search.stage = Some("reading the index");
+                        self.search.loaded = done;
+                        self.search.to_load = total;
+                    }
+                    matching::Progress::Loaded { images } => {
+                        self.light(Lamp::FinishedBuildingTheMemoryIndex);
+                        self.search.stage = Some("comparing");
+                        self.search.loaded = images;
+                        self.search.to_load = self.search.to_load.max(images);
+                    }
+                    matching::Progress::Comparing { done, total } => {
+                        self.search.stage = Some("comparing");
+                        self.search.compared = done;
+                        self.search.pairs = total;
+                    }
+                    matching::Progress::Grouping => {
+                        self.search.stage = Some("grouping");
+                        self.search.compared = self.search.pairs;
+                    }
+                },
                 Found::Sets(sets) => {
+                    self.light(Lamp::FinishedFindingDuplicates);
+                    self.search.stage = Some("finished");
+                    self.search.done = true;
                     self.accept_sets(sets);
                     // The names about to go on screen. If any of them is in a
                     // script the bundled face does not have, this is where the
@@ -1523,7 +1965,14 @@ impl App {
         // Nothing was found, so there is nothing to review. Say so and stay here.
         if sets.is_empty() {
             self.sets.clear();
-            self.scan.finished = Some(String::from("No duplicates found for current settings"));
+            // Nothing to compare and nothing found are different answers. A
+            // folder with no pictures in it was never searched, and saying no
+            // duplicates were found in it claims otherwise.
+            self.scan.finished = Some(String::from(if self.scan.total == 0 {
+                "No files in this folder"
+            } else {
+                "No duplicates found for current settings"
+            }));
             return;
         }
 
@@ -1678,34 +2127,6 @@ impl App {
 
     /// Take back what this folder's index records: where a cleanup sends what it
     /// removes, and how far down the folder the index reaches.
-    fn load_disposal(&mut self) {
-        let Some(db_path) = &self.db_path else {
-            return;
-        };
-        let read = headless::open_index(db_path).and_then(|conn| {
-            Ok((
-                db::get_meta(&conn, "disposal")?,
-                db::get_meta(&conn, "move_dir")?,
-                db::get_meta(&conn, "recurse")?,
-            ))
-        });
-        match read {
-            Ok((disposal, move_dir, recurse)) => {
-                if let Some(choice) = disposal.as_deref().and_then(Destination::from_name) {
-                    self.destination = choice;
-                }
-                if let Some(folder) = move_dir {
-                    self.move_dir = folder;
-                }
-                // An index built over the subfolders has to be scanned that way
-                // again, or the next pass drops every row under them.
-                if let Some(setting) = recurse {
-                    self.recurse = setting == "1";
-                }
-            }
-            Err(err) => runlog::line(&format!("the cleanup choice could not be read: {err:#}")),
-        }
-    }
 
     /// Move the preview with the cursor keys. Nothing happens at either end.
     fn walk(&mut self, visible: &[usize], direction: Direction) {
@@ -1796,14 +2217,41 @@ impl App {
 
     /// Stop whichever of the two waits is on: the indexing, the search, or both
     /// if the indexer has just handed over.
+    /// The window comes back here, not when the work says it has stopped.
+    ///
+    /// Waiting for the pass to answer means waiting for whatever call it is
+    /// inside, and on a folder that is not on this machine that is however long
+    /// the other machine takes. Cancel is pressed by someone who wants the window
+    /// back: they get it now, and can pick another folder or change a setting
+    /// while the work winds itself up on its own thread and is listened to by
+    /// nobody.
     fn cancel_work(&mut self) {
         if let Some(run) = self.running.as_mut() {
             run.cancel();
         }
+        // Dropping the run asks the pass to stop and does not wait for it.
+        self.running = None;
         if self.searching.is_some() {
             runlog::line("cancelling: stopping the search");
             self.search_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.searching = None;
         }
+
+        // Back to before any of it started. A cancelled pass leaves numbers that
+        // are true of nothing: a count of a listing that did not finish, lamps
+        // for steps that were half done, an index in memory that describes a
+        // folder as it was part way through being read. None of it is worth
+        // keeping and all of it would be read as though it were.
+        self.scan = ScanState::default();
+        self.search = SearchState::default();
+        self.lit.clear();
+        self.images = None;
+        self.sets.clear();
+        self.keep.clear();
+        self.selected = None;
+        self.showing = None;
+        self.thumbs.forget();
+        self.error = None;
     }
 
     /// The picture that was clicked, at a size worth looking at. Sits beside the

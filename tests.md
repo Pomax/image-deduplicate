@@ -493,8 +493,12 @@ Animations are skipped, because one frame does not stand for them.
 
 ### the_event_stream_starts_and_ends
 
-A pass always reports a start and a done, which is what the window's bars are
-driven by.
+A pass says what it is doing from its first moment, and ends with a done. The
+folder's total is not the first thing it can report, because the listing is what
+produces it; before that there are step reports and a count of what the listing
+has found. It used to say nothing at all until the listing, the index read and
+the diff had all finished, which on a folder on another machine was half a minute
+of a window that had been told nothing.
 
 ## crates/imgdedupe-core/src/score.rs
 
@@ -1017,9 +1021,39 @@ The index lives in the folder it describes.
 
 ### a_pass_reports_what_it_did_and_then_says_it_is_over
 
-A real pass over a temporary folder reports its start, what it indexed, and that
-it finished, and writes an index. Nothing is spawned and nothing is parsed out of
-a pipe.
+A real pass over a temporary folder announces the folder's total, says what it
+indexed, says it finished, and writes an index. Nothing is spawned and nothing is
+parsed out of a pipe. The total is no longer the first thing it says: a pass
+reports the steps it goes through from the moment it starts, and the total is only
+known once the listing is over.
+
+### a_pass_says_something_almost_at_once
+
+The window hears from a pass within a second of it starting. Nothing was reported
+until the listing, the index read and the diff had all finished, and the listing
+asked the file system about every file one at a time, so on a folder on a network
+mount that was over thirty seconds of a window that had been told nothing, which
+is indistinguishable from one that has locked up.
+
+Run against the folder the application is set to, so it is marked to be asked for
+by name rather than run with everything else.
+
+### a_pass_reaches_its_total_without_reading_the_index_page_by_page
+
+Times the whole stretch from a pass starting to the bars having a total, which is
+the listing plus the index read plus the diff. SQLite reads a database in pages as
+a query asks for them, and on a network mount every page is its own round trip;
+the index is now read whole, in one go, and worked on in memory.
+
+Timing-sensitive and run against the real folder, so it is marked to be asked for
+by name. It has been seen to pass at 2.5s and fail at 6.3s against identical code,
+because a share's latency is not a constant.
+
+### how_fast_new_files_are_read_and_indexed
+
+Prints the peak read rate against the real folder rather than asserting a number,
+because the number is the point and it belongs to the storage rather than to the
+code. Marked to be asked for by name.
 
 ### a_pass_that_cannot_open_its_index_says_so_and_stops
 
@@ -1028,8 +1062,23 @@ window waiting for a run that never says anything.
 
 ### dropping_a_run_stops_the_pass_it_started
 
-Dropping a run asks the pass to stop and waits for it, so a pass cannot outlive
-the window and leave a write-ahead log behind.
+Dropping a run asks the pass to stop.
+
+### dropping_a_run_does_not_wait_for_the_pass_to_finish
+
+Dropping a run returns at once. It used to wait for the pass's thread, and closing
+the window drops the run on the thread that draws, so the window closed only once
+the pass had noticed it was cancelled. The pass checks between files, and a file
+on a network mount is read by a call the operating system will not interrupt, so
+that wait was as long as the other machine took. The window then could not be
+closed, and the process could not be killed either, because a thread in an
+uninterruptible wait does not die on a signal.
+
+Run against the folder the application is set to, because that is the only place
+the fault exists: on a local disk the pass sees the flag within milliseconds and
+waiting for it looks free. Measured on a folder on a network mount, dropping the
+run held the thread for **85.2 seconds** against the version that waited, and
+returns in under a millisecond against the version that does not.
 
 ## crates/imgdedupe/src/settings.rs
 

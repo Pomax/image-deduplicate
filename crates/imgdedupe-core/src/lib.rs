@@ -2,6 +2,7 @@
 pub mod cleanup;
 pub mod db;
 pub mod decode;
+pub mod dirlist;
 pub mod fingerprint;
 pub mod format;
 pub mod frames;

@@ -1,1 +1,4 @@
 - [Build only through the build script](build-only-through-the-build-script.md) — run build.bat, never the cargo and move commands by hand
+- [Measure before changing anything](measure-before-changing-anything.md) — find the number first; reasoning from the code produced four wrong diagnoses in a row
+- [Test against the network folder only](test-against-the-network-folder-only.md) — a temp directory of generated files passes against broken code, because every fault here is latency
+- [One test at a time](one-test-at-a-time.md) — the named test for the thing that is broken, never the suite

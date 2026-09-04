@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -146,7 +146,14 @@ fn parse_format(name: &str) -> Format {
 /// The stored blobs are turned into machine words and pre-weighted floats once,
 /// here. A folder produces far more comparisons than it has images, and unpacking
 /// the same blob on each of them is the whole cost of the old approach.
-struct Image {
+/// One picture as the search needs it: everything a comparison asks about it,
+/// worked out once.
+///
+/// This is what the index is for. It is read out of the database once, and every
+/// search after that runs over these and touches no storage at all, so changing
+/// the sensitivity and looking again costs the comparing and nothing else.
+#[derive(Debug)]
+pub struct Image {
     file_id: i64,
     rel_path: String,
     width: u32,
@@ -341,10 +348,47 @@ impl Groups {
 
 /// Read the whole index into memory, in file id order. Nothing comes back when
 /// the search is stopped part way through.
-fn load(conn: &Connection, cancel: &AtomicBool) -> Result<Option<Vec<Image>>> {
+/// What a search is doing, so the window can show it rather than sit on the last
+/// thing the pass said until the sets appear.
+#[derive(Debug, Clone, Copy)]
+pub enum Progress {
+    /// Pictures read out of the index, of how many it holds.
+    Loading { done: u64, total: u64 },
+    /// Every row is in memory and the structure the search works on is built.
+    Loaded { images: u64 },
+    /// Pairs compared, of how many the shortlist produced.
+    Comparing { done: u64, total: u64 },
+    /// Everything is compared and the sets are being put together.
+    Grouping,
+}
+
+/// Rows between reports while loading. Reading a row is cheap, so this is often
+/// enough to move and rare enough not to be the cost.
+const LOAD_REPORT_EVERY: usize = 256;
+
+/// Read the index into the form the search works on.
+///
+/// Done once. Nothing in here changes unless the folder does, so a second search
+/// at a different sensitivity reads nothing: it runs over what this produced.
+pub fn load_images(
+    conn: &Connection,
+    cancel: &AtomicBool,
+    report: &(dyn Fn(Progress) + Sync),
+) -> Result<Option<Vec<Image>>> {
+    // Before the count, not after it. Counting the rows is itself a scan of the
+    // whole view, half a second on a warm index and longer on a cold one, and a
+    // search that says nothing until it has a denominator says nothing for all of
+    // that. A total of zero means there is no fraction to draw yet.
+    report(Progress::Loading { done: 0, total: 0 });
+    // Counted off `files` alone. `indexed_images` is that joined to two more
+    // tables, and counting it walks all three to produce one number, which is the
+    // whole of the wait before this can say anything with a denominator in it. A
+    // file without a fingerprint is dropped as the rows are read, so this is an
+    // upper bound rather than an exact count, which is what a bar needs.
     let total: usize = conn
-        .query_row("SELECT count(*) FROM indexed_images", [], |row| row.get::<_, i64>(0))
+        .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
         .context("counting the indexed images")? as usize;
+    report(Progress::Loading { done: 0, total: total as u64 });
 
     let mut statement = conn.prepare(LOAD_IMAGES)?;
     let mut rows = statement.query([])?;
@@ -352,6 +396,9 @@ fn load(conn: &Connection, cancel: &AtomicBool) -> Result<Option<Vec<Image>>> {
     while let Some(row) = rows.next()? {
         if images.len() % 1024 == 0 && cancel.load(Ordering::Relaxed) {
             return Ok(None);
+        }
+        if images.len() % LOAD_REPORT_EVERY == 0 {
+            report(Progress::Loading { done: images.len() as u64, total: total as u64 });
         }
         let packed: Vec<u8> = row.get(8)?;
         let Some(hashes) = fingerprint::unpack_hashes(&packed) else {
@@ -387,14 +434,65 @@ fn load(conn: &Connection, cancel: &AtomicBool) -> Result<Option<Vec<Image>>> {
             ring: fingerprint::ring_weighted(&ring),
         });
     }
+    report(Progress::Loading { done: images.len() as u64, total: total as u64 });
     Ok(Some(images))
 }
 
 /// Find every duplicate set in the index.
 pub fn find_sets(conn: &Connection, thresholds: Thresholds) -> Result<Vec<DuplicateSet>> {
     let never = AtomicBool::new(false);
-    Ok(find_sets_cancellable(conn, thresholds, &never)?
+    Ok(find_sets_cancellable(conn, thresholds, &never, &|_| {})?
         .expect("a search that is never cancelled cannot come back cancelled"))
+}
+
+#[cfg(test)]
+mod search_reports {
+    use super::*;
+
+    /// A search says what it is doing while it does it, against a real index.
+    ///
+    /// It used to say nothing at all until it had the answer, so the window sat on
+    /// whatever the pass had last put there for the whole of the search. Reading
+    /// the index is most of that on a folder that is not on this machine.
+    #[test]
+    fn a_search_reports_while_it_runs() {
+        let Some(folder) = std::env::var_os("IMGDEDUPE_TEST_FOLDER").map(std::path::PathBuf::from)
+        else {
+            panic!("set IMGDEDUPE_TEST_FOLDER to the folder to search");
+        };
+        let db_path = folder.join(crate::db::INDEX_FILENAME);
+        let conn = crate::db::open_read_only(&db_path).expect("the index");
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let never = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let sets = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &never, &|p| {
+            seen.lock().unwrap().push((started.elapsed(), p));
+        })
+        .expect("the search")
+        .expect("not cancelled");
+
+        let seen = seen.into_inner().unwrap();
+        assert!(!seen.is_empty(), "the search reported nothing at all");
+        let loading = seen
+            .iter()
+            .filter(|(_, p)| matches!(p, Progress::Loading { .. }))
+            .count();
+        let comparing = seen
+            .iter()
+            .filter(|(_, p)| matches!(p, Progress::Comparing { .. }))
+            .count();
+        assert!(loading > 1, "the search reported reading the index {loading} times");
+        assert!(comparing > 1, "the search reported comparing {comparing} times");
+        // And the first word from it comes before it has done any of the work,
+        // rather than after the count of what there is to do.
+        let first = seen[0].0;
+        assert!(
+            first < std::time::Duration::from_millis(50),
+            "the search said nothing for its first {first:?}"
+        );
+        println!("{} sets, {} reports", sets.len(), seen.len());
+    }
 }
 
 /// Batches the comparing is cut into, so it spreads across the machine's cores.
@@ -409,14 +507,33 @@ pub fn find_sets_cancellable(
     conn: &Connection,
     thresholds: Thresholds,
     cancel: &AtomicBool,
+    report: &(dyn Fn(Progress) + Sync),
+) -> Result<Option<Vec<DuplicateSet>>> {
+    let Some(images) = load_images(conn, cancel, report)? else {
+        return Ok(None);
+    };
+    find_sets_in(&images, thresholds, cancel, report)
+}
+
+/// Find every duplicate set among pictures already in memory.
+///
+/// No database. This is the whole of a second search: the reading was done once,
+/// and changing what counts as a duplicate changes only the comparing.
+pub fn find_sets_in(
+    images: &[Image],
+    thresholds: Thresholds,
+    cancel: &AtomicBool,
+    report: &(dyn Fn(Progress) + Sync),
 ) -> Result<Option<Vec<DuplicateSet>>> {
     let mut timing = Timing::new();
     let stopped = || cancel.load(Ordering::Relaxed);
 
-    let Some(images) = load(conn, cancel)? else {
-        return Ok(None);
-    };
-    timing.step("loading", images.len(), "images");
+    // Nothing to compare is not a search that ran and found nothing. Saying so
+    // fills a bar and lights a lamp for work that did not happen.
+    if images.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    report(Progress::Loaded { images: images.len() as u64 });
     if stopped() {
         return Ok(None);
     }
@@ -450,19 +567,26 @@ pub fn find_sets_cancellable(
     let bounds: Vec<usize> = (0..=COMPARE_BATCHES)
         .map(|batch| (candidates.len() as u64 * batch / COMPARE_BATCHES) as usize)
         .collect();
+    let compared = AtomicU64::new(0);
+    let pairs = candidates.len() as u64;
     let matched: Vec<Vec<(u32, u32)>> = (0..COMPARE_BATCHES as usize)
         .into_par_iter()
         .map(|batch| {
             if stopped() {
                 return Vec::new();
             }
-            candidates[bounds[batch]..bounds[batch + 1]]
+            let batch_pairs = &candidates[bounds[batch]..bounds[batch + 1]];
+            let found = batch_pairs
                 .iter()
                 .copied()
                 .filter(|(a, b)| {
                     is_match(&images[*a as usize], &images[*b as usize], thresholds)
                 })
-                .collect::<Vec<(u32, u32)>>()
+                .collect::<Vec<(u32, u32)>>();
+            let done = compared.fetch_add(batch_pairs.len() as u64, Ordering::Relaxed)
+                + batch_pairs.len() as u64;
+            report(Progress::Comparing { done, total: pairs });
+            found
         })
         .collect();
     if stopped() {
@@ -470,6 +594,7 @@ pub fn find_sets_cancellable(
     }
     let matches = matched.concat();
     timing.step("comparing", matches.len(), "matches");
+    report(Progress::Grouping);
 
     let mut groups = Groups::new(images.len());
     let mut in_a_set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
@@ -651,13 +776,13 @@ mod tests {
         }
 
         let stop = AtomicBool::new(true);
-        let outcome = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &stop)
+        let outcome = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &stop, &|_| {})
             .expect("the search failed rather than stopping");
         assert!(outcome.is_none(), "a stopped search still handed back sets");
 
         // And it is only stopped when it is asked: the same search finishes.
         let never = AtomicBool::new(false);
-        let sets = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &never)
+        let sets = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &never, &|_| {})
             .expect("find")
             .expect("a search that was not stopped came back stopped");
         assert_eq!(sets.len(), 1, "the fixture stopped finding what it used to");
@@ -856,7 +981,7 @@ mod tests {
         insert(&mut conn, "b.jpg", 0x1234, 800, 600, 100_000, ring(0.5));
         insert(&mut conn, "c.jpg", 0xFFFF_0000_FFFF_0000, 800, 600, 100_000, ring(0.5));
         let never = AtomicBool::new(false);
-        let images = load(&conn, &never).expect("load").expect("not cancelled");
+        let images = load_images(&conn, &never, &|_| {}).expect("load").expect("not cancelled");
 
         let all: Vec<u32> = (0..images.len() as u32).collect();
         let index = BandIndex::build(&images, &all, 0);
@@ -890,7 +1015,7 @@ mod tests {
         insert(&mut conn, "other.jpg", 0xFFFF_FFFF_FFFF_FFFF, 800, 600, 100_000, ring(0.5));
 
         let never = AtomicBool::new(false);
-        let images = load(&conn, &never).expect("load").expect("not cancelled");
+        let images = load_images(&conn, &never, &|_| {}).expect("load").expect("not cancelled");
         let families = fold_identical(&images);
         assert_eq!(families.len(), 2, "the copies were not folded together");
         assert_eq!(
@@ -915,7 +1040,7 @@ mod tests {
         insert(&mut conn, "square.jpg", 0x1234, 800, 800, 100_000, ring(0.5));
 
         let never = AtomicBool::new(false);
-        let images = load(&conn, &never).expect("load").expect("not cancelled");
+        let images = load_images(&conn, &never, &|_| {}).expect("load").expect("not cancelled");
         assert_eq!(fold_identical(&images).len(), 2, "two shapes were folded into one");
         assert!(find_sets(&conn, Thresholds::preset("balanced")).expect("search").is_empty());
     }
@@ -944,7 +1069,7 @@ mod tests {
         let found = find_sets(&conn, thresholds).expect("search");
 
         let never = AtomicBool::new(false);
-        let images = load(&conn, &never).expect("load").expect("not cancelled");
+        let images = load_images(&conn, &never, &|_| {}).expect("load").expect("not cancelled");
         let mut everything = Groups::new(images.len());
         let mut edges = 0;
         for a in 0..images.len() {

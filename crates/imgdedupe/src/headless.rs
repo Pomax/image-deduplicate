@@ -12,6 +12,7 @@ pub fn open_index(db_path: &Path) -> Result<db::Connection> {
     Ok(db::open_read_only(db_path)?)
 }
 
+
 /// Where the index for a folder lives unless it was put somewhere else.
 pub fn default_db_path(root: &Path) -> PathBuf {
     root.join(db::INDEX_FILENAME)

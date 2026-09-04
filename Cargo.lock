@@ -1697,7 +1697,6 @@ dependencies = [
  "serde",
  "tempfile",
  "trash",
- "walkdir",
  "zune-jpeg 0.4.21",
 ]
 

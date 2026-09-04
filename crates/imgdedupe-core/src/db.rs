@@ -65,13 +65,31 @@ JOIN fingerprints p ON p.file_id = f.id;
 /// Open for writing, creating the schema if it is not there. Only the indexer
 /// does this: it is the single writer.
 pub fn open(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path)
-        .with_context(|| format!("opening index at {}", path.display()))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // The index is worked on in memory and written out as one file when the pass
+    // is done. Every statement a pass runs against a database on another machine
+    // is a round trip: creating it, the write-ahead log, the shared memory file
+    // that a log needs and that a network filesystem cannot properly provide, the
+    // schema, and every insert. In memory they are all free, and what reaches the
+    // network is one sequential write of a file that is a few megabytes.
+    let at = std::time::Instant::now();
+    let conn = match std::fs::read(path) {
+        Ok(bytes) => {
+            let existing = into_memory(bytes, path, false)?;
+            crate::runlog::line(&format!(
+                "    read {} bytes of index: {:.2}s",
+                std::fs::metadata(path).map(|it| it.len()).unwrap_or(0),
+                at.elapsed().as_secs_f64()
+            ));
+            existing
+        }
+        // No index yet, or none that can be read. Either way this pass builds one.
+        Err(_) => Connection::open_in_memory().context("opening an index in memory")?,
+    };
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    let at = std::time::Instant::now();
     conn.execute_batch(SCHEMA).context("applying the schema")?;
     drop_dead_columns(&conn)?;
+    crate::runlog::line(&format!("    schema: {:.2}s", at.elapsed().as_secs_f64()));
 
     let existing: Option<i64> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -202,6 +220,120 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Read the whole index in one go and open that, in memory.
+///
+/// SQLite reads a database in pages, as a query asks for them. That is right for
+/// a file on this machine and wrong for one that is not: every page is its own
+/// round trip, and a join across two tables re-fetches pages the cache was too
+/// small to keep. The file is small. Reading it once, in order, costs one
+/// transfer at whatever the link does, and every query after that is against
+/// memory.
+///
+/// The caller must be sure no write-ahead log is outstanding, because this reads
+/// the database file and nothing beside it. `checkpoint` is what makes that true
+/// while a writer is open.
+pub fn open_snapshot(path: &Path) -> Result<Connection> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading the index at {}", path.display()))?;
+    into_memory(bytes, path, true)
+}
+
+/// Hand a database's bytes to SQLite as a database in memory.
+///
+/// `read_only` decides whether it can then be written to. A writable one grows in
+/// memory as rows are added and is written back out with `write_out`.
+fn into_memory(mut bytes: Vec<u8>, path: &Path, read_only: bool) -> Result<Connection> {
+    if !can_be_read_in_memory(&mut bytes, path) {
+        // Something is in the log that the file does not have. Read it the slow
+        // way rather than read it wrong.
+        return open_read_only(path);
+    }
+    let size = bytes.len();
+
+    // SQLite takes ownership of this and frees it with its own allocator, so it
+    // has to come from that allocator.
+    let held = unsafe { rusqlite::ffi::sqlite3_malloc64(size as u64) }.cast::<u8>();
+    let Some(held) = std::ptr::NonNull::new(held) else {
+        anyhow::bail!("no room for a {size} byte copy of {}", path.display());
+    };
+    // Safety: `held` is `size` bytes from SQLite's allocator and `bytes` is that
+    // long, so the two do not overlap and neither is short.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), held.as_ptr(), size) };
+    // Safety: allocated by `sqlite3_malloc64` immediately above, as required.
+    let data = unsafe { rusqlite::serialize::OwnedData::from_raw_nonnull(held, size) };
+
+    let mut conn = Connection::open_in_memory().context("opening an index in memory")?;
+    conn.deserialize(rusqlite::DatabaseName::Main, data, read_only)
+        .with_context(|| format!("reading {} as a database", path.display()))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(conn)
+}
+
+/// Write a database that has been worked on in memory out to its file.
+///
+/// One sequential write of the whole thing, which is what a few megabytes going
+/// to another machine should cost. It is written beside the real file and then
+/// moved onto it, so a run that dies half way through leaves the old index rather
+/// than half of a new one.
+pub fn write_out(conn: &Connection, path: &Path) -> Result<usize> {
+    let data = conn
+        .serialize(rusqlite::DatabaseName::Main)
+        .context("taking the index out of memory")?;
+    let bytes: &[u8] = &data;
+    let beside = path.with_extension("writing");
+    std::fs::write(&beside, bytes)
+        .with_context(|| format!("writing the index to {}", beside.display()))?;
+    std::fs::rename(&beside, path)
+        .with_context(|| format!("moving the index onto {}", path.display()))?;
+    Ok(bytes.len())
+}
+
+/// Whether these bytes can be handed to SQLite as an in-memory database, making
+/// them so if the only thing in the way is the journal mode.
+///
+/// A database in memory cannot have a write-ahead log, so SQLite refuses an image
+/// whose header says the file is in WAL mode, which is what a file with a pass
+/// open on it says. Bytes 18 and 19 are the write and read format versions, 1 for
+/// a rollback journal and 2 for WAL, and turning them back to 1 is the whole of
+/// the difference **once the log has been folded in**.
+///
+/// So this only does that when no log is left holding anything. A `-wal` longer
+/// than its own 32 byte header has frames the database file does not, and reading
+/// the file without them answers with rows that have been superseded.
+fn can_be_read_in_memory(bytes: &mut [u8], path: &Path) -> bool {
+    const WRITE_VERSION: usize = 18;
+    const READ_VERSION: usize = 19;
+    const WAL: u8 = 2;
+    const ROLLBACK: u8 = 1;
+    /// A `-wal` holding nothing is this long: the header and no frames.
+    const EMPTY_WAL: u64 = 32;
+
+    if bytes.len() <= READ_VERSION {
+        return false;
+    }
+    if bytes[WRITE_VERSION] != WAL && bytes[READ_VERSION] != WAL {
+        return true;
+    }
+    let log = path.with_file_name(format!(
+        "{}-wal",
+        path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+    ));
+    if std::fs::metadata(&log).map(|it| it.len()).unwrap_or(0) > EMPTY_WAL {
+        return false;
+    }
+    bytes[WRITE_VERSION] = ROLLBACK;
+    bytes[READ_VERSION] = ROLLBACK;
+    true
+}
+
+/// Fold the write-ahead log back into the database file, so a copy of that file
+/// is the whole of what has been written.
+pub fn checkpoint(conn: &Connection) -> Result<()> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .context("checkpointing the index")?;
+    Ok(())
+}
+
 /// Close a writing connection and leave one file behind.
 ///
 /// A database in WAL mode keeps a `-wal` beside it holding everything written
@@ -209,12 +341,24 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
 /// its way around that log. Folding the log back in and taking the database out
 /// of WAL mode is what removes both; deleting them by hand throws away whatever
 /// the log still holds.
-pub fn close(conn: Connection) -> Result<()> {
-    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-        .context("checkpointing the index")?;
-    conn.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get::<_, String>(0))
-        .context("taking the index out of WAL mode")?;
+pub fn close(conn: Connection, path: &Path) -> Result<()> {
+    let at = std::time::Instant::now();
+    let written = write_out(&conn, path)?;
+    crate::runlog::line(&format!(
+        "write the index out: {:.2}s, {written} bytes",
+        at.elapsed().as_secs_f64()
+    ));
     drop(conn);
+    // A write-ahead log and its shared memory file, left by a version that kept
+    // the index open across the network. Nothing writes them now and a stale one
+    // beside the file would be read as newer than it.
+    for suffix in ["-wal", "-shm"] {
+        let stale = path.with_file_name(format!(
+            "{}{suffix}",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(stale);
+    }
     Ok(())
 }
 
@@ -615,7 +759,7 @@ mod tests {
         tx.commit().expect("commit");
         assert!(log_beside(&path).exists(), "WAL mode wrote no log to close");
 
-        close(conn).expect("close");
+        close(conn, &path).expect("close");
         assert!(path.is_file());
         assert!(!log_beside(&path).exists(), "the write-ahead log was left behind");
         assert!(!index_beside(&path).exists(), "the shared-memory file was left behind");

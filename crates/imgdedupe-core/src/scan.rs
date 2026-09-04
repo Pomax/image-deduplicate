@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::db::{self, Record};
 use crate::decode::{decode_at_most, SMALL_EDGE};
+use crate::dirlist;
 use crate::fingerprint::{fingerprint, FINGERPRINT_VERSION};
 use crate::format::{self, SNIFF_LEN};
 use crate::runlog;
@@ -17,12 +18,58 @@ use crate::frames;
 
 /// Records written per transaction. A killed run loses at most this many.
 const BATCH: usize = 5000;
-/// Files between progress reports.
+/// Files between progress reports, when they are arriving fast enough that a
+/// count is what limits how often the window hears anything.
 const REPORT_EVERY: u64 = 200;
+/// Time between progress reports when they are not. Reading a file off another
+/// machine takes about a tenth of a second, so a report every two hundred files
+/// is a report every twenty seconds and the bars stand still in between.
+const REPORT_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// A thing the pass has reached, reported the moment it happens.
+///
+/// Separate from the counters: these say which part of a pass is running, so a
+/// stretch that produces no numbers is still visibly something rather than a
+/// window sitting still.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    StartedReadingTheIndexSettings,
+    FinishedReadingTheIndexSettings,
+    StartedOpeningTheIndexForWriting,
+    FinishedOpeningTheIndexForWriting,
+    StartedConvertingTheIndex,
+    FinishedConvertingTheIndex,
+    StartedLookingForTheTotal,
+    FoundTheTotal,
+    LoadedIndexIntoMemory,
+    ListedTheFolder,
+    CrossReferencedWithTheIndex,
+    CountedWhatChanged,
+    StartedReadingNewFiles,
+    FinishedReadingNewFiles,
+    StartedIndexingNewFiles,
+    FinishedIndexingNewFiles,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
 pub enum Event {
+    /// One of the pass's steps has happened.
+    Reached(Step),
+    /// Files the listing has found so far.
+    ///
+    /// A count and not a fraction: the total is what the listing produces, so it
+    /// does not exist yet. Listing a folder on another machine is one call per
+    /// file, and this used to report nothing from the first file to the last,
+    /// which is a window that has been told nothing for as long as that takes.
+    Walking {
+        found: u64,
+        /// What the folder said it holds when asked, in one call, before the
+        /// listing began. `None` when nothing can answer that, and then the count
+        /// is all there is.
+        of: Option<u64>,
+    },
     Start {
         total: u64,
     },
@@ -88,38 +135,83 @@ struct Candidate {
 }
 
 /// Walk the tree and list every file, ignoring the index and its sidecars.
-fn walk(options: &Options) -> Result<Vec<Candidate>> {
-    let mut walker = walkdir::WalkDir::new(&options.root).follow_links(false);
-    if !options.recurse {
-        walker = walker.max_depth(1);
-    }
-
+///
+/// Reports as it goes. On a folder the machine has to ask another machine about,
+/// listing it is one call per file and most of the pass, and it used to say
+/// nothing from the first file to the last.
+fn walk(
+    options: &Options,
+    cancel: &AtomicBool,
+    report: &(dyn Fn(Event) + Sync),
+) -> Result<Vec<Candidate>> {
+    report(Event::Reached(Step::StartedLookingForTheTotal));
+    // Asked of the folder itself, in one call, so the bar has something to
+    // measure against before a single entry has been listed. Only for one folder:
+    // the size of a tree is as many answers as it has directories, and a total
+    // that grows as they are found is a bar that goes backwards.
+    let of = if options.recurse { None } else { dirlist::entry_count(&options.root) };
     let sidecars = index_sidecars(&options.db_path);
     let mut out = Vec::new();
-    for entry in walker.into_iter().filter_map(|entry| entry.ok()) {
-        if !entry.file_type().is_file() {
-            continue;
+    let mut queue = vec![options.root.clone()];
+    let mut first = true;
+
+    while let Some(dir) = queue.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(out);
         }
-        let path = entry.path();
-        if sidecars.iter().any(|sidecar| path == sidecar) {
-            continue;
+        let so_far = out.len() as u64;
+        let listed = match dirlist::list(&dir, &|| cancel.load(Ordering::Relaxed), &|found| {
+            // As the listing arrives, not when it is finished. This is the read
+            // bar's first job: every one of these is a file that has been looked
+            // at, and on a folder that answers slowly it is most of the wait.
+            report(Event::Walking { found: so_far + found, of });
+        }) {
+            Ok(listed) => listed,
+            // The folder that was asked for has to be readable, or the pass would
+            // see an empty folder and delete every row in the index. One
+            // unreadable subfolder is skipped instead.
+            Err(err) if first => {
+                return Err(err).with_context(|| format!("listing {}", dir.display()))
+            }
+            Err(_) => continue,
+        };
+        first = false;
+
+        for entry in listed {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(out);
+            }
+            if entry.is_dir {
+                if options.recurse {
+                    queue.push(dir.join(&entry.name));
+                }
+                continue;
+            }
+            if !entry.is_file {
+                continue;
+            }
+            let path = dir.join(&entry.name);
+            if sidecars.iter().any(|sidecar| &path == sidecar) {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(&options.root) else {
+                continue;
+            };
+            let Some(rel_path) = to_portable_path(relative) else {
+                continue;
+            };
+            out.push(Candidate {
+                rel_path,
+                abs_path: path,
+                size_bytes: entry.size_bytes,
+                mtime_ns: entry.mtime_ns,
+            });
         }
-        let Ok(relative) = path.strip_prefix(&options.root) else {
-            continue;
-        };
-        let Some(rel_path) = to_portable_path(relative) else {
-            continue;
-        };
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        out.push(Candidate {
-            rel_path,
-            abs_path: path.to_path_buf(),
-            size_bytes: metadata.len() as i64,
-            mtime_ns: mtime_nanos(&metadata),
-        });
+        report(Event::Walking { found: out.len() as u64, of });
     }
+    // The listing is over, so the count it reached is the exact total, whatever
+    // the folder said before it started.
+    report(Event::Walking { found: out.len() as u64, of: Some(out.len() as u64) });
     Ok(out)
 }
 
@@ -149,15 +241,6 @@ fn to_portable_path(relative: &Path) -> Option<String> {
     } else {
         Some(parts.join("/"))
     }
-}
-
-fn mtime_nanos(metadata: &std::fs::Metadata) -> i64 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|delta| delta.as_nanos().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
 }
 
 /// Which paths need reading and which can be skipped without touching the disk.
@@ -246,22 +329,7 @@ impl Spent {
     }
 }
 
-fn index_one(candidate: &Candidate, spent: &Spent) -> Outcome {
-    // Logged before the read, so a run that dies without unwinding still names the
-    // file it was on. An allocation failure aborts the process and no panic hook
-    // runs, which is what a large image on many threads at once can do.
-    let at = Instant::now();
-    let bytes = match std::fs::read(&candidate.abs_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return Outcome::Failed {
-                path: candidate.rel_path.clone(),
-                message: err.to_string(),
-            }
-        }
-    };
-    Spent::add(&spent.reading, at);
-
+fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let Some(format) = format::detect(head) else {
         return Outcome::NotAnImage;
@@ -305,22 +373,82 @@ fn index_one(candidate: &Candidate, spent: &Spent) -> Outcome {
     }))
 }
 
-/// Run one indexing pass. Decoding runs on every core; writing runs on one
-/// thread in batched transactions, so the index is consistent at every commit.
+/// Threads doing nothing but pulling file bytes into memory.
+///
+/// Far more than there are cores, on purpose. A read from another machine is a
+/// wait, not work, so the number that matters is how many requests are in flight
+/// rather than how many cores there are to run them on. Reading and decoding used
+/// to be the same task on one rayon thread, which capped the whole pass at one
+/// core's worth of files in flight and left threads waiting on the network while
+/// others sat idle with nothing to decode.
+const READERS: usize = 64;
+
+/// How many bytes of already-read files may be waiting to be decoded.
+///
+/// The readers run ahead of the decoders and stop when this much is in hand, so a
+/// folder of large pictures does not pull itself into memory all at once. Small
+/// enough to be nothing on a machine with gigabytes, large enough to keep every
+/// core fed through a slow patch of the network.
+const READ_AHEAD_BYTES: u64 = 1 << 30;
+
+/// Bytes of read-but-not-yet-decoded files, and the wait for room.
+struct ReadAhead {
+    held: std::sync::Mutex<u64>,
+    room: std::sync::Condvar,
+}
+
+impl ReadAhead {
+    fn new() -> Self {
+        ReadAhead { held: std::sync::Mutex::new(0), room: std::sync::Condvar::new() }
+    }
+
+    /// Wait until this many bytes fit, then claim them. A single file larger than
+    /// the whole budget is let through on its own rather than waiting for room
+    /// that will never exist.
+    fn claim(&self, bytes: u64, cancel: &AtomicBool) {
+        let mut held = self.held.lock().expect("the read-ahead budget");
+        while *held > 0 && *held + bytes > READ_AHEAD_BYTES && !cancel.load(Ordering::Relaxed) {
+            held = self.room.wait(held).expect("the read-ahead budget");
+        }
+        *held += bytes;
+    }
+
+    fn release(&self, bytes: u64) {
+        let mut held = self.held.lock().expect("the read-ahead budget");
+        *held = held.saturating_sub(bytes);
+        self.room.notify_all();
+    }
+}
+
+/// Run one indexing pass. Files are read into memory by a wide pool and decoded
+/// across every core; writing runs on one thread in batched transactions, so the
+/// index is consistent at every commit.
 pub fn run(
     conn: &mut Connection,
     options: &Options,
     cancel: &AtomicBool,
     report: &(dyn Fn(Event) + Sync),
-) -> Result<Summary> {
+) -> Result<(Summary, Option<Vec<crate::matching::Image>>)> {
     let started = Instant::now();
     let at = Instant::now();
-    let candidates = walk(options).context("walking the folder")?;
+    let candidates = walk(options, cancel, report).context("walking the folder")?;
     let found = candidates.len();
+    report(Event::Reached(Step::FoundTheTotal));
+    report(Event::Reached(Step::ListedTheFolder));
     runlog::line(&format!("walk: {:.2}s, {found} files", at.elapsed().as_secs_f64()));
 
     let at = Instant::now();
+    // Read the file whole rather than through it. The log is folded in first, so
+    // the file is everything that has been written. See `db::open_snapshot`.
+    if cancel.load(Ordering::Relaxed) {
+        return Ok((Summary { cancelled: true, ..Summary::default() }, None));
+    }
+    // Straight off the connection: the index is in memory from the moment it was
+    // opened, so this reads nothing from anywhere.
+    let step = Instant::now();
     let known = db::load_known(conn).context("reading the existing index")?;
+    runlog::line(&format!("  known paths: {:.2}s", step.elapsed().as_secs_f64()));
+    report(Event::Reached(Step::LoadedIndexIntoMemory));
     runlog::line(&format!(
         "load index: {:.2}s, {} rows",
         at.elapsed().as_secs_f64(),
@@ -328,6 +456,33 @@ pub fn run(
     ));
 
     let Diff { to_index, removed, unchanged } = diff(candidates, &known);
+    report(Event::Reached(Step::CrossReferencedWithTheIndex));
+    report(Event::Reached(Step::CountedWhatChanged));
+    runlog::line(&format!(
+        "diff: {unchanged} unchanged, {} to index, {} gone",
+        to_index.len(),
+        removed.len()
+    ));
+
+    // The index is loaded and nothing in the folder has moved, so it is already
+    // the answer. Convert it here, off the copy that is still in memory, rather
+    // than leaving it for whatever runs next to read the file all over again.
+    if cancel.load(Ordering::Relaxed) {
+        return Ok((Summary { cancelled: true, unchanged, ..Summary::default() }, None));
+    }
+
+    let mut images = None;
+    if unchanged == 0 && to_index.is_empty() {
+        // An empty folder. There is nothing to convert and nothing to search, and
+        // reporting either is reporting work that was never done.
+    } else if to_index.is_empty() && removed.is_empty() {
+        report(Event::Reached(Step::StartedConvertingTheIndex));
+        let step = Instant::now();
+        images =
+            crate::matching::load_images(conn, cancel, &|_| {}).context("converting the index")?;
+        runlog::line(&format!("  convert to memory: {:.2}s", step.elapsed().as_secs_f64()));
+        report(Event::Reached(Step::FinishedConvertingTheIndex));
+    }
 
     let mut summary = Summary { unchanged, ..Summary::default() };
 
@@ -351,6 +506,22 @@ pub fn run(
 
     let done = AtomicU64::new(0);
     let ignored = AtomicU64::new(0);
+    // Milliseconds into the pass at which the last progress report went out, so
+    // the reading reports on a clock rather than on a count of files.
+    let reported = AtomicU64::new(0);
+    // What the rate was over the last second, and the count and time it was
+    // worked out from. Files divided by the whole pass so far is an average, and
+    // an average of a run that started fast falls for the rest of it however
+    // steady the real speed is. This is how many files went by in the last
+    // second, which is what "per second" says.
+    let rate_now = AtomicU64::new(0);
+    let rate_from_count = AtomicU64::new(0);
+    let rate_from_ms = AtomicU64::new(0);
+    // How much is read but not yet decoded, and which file the readers take next.
+    // Declared out here because the reader threads borrow them and outlive the
+    // scope's own body.
+    let read_ahead = ReadAhead::new();
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let spent = Spent::default();
     let (send, recv) = mpsc::channel::<Outcome>();
 
@@ -359,7 +530,13 @@ pub fn run(
             let mut indexed = 0u64;
             let mut failed = 0u64;
             let mut pending: Vec<Box<Record>> = Vec::with_capacity(BATCH);
+            let mut told = Instant::now();
             let scanned_at = now_seconds();
+            // Only when there is something to index. A step that had nothing to
+            // do did not happen, and saying it did is a claim that work was done.
+            if !to_index.is_empty() {
+                report(Event::Reached(Step::StartedIndexingNewFiles));
+            }
 
             let flush = |conn: &mut Connection, pending: &mut Vec<Box<Record>>| -> Result<()> {
                 if pending.is_empty() {
@@ -390,8 +567,9 @@ pub fn run(
                         if pending.len() >= BATCH {
                             flush(conn, &mut pending)?;
                         }
-                        if indexed % REPORT_EVERY == 0 {
+                        if indexed % REPORT_EVERY == 0 || told.elapsed() >= REPORT_AFTER {
                             report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
+                            told = Instant::now();
                         }
                     }
                     Outcome::NotAnImage => {}
@@ -404,11 +582,42 @@ pub fn run(
 
             flush(conn, &mut pending)?;
             report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
+            if !to_index.is_empty() {
+                report(Event::Reached(Step::FinishedIndexingNewFiles));
+            }
             Ok((indexed, failed))
         });
 
+        // From when the reading began, not from when the pass began. Dividing by
+        // the whole pass mixes the listing into the rate and reports a number
+        // that is not the speed of anything.
+        let reading_since = Instant::now();
         let announce = |count: u64| {
-            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            let elapsed = reading_since.elapsed().as_secs_f64().max(0.001);
+            // Files in the last second, worked out once a second. Not files
+            // divided by the whole pass, which is an average and falls for the
+            // rest of a run that began fast however steady the real speed is.
+            let now_ms = reading_since.elapsed().as_millis() as u64;
+            let since = now_ms.saturating_sub(rate_from_ms.load(Ordering::Relaxed));
+            if since >= 1000 {
+                let went_by = count.saturating_sub(rate_from_count.load(Ordering::Relaxed));
+                rate_now.store(went_by * 1000 / since, Ordering::Relaxed);
+                rate_from_count.store(count, Ordering::Relaxed);
+                rate_from_ms.store(now_ms, Ordering::Relaxed);
+            }
+            // Where the time is going, while it is going, rather than once at the
+            // end of a pass that takes minutes. These are summed over every
+            // thread, so they are larger than the wall clock.
+            runlog::line(&format!(
+                "rate: {count} files in {elapsed:.1}s, {} in the last second; over every \
+                 thread {:.1}s reading, {:.1}s decoding, {:.1}s fingerprinting; {} bytes \
+                 read ahead",
+                rate_now.load(Ordering::Relaxed),
+                Spent::seconds(&spent.reading),
+                Spent::seconds(&spent.decoding),
+                Spent::seconds(&spent.fingerprinting),
+                read_ahead.held.lock().map(|held| *held).unwrap_or(0),
+            ));
             report(Event::Progress {
                 // Every file in the folder has been looked at, including the ones
                 // whose size and timestamp said there was nothing to do.
@@ -418,26 +627,90 @@ pub fn run(
                 unchanged,
                 removed: summary.removed,
                 ignored: ignored.load(Ordering::Relaxed),
-                per_sec: (count as f64 / elapsed) as u64,
+                per_sec: rate_now.load(Ordering::Relaxed),
             });
         };
 
-        to_index.par_iter().for_each_with(send.clone(), |send, candidate| {
+        if !to_index.is_empty() {
+            report(Event::Reached(Step::StartedReadingNewFiles));
+        }
+
+        // Stage one: pull bytes into memory, on many more threads than there are
+        // cores, because these threads are waiting rather than working.
+        let (loaded_tx, loaded_rx) = mpsc::channel::<(usize, Vec<u8>)>();
+        let readers: Vec<_> = (0..READERS.min(to_index.len().max(1)))
+            .map(|_| {
+                let loaded_tx = loaded_tx.clone();
+                let failures = send.clone();
+                scope.spawn(|| {
+                    let loaded_tx = loaded_tx;
+                    let failures = failures;
+                    loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let at = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(candidate) = to_index.get(at) else {
+                            return;
+                        };
+                        let started = Instant::now();
+                        match dirlist::read_whole(&candidate.abs_path, candidate.size_bytes) {
+                            Ok(bytes) => {
+                                Spent::add(&spent.reading, started);
+                                read_ahead.claim(bytes.len() as u64, cancel);
+                                if loaded_tx.send((at, bytes)).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = failures.send(Outcome::Failed {
+                                    path: candidate.rel_path.clone(),
+                                    message: err.to_string(),
+                                });
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        drop(loaded_tx);
+
+        // Stage two: decode and fingerprint what is already in memory, across
+        // every core, never waiting on the network.
+        loaded_rx.into_iter().par_bridge().for_each_with(send.clone(), |send, (at, bytes)| {
+            let candidate = &to_index[at];
             if cancel.load(Ordering::Relaxed) {
+                read_ahead.release(bytes.len() as u64);
                 return;
             }
-            let outcome = index_one(candidate, &spent);
+            let outcome = index_one(candidate, &bytes, &spent);
+            read_ahead.release(bytes.len() as u64);
             if matches!(outcome, Outcome::NotAnImage) {
                 ignored.fetch_add(1, Ordering::Relaxed);
             }
             let _ = send.send(outcome);
 
             let count = done.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % REPORT_EVERY == 0 {
+            // On a timer, not on a count of files. Whichever thread crosses the
+            // interval first takes the report and the others carry on reading.
+            let now = started.elapsed().as_millis() as u64;
+            let last = reported.load(Ordering::Relaxed);
+            let due = now.saturating_sub(last) >= REPORT_AFTER.as_millis() as u64;
+            if due
+                && reported
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
                 announce(count);
             }
         });
+        for reader in readers {
+            let _ = reader.join();
+        }
         drop(send);
+        if !to_index.is_empty() {
+            report(Event::Reached(Step::FinishedReadingNewFiles));
+        }
         // The last partial group of files would otherwise never be announced and
         // the bar would stop short of the end.
         announce(done.load(Ordering::Relaxed));
@@ -462,6 +735,19 @@ pub fn run(
     // where the last one did would drop every subfolder row as vanished.
     db::set_meta(conn, "recurse", if options.recurse { "1" } else { "0" })?;
 
+    // The pass changed the index, so the copy taken at the load step describes a
+    // folder that no longer matches it. Convert again, from what was just
+    // written, so whatever runs next still starts from memory.
+    // Not for a folder with nothing in it. Skipping the conversion above only to
+    // do it here is the same claim made a moment later.
+    let empty = unchanged == 0 && summary.indexed == 0;
+    if images.is_none() && !summary.cancelled && !empty {
+        report(Event::Reached(Step::StartedConvertingTheIndex));
+        images =
+            crate::matching::load_images(conn, cancel, &|_| {}).context("converting the index")?;
+        report(Event::Reached(Step::FinishedConvertingTheIndex));
+    }
+
     report(Event::Done {
         indexed: summary.indexed,
         removed: summary.removed,
@@ -469,7 +755,7 @@ pub fn run(
         elapsed_ms: started.elapsed().as_millis() as u64,
     });
 
-    Ok(summary)
+    Ok((summary, images))
 }
 
 fn now_seconds() -> i64 {
@@ -510,7 +796,7 @@ mod tests {
         let mut conn = db::open(&fixture.options.db_path).expect("open");
         let events = std::sync::Mutex::new(Vec::new());
         let cancel = AtomicBool::new(false);
-        let summary = run(&mut conn, &fixture.options, &cancel, &|event| {
+        let (summary, _images) = run(&mut conn, &fixture.options, &cancel, &|event| {
             events.lock().unwrap().push(event);
         })
         .expect("scan");
@@ -740,13 +1026,13 @@ mod tests {
         shallow.recurse = false;
         let mut conn = db::open(&shallow.db_path).expect("open");
         let cancel = AtomicBool::new(false);
-        let summary = run(&mut conn, &shallow, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&mut conn, &shallow, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1);
 
         // How far the pass reached is written down, because a later pass that
         // does not reach as far drops everything it cannot see.
         assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("0"));
-        let summary = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1, "the subfolder was not picked up");
         assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("1"));
     }
@@ -792,7 +1078,7 @@ mod tests {
         }
         let mut conn = db::open(&fx.options.db_path).expect("open");
         let cancel = AtomicBool::new(true);
-        let summary = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
         assert!(summary.cancelled);
 
         let count: i64 = conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
@@ -821,7 +1107,17 @@ mod tests {
         let fx = fixture();
         write_image(&fx.dir.path().join("a.png"), 32, 32, 0);
         let (_, events) = scan(&fx);
-        assert!(matches!(events.first(), Some(Event::Start { .. })));
+        // A pass says what it is doing from its first moment. The folder's total
+        // is not the first thing it can say, because the listing is what produces
+        // it, and on a folder that answers slowly that listing is most of the
+        // wait. It used to report nothing at all until then.
+        assert!(
+            matches!(events.first(), Some(Event::Reached(_) | Event::Walking { .. })),
+            "the pass said nothing until it had a total: {:?}",
+            events.first()
+        );
+        assert!(events.iter().any(|event| matches!(event, Event::Walking { .. })));
+        assert!(events.iter().any(|event| matches!(event, Event::Start { .. })));
         assert!(matches!(events.last(), Some(Event::Done { .. })));
     }
 }

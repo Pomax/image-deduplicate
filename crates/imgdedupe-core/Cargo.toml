@@ -19,7 +19,6 @@ rayon.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 trash = { workspace = true, optional = true }
-walkdir.workspace = true
 
 [dev-dependencies]
 # The tests encode JPEG fixtures and compare decoders. Neither ships.
