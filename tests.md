@@ -872,6 +872,41 @@ Really clicks twice on the picture in a scanned set that the search did not
 choose. It becomes the one being kept, and two more clicks a moment later let it
 go again, which is what the space bar does on the picture being shown.
 
+### the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right
+
+Draws the review over a scanned folder and reads the toolbar off the frame. The
+allow multi-select box sits against the left edge, the clean up button against the
+right, and the counts in the middle of the window rather than in the middle of
+what is left of the row.
+
+### the_index_keeps_whether_multi_selected_was_ticked
+
+Ticks allow multi-select on a scanned folder and opens that folder again. The box
+starts unticked, and the folder's own index is what remembers that it was
+ticked.
+
+### without_multi_selected_marking_a_picture_lets_the_last_one_go
+
+Keeps one picture in a set and then another. With the box unticked the mark
+moves rather than adding up, so the set keeps the second one and nothing else.
+
+### with_multi_selected_marks_add_up_and_come_off_one_at_a_time
+
+Keeps two pictures in a set with the box ticked, then takes both marks off.
+Marking the second one leaves both kept, taking one off leaves the other, and
+taking that one off leaves the set keeping nothing at all.
+
+### taking_one_picture_off_a_set_that_keeps_all_of_it_leaves_the_rest
+
+Marks a whole set with keep all and then unmarks one picture in it. The other
+two stay marked: taking one off what a set keeps is not throwing the lot away.
+
+### two_clicks_with_multi_selected_keep_both_pictures
+
+Really clicks twice on the picture in a scanned set that the search did not
+choose, with allow multi-select ticked. Both that picture and the one the search
+chose are kept, rather than the second taking the place of the first.
+
 ### the_last_entry_of_the_previous_list_empties_it
 
 Scans two folders, then really opens the previous box and clicks its last entry.

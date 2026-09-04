@@ -161,24 +161,62 @@ fn scroll_to_show(
 
 /// What a set is keeping. A set with no entry at all is keeping nothing, and
 /// every picture in it goes: what is marked is what is kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Keep {
     One(i64),
+    /// More than one picture, which is what marking a second one does while
+    /// "allow multi-select" is on. Never one and never none: one picture is `One`
+    /// and no picture is no entry at all.
+    Several(Vec<i64>),
     All,
 }
 
 impl Keep {
-    fn keeps(self, file_id: i64) -> bool {
+    fn keeps(&self, file_id: i64) -> bool {
         match self {
-            Keep::One(kept) => kept == file_id,
+            Keep::One(kept) => *kept == file_id,
+            Keep::Several(kept) => kept.contains(&file_id),
             Keep::All => true,
         }
     }
 }
 
 /// Whether a set that is keeping this is keeping that picture.
-fn keeps(keeping: Option<Keep>, file_id: i64) -> bool {
+fn keeps(keeping: Option<&Keep>, file_id: i64) -> bool {
     keeping.is_some_and(|keep| keep.keeps(file_id))
+}
+
+/// What a set keeps once one more picture is marked, and once one is unmarked.
+/// A set that ends up keeping nothing has no entry, which is what `None` says.
+fn marked(keeping: Option<&Keep>, members: &[i64], file_id: i64) -> Option<Keep> {
+    let mut kept = spelled_out(keeping, members);
+    kept.push(file_id);
+    as_keep(kept)
+}
+
+fn unmarked(keeping: Option<&Keep>, members: &[i64], file_id: i64) -> Option<Keep> {
+    let mut kept = spelled_out(keeping, members);
+    kept.retain(|id| *id != file_id);
+    as_keep(kept)
+}
+
+/// Every picture a set keeps, by name. `All` is the set itself, so it is written
+/// out here before one of them can be taken off it.
+fn spelled_out(keeping: Option<&Keep>, members: &[i64]) -> Vec<i64> {
+    match keeping {
+        Some(Keep::One(kept)) => vec![*kept],
+        Some(Keep::Several(kept)) => kept.clone(),
+        Some(Keep::All) => members.to_vec(),
+        None => Vec::new(),
+    }
+}
+
+fn as_keep(kept: Vec<i64>) -> Option<Keep> {
+    match kept.len() {
+        0 => None,
+        1 => Some(Keep::One(kept[0])),
+        _ => Some(Keep::Several(kept)),
+    }
 }
 
 /// Where removed files go. Held as one value rather than three booleans, so the
@@ -520,6 +558,42 @@ const KEEP_BUTTON: egui::Vec2 = egui::vec2(90.0, 24.0);
 /// Kept clear at the right of the folder row for the button that lists the
 /// folders scanned before, so a long path stops short of it.
 const PREVIOUS_ROOM: f32 = 84.0;
+
+/// What the review has found and what a cleanup would do about it, as one line:
+/// how many sets, how many pictures in them are not being kept, and what those
+/// come to. The last part is the least of it and is drawn as such.
+fn count_line(
+    ui: &egui::Ui,
+    sets: usize,
+    duplicates: usize,
+    going: usize,
+    reclaimable: i64,
+) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let strong = egui::TextFormat {
+        font_id: font.clone(),
+        color: ui.style().visuals.strong_text_color(),
+        ..Default::default()
+    };
+    let weak = egui::TextFormat {
+        font_id: font,
+        color: ui.style().visuals.weak_text_color(),
+        ..Default::default()
+    };
+    let gap = ui.spacing().item_spacing.x;
+
+    let mut line = egui::text::LayoutJob::default();
+    line.append(&counted(sets as u64, "set", "sets"), 0.0, strong.clone());
+    line.append(&counted(duplicates as u64, "duplicate", "duplicates"), gap, strong.clone());
+    line.append(&format!("{going} to remove"), gap, strong);
+    line.append(&format!("{:.1} MB to reclaim", reclaimable as f64 / 1e6), gap, weak);
+    line
+}
+
+/// The review toolbar's one row. The checkbox, the counts and the button are
+/// laid out over the same rectangle, which has to be as tall as the tallest of
+/// them: the button.
+const TOOLBAR_HEIGHT: f32 = 28.0;
 
 /// Room around a preset's name. Four of these sit under the slider and are read
 /// at a glance, so they are no bigger than the words in them.
@@ -934,6 +1008,10 @@ pub struct App {
     /// The keep marks per set, held here and not in the index: a review session
     /// is not a fact about a file on disk.
     keep: HashMap<i64, Keep>,
+    /// Whether marking a picture adds to what its set keeps instead of taking
+    /// the place of what is marked. A fact about reviewing this folder, so it is
+    /// kept in the folder's index beside where a cleanup sends what it removes.
+    multi_select: bool,
 
     destination: Destination,
     move_dir: String,
@@ -1040,6 +1118,7 @@ impl App {
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sets: Vec::new(),
             keep: HashMap::new(),
+            multi_select: false,
             destination: Destination::Trash,
             move_dir: String::new(),
             removing: None,
@@ -1207,7 +1286,7 @@ impl App {
             match update {
                 Update::Reached(step) => self.light(step.into()),
                 Update::Images(images) => self.images = Some(images),
-                Update::Settings { recurse, disposal, move_dir } => {
+                Update::Settings { recurse, disposal, move_dir, multi_select } => {
                     // An index built over the subfolders has to be scanned that
                     // way again, or the next pass drops every row under them.
                     if let Some(setting) = recurse {
@@ -1218,6 +1297,9 @@ impl App {
                     }
                     if let Some(folder) = move_dir {
                         self.move_dir = folder;
+                    }
+                    if let Some(setting) = multi_select {
+                        self.multi_select = setting;
                     }
                 }
                 Update::Walking { found, of } => {
@@ -2055,35 +2137,47 @@ impl App {
 
         egui::TopBottomPanel::top("review toolbar").show_inside(ui, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(counted(visible.len() as u64, "set", "sets")).strong(),
-                );
-                ui.label(
-                    egui::RichText::new(counted(
-                        duplicates as u64,
-                        "duplicate",
-                        "duplicates",
-                    ))
-                    .strong(),
-                );
-                ui.label(egui::RichText::new(format!("{going} to remove")).strong());
-                ui.label(
-                    egui::RichText::new(format!("{:.1} MB to reclaim", reclaimable as f64 / 1e6))
-                        .weak(),
-                );
+            // Three lots that share one row: the checkbox against the left edge,
+            // the counts in the middle of the window, and the button against the
+            // right edge. They are laid out over the same rectangle, each with
+            // the layout that puts it where it belongs, so the counts sit in the
+            // centre of the row rather than in the centre of what is left of it.
+            let row = egui::vec2(ui.available_width(), TOOLBAR_HEIGHT);
+            let (rect, _) = ui.allocate_exact_size(row, egui::Sense::hover());
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let go = egui::Button::new(
-                        egui::RichText::new("Clean up").strong().color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(60, 110, 180))
-                    .min_size(egui::vec2(120.0, 28.0));
-                    if ui.add_enabled(going > 0, go).clicked() {
-                        self.view = View::Cleanup;
-                    }
-                });
-            });
+            let mut left = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            if left.checkbox(&mut self.multi_select, "allow multi-select").changed() {
+                self.remember_multi_select();
+            }
+
+            let mut middle = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Center)),
+            );
+            // One line rather than four labels beside each other: a row of
+            // widgets is laid out from where the row starts, and only a single
+            // thing can be put in the middle of the space it is given.
+            let counts = count_line(&middle, visible.len(), duplicates, going, reclaimable);
+            middle.add(egui::Label::new(counts).wrap_mode(egui::TextWrapMode::Extend));
+
+            let mut right = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
+            let go = egui::Button::new(
+                egui::RichText::new("Clean up").strong().color(egui::Color32::WHITE),
+            )
+            .fill(egui::Color32::from_rgb(60, 110, 180))
+            .min_size(egui::vec2(120.0, 28.0));
+            if right.add_enabled(going > 0, go).clicked() {
+                self.view = View::Cleanup;
+            }
             ui.add_space(4.0);
         });
 
@@ -2140,6 +2234,22 @@ impl App {
         self.list_viewport = viewport;
     }
 
+    /// Whether marking a picture adds to what its set keeps. This belongs to the
+    /// folder as well: a folder reviewed one picture at a time is reviewed that
+    /// way again the next time it is opened.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn remember_multi_select(&self) {
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        let stored = if self.multi_select { "1" } else { "0" };
+        let result =
+            db::open_for_notes(db_path).and_then(|conn| db::set_meta(&conn, "multi_select", stored));
+        if let Err(err) = result {
+            runlog::log_line!("the multi-select choice could not be written: {err:#}");
+        }
+    }
+
     /// Where this folder's duplicates go, and the folder they are moved to. This
     /// belongs to the folder that was scanned rather than to the application:
     /// what is safe to delete outright somewhere is not safe everywhere.
@@ -2175,25 +2285,36 @@ impl App {
         self.scroll_to = Some(set);
     }
 
-    /// Keep the picture the preview is showing, which is what the space bar does.
+    /// Mark or unmark the picture the preview is showing, which is what the space
+    /// bar and a double click both do.
+    ///
+    /// One already marked comes off, and a set can end up keeping nothing. One
+    /// that is not marked goes on: on its own while "allow multi-select" is off, and
+    /// beside whatever the set already keeps while it is on.
     fn keep_selected(&mut self) {
         let Some(file_id) = self.selected else {
             return;
         };
-        let holder = self
-            .sets
-            .iter()
-            .find(|set| set.members.iter().any(|member| member.file_id == file_id))
-            .map(|set| set.set_id);
-        // Pressing it again on the one already kept takes the mark off, so the
-        // same key both makes a choice and undoes it.
-        if let Some(set_id) = holder {
-            if self.keep.get(&set_id) == Some(&Keep::One(file_id)) {
-                self.keep.remove(&set_id);
-            } else {
-                self.keep.insert(set_id, Keep::One(file_id));
-            }
-        }
+        let Some(set) =
+            self.sets.iter().find(|set| set.members.iter().any(|member| member.file_id == file_id))
+        else {
+            return;
+        };
+        let set_id = set.set_id;
+        let members: Vec<i64> = set.members.iter().map(|member| member.file_id).collect();
+
+        let keeping = self.keep.get(&set_id);
+        let now = if keeps(keeping, file_id) {
+            unmarked(keeping, &members, file_id)
+        } else if self.multi_select {
+            marked(keeping, &members, file_id)
+        } else {
+            Some(Keep::One(file_id))
+        };
+        match now {
+            Some(keep) => self.keep.insert(set_id, keep),
+            None => self.keep.remove(&set_id),
+        };
     }
 
     /// Where the preview is in the list on screen, as a set and a place in it.
@@ -2216,7 +2337,7 @@ impl App {
         let mut count = 0usize;
         let mut bytes = 0i64;
         for set in &self.sets {
-            let keeping = self.keep.get(&set.set_id).copied();
+            let keeping = self.keep.get(&set.set_id);
             for member in &set.members {
                 if !keeps(keeping, member.file_id) {
                     count += 1;
@@ -2230,6 +2351,7 @@ impl App {
     fn preselect_first_keeper(&mut self) {
         self.selected = self.sets.first().and_then(|set| match self.keep.get(&set.set_id) {
             Some(Keep::One(file_id)) => Some(*file_id),
+            Some(Keep::Several(kept)) => kept.first().copied(),
             _ => set.members.first().map(|member| member.file_id),
         });
         self.showing = None;
@@ -2315,7 +2437,7 @@ impl App {
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    let keeping = keeps(self.keep.get(&set_id).copied(), member.file_id);
+                    let keeping = keeps(self.keep.get(&set_id), member.file_id);
                     if ui
                         .add_enabled(!keeping, egui::Button::new("Keep this one"))
                         .clicked()
@@ -2366,7 +2488,7 @@ impl App {
     fn set_row(&mut self, ui: &mut egui::Ui, index: usize, root: &std::path::Path) {
         let set_id = self.sets[index].set_id;
         let members = self.sets[index].members.clone();
-        let keeping = self.keep.get(&set_id).copied();
+        let keeping = self.keep.get(&set_id).cloned();
 
         // Built to a fixed height rather than measured afterwards. The list places
         // the rows it is not drawing by this number, and a row that came out any
@@ -2393,7 +2515,7 @@ impl App {
                             ui.horizontal_top(|ui| {
                                 for member in &members {
                                     let width = tile_width(member);
-                                    self.member_tile(ui, member, keeping, root, width);
+                                    self.member_tile(ui, member, keeping.as_ref(), root, width);
                                 }
                             });
                         })
@@ -2435,7 +2557,7 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         member: &imgdedupe_core::matching::Member,
-        keeping: Option<Keep>,
+        keeping: Option<&Keep>,
         root: &std::path::Path,
         width: f32,
     ) {
@@ -2744,7 +2866,7 @@ impl App {
     fn build_plan(&self) -> Plan {
         let mut sets: Vec<Vec<imgdedupe_core::matching::Member>> = Vec::new();
         for set in &self.sets {
-            let keeping = self.keep.get(&set.set_id).copied();
+            let keeping = self.keep.get(&set.set_id);
             let members = set
                 .members
                 .iter()
@@ -4726,6 +4848,241 @@ mod tests {
         frame(&mut app, Some(at), 0, 2.0);
         frame(&mut app, Some(at), 2, 2.1);
         assert_eq!(app.keep.get(&set_id), None, "twice more did not let it go again");
+    }
+
+    /// The toolbar over the review holds three things in one row, and each is in
+    /// its own place: the checkbox against the left edge, the counts in the
+    /// middle of the window, and the button against the right edge.
+    #[test]
+    fn the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let shapes = ctx
+            .run(
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
+                },
+            )
+            .shapes;
+
+        // The toolbar is the top of the window, so what is drawn below it is the
+        // review itself and no part of this.
+        let painted: Vec<(String, egui::Rect)> =
+            texts(&shapes).into_iter().filter(|(_, rect)| rect.top() < 40.0).collect();
+        let one = |wanted: &str| {
+            painted
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{wanted} was not drawn in the toolbar: {painted:?}"))
+        };
+        let box_label = one("allow multi-select");
+        let button = one("Clean up");
+        let counts = painted
+            .iter()
+            .filter(|(text, _)| text != "allow multi-select" && text != "Clean up")
+            .map(|(_, rect)| *rect)
+            .reduce(|all, rect| all.union(rect))
+            .expect("no counts were drawn");
+
+        assert!(box_label.left() < 60.0, "the checkbox is not against the left edge: {box_label:?}");
+        assert!(
+            button.right() > screen.right() - 60.0,
+            "the button is not against the right edge: {button:?}"
+        );
+        assert!(
+            (counts.center().x - screen.center().x).abs() < 12.0,
+            "the counts are centred on {} and the window on {}",
+            counts.center().x,
+            screen.center().x
+        );
+        assert!(
+            counts.left() > box_label.right() && counts.right() < button.left(),
+            "the counts run into the checkbox or the button: {counts:?}"
+        );
+    }
+
+    /// The box is off to begin with, and ticking it is a fact about the folder:
+    /// the index keeps it, and opening that folder again comes back with it.
+    #[test]
+    fn the_index_keeps_whether_multi_selected_was_ticked() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert!(!app.multi_select, "multi-select was on before anything ticked it");
+
+        app.multi_select = true;
+        app.remember_multi_select();
+
+        let again = reviewing(found.path());
+        assert!(again.multi_select, "the folder was opened again without the box ticked");
+    }
+
+    /// With the box unticked the mark moves: keeping one picture lets go of the
+    /// one that was kept before it.
+    #[test]
+    fn without_multi_selected_marking_a_picture_lets_the_last_one_go() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![
+                member(1, "a.jpg", 500),
+                member(2, "b.jpg", 400),
+                member(3, "c.jpg", 300),
+            ],
+        }];
+        let set_id = app.sets[0].set_id;
+
+        app.selected = Some(1);
+        app.keep_selected();
+        app.selected = Some(2);
+        app.keep_selected();
+
+        assert_eq!(app.keep.get(&set_id), Some(&Keep::One(2)), "the mark did not move");
+    }
+
+    /// With the box ticked the marks add up, and taking them off again one at a
+    /// time can leave the set keeping nothing at all.
+    #[test]
+    fn with_multi_selected_marks_add_up_and_come_off_one_at_a_time() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![
+                member(1, "a.jpg", 500),
+                member(2, "b.jpg", 400),
+                member(3, "c.jpg", 300),
+            ],
+        }];
+        let set_id = app.sets[0].set_id;
+        app.multi_select = true;
+
+        app.selected = Some(1);
+        app.keep_selected();
+        app.selected = Some(3);
+        app.keep_selected();
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::Several(vec![1, 3])),
+            "the second mark did not join the first"
+        );
+
+        app.selected = Some(1);
+        app.keep_selected();
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::One(3)),
+            "taking one off left the wrong picture"
+        );
+
+        app.selected = Some(3);
+        app.keep_selected();
+        assert_eq!(app.keep.get(&set_id), None, "the set is still keeping something");
+    }
+
+    /// Keep all marks the whole set. Taking one picture off it leaves the rest
+    /// marked rather than throwing the lot away.
+    #[test]
+    fn taking_one_picture_off_a_set_that_keeps_all_of_it_leaves_the_rest() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![
+                member(1, "a.jpg", 500),
+                member(2, "b.jpg", 400),
+                member(3, "c.jpg", 300),
+            ],
+        }];
+        let set_id = app.sets[0].set_id;
+        app.keep.insert(set_id, Keep::All);
+
+        app.selected = Some(2);
+        app.keep_selected();
+
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::Several(vec![1, 3])),
+            "the other two did not stay marked"
+        );
+    }
+
+    /// Two clicks on a second picture while the box is ticked keep it as well as
+    /// the one already kept, rather than in place of it.
+    #[test]
+    fn two_clicks_with_multi_selected_keep_both_pictures() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+        let set_id = app.sets[0].set_id;
+        app.multi_select = true;
+        let first = match app.keep.get(&set_id) {
+            Some(Keep::One(file_id)) => *file_id,
+            other => panic!("the search did not pick one picture to keep: {other:?}"),
+        };
+        let other = app.sets[0]
+            .members
+            .iter()
+            .map(|member| member.file_id)
+            .find(|file_id| *file_id != first)
+            .expect("the set holds one picture");
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let frame = |app: &mut App, at: Option<egui::Pos2>, clicks: usize, time: f64| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                ..Default::default()
+            };
+            if let Some(pos) = at {
+                input.events.push(egui::Event::PointerMoved(pos));
+                for _ in 0..clicks {
+                    for pressed in [true, false] {
+                        input.events.push(egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+            })
+            .shapes
+        };
+
+        let drawn = frame(&mut app, None, 0, 0.0);
+        let mut pictures: Vec<egui::Rect> = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - TILE.x).abs() < 6.0
+                        && (rect.rect.height() - TILE.y).abs() < 6.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        pictures.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        let index = app.sets[0]
+            .members
+            .iter()
+            .position(|member| member.file_id == other)
+            .expect("the set lost a picture");
+        let at = pictures[index].center();
+
+        frame(&mut app, Some(at), 0, 0.1);
+        frame(&mut app, Some(at), 2, 0.2);
+
+        let keeping = app.keep.get(&set_id).expect("the set is keeping nothing");
+        assert!(keeping.keeps(first), "the picture kept before the clicks was let go");
+        assert!(keeping.keeps(other), "the picture that was clicked twice is not kept");
     }
 
     /// The two buttons on a set really pressed, in a really scanned folder. Keep

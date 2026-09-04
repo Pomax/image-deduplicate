@@ -21,7 +21,12 @@ pub enum Update {
     /// than on the thread that draws, which used to open the index across the
     /// network for three small values and hold the window for as long as that
     /// took.
-    Settings { recurse: Option<bool>, disposal: Option<String>, move_dir: Option<String> },
+    Settings {
+        recurse: Option<bool>,
+        disposal: Option<String>,
+        move_dir: Option<String>,
+        multi_select: Option<bool>,
+    },
     /// The folder is being listed, and this is how many files that has found so
     /// far. There is no total yet: the listing is what produces it.
     Walking { found: u64, of: Option<u64> },
@@ -125,6 +130,7 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
                     recurse,
                     disposal: meta("disposal"),
                     move_dir: meta("move_dir"),
+                    multi_select: meta("multi_select").map(|value| value == "1"),
                 });
             }
             say(scan::Step::FinishedReadingTheIndexSettings);
