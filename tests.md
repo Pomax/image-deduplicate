@@ -840,6 +840,11 @@ does not become quadratic as a folder grows.
 Two thousand copies of one picture are found without comparing them all to each
 other.
 
+### a_folder_of_pictures_with_corners_does_not_become_quadratic
+
+Pictures whose hashes are all far apart, so the corner pass is the only thing
+running: four times the folder costs about four times the time, not sixteen.
+
 ## crates/imgdedupe/src/app.rs
 
 ### a_file_stamp_becomes_the_date_and_time_it_stands_for

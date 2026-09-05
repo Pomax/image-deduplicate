@@ -288,7 +288,7 @@ Each entry: what was asked, what happened, what was wrong with it, what fixed it
 
 **What was built:** `features.rs`. FAST corners over an eight-level pyramid at 1.2, an orientation per corner from its intensity centroid, and a 256-bit description of the neighbourhood sampled in a fixed pattern rotated by that orientation, from a smoothed copy of the level. The strongest 320 spread over the frame by cell. Matching is by description with a ratio test, then by geometry: two matches propose a scale, a rotation and a shift, and the rest vote, RANSAC style. Sixteen agreeing corners is a duplicate.
 
-**Three wrong turns, each caught by measuring:** no smoothing before sampling, so single-pixel differences flipped bits and a 60% crop scored nine; a budget of 128 corners, too few for a crop to keep enough of them, which 320 fixed and took the same crop to thirty-seven; and a shortlist that filed corners under some of their bits, which fails for exactly the reason the pair needs finding, since a corner described a little differently is a different value. The shortlist is now a quick look at every pair: 48 corners of one against all of the other's, counting matches within 24 of 256 bits, five to look properly, about 100 microseconds a pair. Unrelated photographs never got past three.
+**Three wrong turns, each caught by measuring:** no smoothing before sampling, so single-pixel differences flipped bits and a 60% crop scored nine; a budget of 128 corners, too few for a crop to keep enough of them, which 320 fixed and took the same crop to thirty-seven; and a shortlist that filed corners under some of their bits, which fails for exactly the reason the pair needs finding, since a corner described a little differently is a different value. The shortlist became a quick look at every pair: 48 corners of one against all of the other's, counting matches within 24 of 256 bits, five to look properly, about 100 microseconds a pair. Unrelated photographs never got past three. That last part is what a later episode had to undo, because a hundred microseconds a pair is an hour on a folder of ten thousand.
 
 **Measured on the user's own folder:** 1066 files, 4346 candidate pairs, 1398 matches, 704 pictures in 186 sets, in four and a half seconds.
 
@@ -327,6 +327,20 @@ Each entry: what was asked, what happened, what was wrong with it, what fixed it
 **Asked:** why did you inject yourself as a contributor? Remove yourself, and never do it again.
 
 **What happened:** two commits went out with a `Co-Authored-By: Claude` trailer, put there because the harness prints an instruction to add one in a system message every time it talks about commits. Both were rewritten with `commit-tree` and `rebase --onto` and force pushed. Written instructions were not enough, since the harness repeats its own on every turn, so the ban is configuration now: `includeCoAuthoredBy` false and empty `attribution.commit` and `attribution.pr` in `~/.claude/settings.json`, which suppresses the trailer for every project on the machine. The first attempt at the force push also went through PowerShell, which is forbidden here and had to be redone.
+
+### The pass that compared everything to everything
+
+**Asked:** a folder of 9490 pictures sat at half a bar doing nothing. Then: did I not tell you to sort the in-memory structure per fingerprint so you are not comparing everything to everything?
+
+**What happened:** yes, and the corner pass did not. The hashes had their index; the corners were compared pair by pair, 45 million pairs at about 100 microseconds each, which is an hour and a quarter of processor time with no progress reported and no stop flag read. My first attempt at an index for them had filed each corner under a fixed slice of its bits, which fails whenever the difference between two descriptions of the same corner lands in that slice, and instead of fixing it I wrote "does not work" in the README and left the quadratic loop in.
+
+The fix is what the hash index already does: several filings, not one. Each corner is filed under a sample of its bits, sixteen samples over, so two descriptions a few bits apart share a bucket in at least one filing. The number of buckets is worked out from the folder, so a bigger folder gets more buckets and a picture still reads a few hundred corners.
+
+What that first cut of it did not expect: some descriptions are shared by thousands of pictures, flat and featureless corners that every photograph has. The fullest bucket held two percent of every corner in the folder, and reading those buckets was nineteen twentieths of the pass. They are also worthless, because a description thousands of pictures share cannot say which picture this is, so a bucket above 32 times the average is skipped. That made the pass 30 times faster and cost recall, because the old exhaustive count had been leaning on those worthless agreements to reach its threshold of five: with them gone, three distinctive corners is the same evidence, and the threshold moved to three.
+
+Measured on the folder above: 8 seconds for the corner pass, 21 for the whole search, against never finishing. Measured against the old code on subsets where comparing every pair was still affordable, at 1500 pictures and 3000: 12 sets against 11, and 37 against 38.
+
+The speed test had missed all of this because its fixture pictures had no corners at all, so the quadratic pass never ran in it. There is a test with corners in it now.
 
 ## The shape of the work so far
 
@@ -651,6 +665,10 @@ Every one of these happened. Most of them cost an hour or a rebuild.
 **Wasting a UI run.** Two screen-driving runs were thrown away because the keystrokes went to whatever had focus. Those runs take the machine away from the user. Focus the window first and confirm the target of every click.
 
 **Writing tests that could not fail.** A test asserted a boolean assignment. Six others described features that no longer existed. Several arranged their state by hand and then asserted that nothing had changed, which proves nothing about the application.
+
+**Declaring something impossible after one attempt.** One design for a corner index failed, so I wrote "does not work" in the README and shipped a loop that compared every pair, which took an hour and a quarter on a folder of ten thousand pictures. The failed design was one arrangement of the idea, not the idea. Say what was tried and what it did, never that a thing cannot be done.
+
+**A speed test whose fixture skipped the slow code.** The fixture pictures had no corners, so the quadratic corner pass never ran in the test that exists to catch quadratic passes. A fixture has to carry the thing being measured.
 
 **Letting the suite write to the user's real settings file.** The tests drive the real window, which saves settings, so temporary folders ended up in the machine's configuration. Saving is a no-op under test now.
 

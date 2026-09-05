@@ -7,12 +7,21 @@
 //! The times it prints are worth reading. These run unoptimised, so they are
 //! several times what a release build takes.
 
+use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use imgdedupe_core::db::{self, Connection, Record};
 use imgdedupe_core::fingerprint::{self, Fingerprint};
 use imgdedupe_core::format::Format;
 use imgdedupe_core::matching::{self, Thresholds};
+
+/// The searches here use every core, so two of these running at once measure
+/// each other rather than the search. They take turns.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn a_turn() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(|held| held.into_inner())
+}
 
 const FILES: usize = 4_000;
 
@@ -68,6 +77,7 @@ fn build(path: &std::path::Path, files: usize) -> Connection {
 
 #[test]
 fn what_a_search_costs_on_a_folder_worth_running_it_on() {
+    let _turn = a_turn();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("speed.sqlite");
     let started = Instant::now();
@@ -111,6 +121,7 @@ fn check_the_work_is_not_quadratic(path: &std::path::Path, whole: f64) {
 /// has to cost about four times the time, not sixteen.
 #[test]
 fn a_folder_full_of_one_picture_does_not_become_quadratic() {
+    let _turn = a_turn();
     let dir = tempfile::tempdir().expect("tempdir");
     let small = time_copies(&dir.path().join("few.sqlite"), 500);
     let large = time_copies(&dir.path().join("many.sqlite"), 2_000);
@@ -122,6 +133,78 @@ fn a_folder_full_of_one_picture_does_not_become_quadratic() {
         "4x the copies of one picture cost {grew:.1}x the time, which is the shape of \
          comparing the whole bucket to itself"
     );
+}
+
+/// Corners a fixture picture gets. Enough for the index to have something to
+/// file and few enough that an unoptimised run of this is seconds rather than
+/// minutes.
+const FIXTURE_CORNERS: usize = 8;
+
+/// A folder whose pictures have corners. The hashes here are all far apart, so
+/// the band index pairs nothing and what is being timed is the corner pass on
+/// its own: four times the folder, about four times the time. Comparing every
+/// picture's corners against every other picture's is sixteen, and that is what
+/// this stops coming back.
+#[test]
+fn a_folder_of_pictures_with_corners_does_not_become_quadratic() {
+    let _turn = a_turn();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let small = time_corners(&dir.path().join("few.sqlite"), 500);
+    let large = time_corners(&dir.path().join("many.sqlite"), 2_000);
+
+    let grew = large / small.max(0.000_001);
+    println!("500 pictures in {small:.2}s, 2000 in {large:.2}s: 4x the folder, {grew:.1}x the time");
+    assert!(
+        grew < 8.0,
+        "4x the pictures cost {grew:.1}x the time, which is the shape of comparing every \
+         picture's corners against every other picture's"
+    );
+}
+
+/// Build a folder of `pictures` pictures that have corners, and time a search.
+fn time_corners(path: &std::path::Path, pictures: usize) -> f64 {
+    let mut conn = db::open(path).expect("index");
+    let tx = conn.transaction().expect("tx");
+    for index in 0..pictures {
+        let record = Record {
+            rel_path: format!("picture{index}.jpeg"),
+            size_bytes: 4_000_000 + index as i64,
+            mtime_ns: 1,
+            width: 3000,
+            height: 4000,
+            format: Format::Jpeg,
+            channels: 3,
+            fingerprint: Fingerprint {
+                dct_hashes: [hash_for(index * 7 + 1); fingerprint::VARIANTS],
+                ring_stats: vec![0u8; 48 * 4],
+            },
+            corners: imgdedupe_core::features::pack(&corners_for(index)),
+        };
+        db::upsert(&tx, &record, 1).expect("upsert");
+    }
+    tx.commit().expect("commit");
+
+    let started = Instant::now();
+    matching::find_sets(&conn, Thresholds::preset("balanced")).expect("search");
+    started.elapsed().as_secs_f64()
+}
+
+/// Corners for one fixture picture, unrelated to every other picture's.
+fn corners_for(index: usize) -> Vec<imgdedupe_core::features::Keypoint> {
+    let mut state = (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = move || {
+        state ^= state >> 30;
+        state = state.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        state ^= state >> 27;
+        state
+    };
+    (0..FIXTURE_CORNERS)
+        .map(|which| imgdedupe_core::features::Keypoint {
+            x: which as u16 * 100,
+            y: which as u16 * 50,
+            descriptor: std::array::from_fn(|_| next() as u8),
+        })
+        .collect()
 }
 
 /// Build a folder of `copies` copies of one picture and time a search over it.
