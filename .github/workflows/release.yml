@@ -121,6 +121,13 @@ jobs:
           # are always from one build rather than from whichever job last
           # finished.
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            # A release that already exists keeps the tag it was made from, and
+            # editing its target does not move that tag, so latest would go on
+            # pointing at whatever it was first made from. The tag is moved.
+            if [ "$tag" = "latest" ]; then
+              gh api -X PATCH "repos/$REPO/git/refs/tags/latest" \
+                -f sha="$GITHUB_SHA" -F force=true >/dev/null
+            fi
             gh release edit "$tag" --repo "$REPO" --target "$GITHUB_SHA" --title "$title"
           else
             gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" \
