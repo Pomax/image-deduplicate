@@ -780,6 +780,11 @@ mod search_reports {
 /// Batches the comparing is cut into, so it spreads across the machine's cores.
 const COMPARE_BATCHES: u64 = 32;
 
+/// Pairs a batch gets through between saying so, and between looking at whether
+/// it has been told to stop. A pair is tens of microseconds, so this is a
+/// fraction of a second either way.
+const COMPARE_REPORT_EVERY: usize = 256;
+
 /// As `find_sets`, stopping when asked.
 ///
 /// `cancel` is looked at between the pieces the work is cut into, which is often
@@ -875,16 +880,30 @@ pub fn find_sets_in(
                 return Vec::new();
             }
             let batch_pairs = &candidates[bounds[batch]..bounds[batch + 1]];
-            let found = batch_pairs
-                .iter()
-                .copied()
-                .filter(|(a, b)| {
-                    is_match(&images[*a as usize], &images[*b as usize], thresholds)
-                })
-                .collect::<Vec<(u32, u32)>>();
-            let done = compared.fetch_add(batch_pairs.len() as u64, Ordering::Relaxed)
-                + batch_pairs.len() as u64;
-            report(Progress::Comparing { done, total: pairs });
+            let mut found = Vec::new();
+            // Reported from inside the batch rather than at the end of it. Every
+            // batch is running at once, so they all finish at about the same
+            // moment: a bar fed by finished batches stands still for the whole
+            // of the comparing and then fills in one step.
+            for (which, pair) in batch_pairs.iter().enumerate() {
+                let (a, b) = *pair;
+                if is_match(&images[a as usize], &images[b as usize], thresholds) {
+                    found.push((a, b));
+                }
+                if (which + 1) % COMPARE_REPORT_EVERY == 0 {
+                    if stopped() {
+                        return Vec::new();
+                    }
+                    let step = COMPARE_REPORT_EVERY as u64;
+                    let done = compared.fetch_add(step, Ordering::Relaxed) + step;
+                    report(Progress::Comparing { done, total: pairs });
+                }
+            }
+            let rest = (batch_pairs.len() % COMPARE_REPORT_EVERY) as u64;
+            if rest > 0 {
+                let done = compared.fetch_add(rest, Ordering::Relaxed) + rest;
+                report(Progress::Comparing { done, total: pairs });
+            }
             found
         })
         .collect();
@@ -1066,6 +1085,59 @@ mod tests {
             out.extend_from_slice(&value.to_le_bytes());
         }
         out
+    }
+
+    /// Comparing says how far it has got while it is still comparing.
+    ///
+    /// The pairs are cut into batches that all run at once, so a report at the
+    /// end of a batch is a report at the end of the whole thing: measured on a
+    /// real folder that was thirteen seconds of a bar standing still and then
+    /// filling in one step. Six hundred pictures alike enough to be worth
+    /// comparing is tens of thousands of pairs, which is hundreds of reports.
+    #[test]
+    fn comparing_is_reported_while_it_is_still_comparing() {
+        let mut conn = open();
+        for which in 0..600u64 {
+            // A few bits apart, so every one of them is a candidate against
+            // every other and the pairs are the folder squared. Different from
+            // each other, or they would be folded into one before any of this.
+            insert(
+                &mut conn,
+                &format!("{which}.jpg"),
+                which,
+                1000,
+                800,
+                1000 + which as i64,
+                ring(0.5),
+            );
+        }
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let never = AtomicBool::new(false);
+        let images = load_images(&conn, &never, &|_| {}).expect("read").expect("not cancelled");
+        find_sets_in(&images, Thresholds::at(15.0), &never, &|progress| {
+            if let Progress::Comparing { done, total } = progress {
+                seen.lock().unwrap().push((done, total));
+            }
+        })
+        .expect("search")
+        .expect("not cancelled");
+
+        let seen = seen.into_inner().unwrap();
+        // Many times more often than there are batches. One report per batch is
+        // the thing this is here to catch: every batch is running at the same
+        // time, so they all report at the end and the bar never moves until it
+        // is over.
+        assert!(
+            seen.len() as u64 > COMPARE_BATCHES * 4,
+            "comparing reported {} times over {COMPARE_BATCHES} batches",
+            seen.len()
+        );
+        let (last, total) = *seen.last().expect("a report");
+        assert_eq!(last, total, "comparing finished saying {last} of {total}");
+        // Something arrives while there is still most of the work left.
+        let early = seen.iter().any(|(done, total)| *done * 2 < *total);
+        assert!(early, "nothing was reported before comparing was half over");
     }
 
     /// A search can be stopped from another thread. It gives back nothing when it

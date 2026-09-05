@@ -408,6 +408,14 @@ the whole view and gated everything behind it.
 Reads a real index, so it takes the folder from `IMGDEDUPE_TEST_FOLDER` and is
 marked to be asked for by name.
 
+### comparing_is_reported_while_it_is_still_comparing
+
+Six hundred pictures alike enough that every pair is worth comparing, which is
+hundreds of reports rather than one per batch. The pairs are cut into batches
+that all run at once, so a report at the end of a batch is a report at the end
+of the whole thing: on a real folder that was thirteen seconds of a bar standing
+still and then filling in one step.
+
 ### a_search_stops_when_it_is_told_to_and_gives_back_nothing
 
 Cancelling a search returns nothing rather than a partial result that would look
@@ -1136,6 +1144,19 @@ against the lowest line of text painted in it. What is left over is the strip's
 scroll bar and the frame's own padding, not a band of empty space under the file
 names in every row of the list.
 
+### a_set_row_fits_the_room_it_is_given
+
+Draws a set into the room the list gives a row, which is the width less the
+scroll bar the list paints down its right. The box ends as far from that bar as
+it begins from the window's edge, and the gap under the last line is the strip's
+own scroll bar and the frame's margin and nothing else.
+
+### the_ways_of_matching_are_boxes_on_the_page_that_can_be_clicked
+
+The box that says what counts as a duplicate holds a checkbox for each way of
+matching, in order with the colour one last, and clicking one switches that way
+off without touching the other.
+
 ### two_clicks_on_a_picture_keep_it_the_way_the_space_bar_does
 
 Really clicks twice on the picture in a scanned set that the search did not
@@ -1242,6 +1263,13 @@ Scans a folder twice. The second pass reads nothing, because the index already
 holds every file in the folder, and that is a folder fully read and fully
 indexed: both bars are full. A bar left empty because no work happened would be
 a lie about a folder that is entirely done.
+
+### a_search_that_reads_no_index_does_not_start_its_bar_part_full
+
+The duplicates scan bar is the stages that are going to run. A search after a
+pass reads no index, because the pass built what it searches, so the bar is two
+parts and opens at nothing; one that does read the index is three parts, and
+half the reading is a sixth of the bar.
 
 ### listing_the_folder_does_not_move_the_read_bar
 

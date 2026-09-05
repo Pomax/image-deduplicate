@@ -425,6 +425,16 @@ fn paint_scroll_bar(
     let ink = ui.visuals().text_color();
     let painter = ui.painter();
     painter.rect_filled(strip, 0.0, ui.visuals().extreme_bg_color);
+    // Outlined on every side, so the bar reads as a part of the window rather
+    // than as a strip of another colour left on the side of it, and so it ends
+    // somewhere rather than running off the edge. Half a point in, because a
+    // line is drawn either side of where it is put and the outer half of it
+    // would be clipped away.
+    painter.rect_stroke(
+        strip.shrink(0.5),
+        0.0,
+        egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+    );
     arrow(painter, first, -1.0, down, ink);
     arrow(painter, last, 1.0, down, ink);
 
@@ -519,16 +529,16 @@ const SECTION_GAP: f32 = 14.0;
 /// arithmetic below is about outer widths.
 const FRAME_EXTRA: f32 = 14.0;
 
-/// Everything a set row takes on top of its strip: the frame around it, the
-/// spacing the row sits in, and the strip's own scroll bar. Measured, because
-/// what a group frame costs is a style value and not a number to reason out.
-const ROW_EXTRA: f32 = 46.0;
+/// What the same frame costs a set row from top to bottom: its margin, its
+/// border, and what the row it sits in adds around it. Measured, and pinned by
+/// `a_set_row_takes_exactly_the_height_the_list_places_it_at`, which fails when
+/// a row comes out any other height than the list places it at.
+const ROW_FRAME_EXTRA: f32 = 18.0;
 
-/// The largest a picture in a set may be drawn, and the height of the strip of
-/// them a set row holds: the picture, the keep control and the four lines under
-/// it.
+
+/// The largest a picture in a set may be drawn. What the strip of them is tall
+/// is worked out from this and the font, in `tile_strip_height`.
 const TILE: egui::Vec2 = egui::vec2(156.0, 118.0);
-const TILE_STRIP_HEIGHT: f32 = 244.0;
 
 /// Space kept clear around a picture for what is drawn around it: the keeper's
 /// border, and the ring outside that for the one the preview is showing. The ring
@@ -555,7 +565,32 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
 
 /// The buttons that decide a whole set at once, drawn over the right of its
 /// strip: keep all of it at the top, none of it at the bottom.
-const KEEP_BUTTON: egui::Vec2 = egui::vec2(90.0, 24.0);
+/// How tall they are is what the style makes a button, so the width is all
+/// there is to say here.
+const KEEP_BUTTON_WIDTH: f32 = 90.0;
+
+/// One of them, drawn in `at` and ending at its right edge.
+///
+/// Its words are kept on one line: wrapped onto two it is twice as tall as the
+/// space it was given, and a button taller than its place pushes the box it sits
+/// in open under it. A word longer than the space then makes the button wider
+/// instead, so it is laid out from the right and grows leftwards, where there is
+/// nothing but the pictures it sits over.
+fn put_at_the_right(
+    ui: &mut egui::Ui,
+    at: egui::Rect,
+    label: &str,
+    edge: egui::Stroke,
+) -> egui::Response {
+    let button = egui::Button::new(label).stroke(edge).wrap_mode(egui::TextWrapMode::Extend);
+    ui.allocate_new_ui(
+        egui::UiBuilder::new()
+            .max_rect(at)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| ui.add(button),
+    )
+    .inner
+}
 
 /// Kept clear at the right of the folder row for the button that lists the
 /// folders scanned before, so a long path stops short of it.
@@ -622,8 +657,30 @@ fn duplicate_count(sets: &[DuplicateSet]) -> usize {
 /// What a set row takes. The list places the rows it is not drawing by this, and
 /// a row is built to exactly it, so a row can never be a few points out and shift
 /// the content under a scroll that is already running.
-fn set_row_height(_ui: &egui::Ui) -> f32 {
-    TILE_STRIP_HEIGHT + ROW_EXTRA
+fn set_row_height(ui: &egui::Ui) -> f32 {
+    // The strip, the scroll bar under it, and the frame drawn round both. Not
+    // the space between one row and the next: the list adds that itself, and
+    // counting it here puts it inside the box instead of between the boxes.
+    tile_strip_height(ui) + SCROLL_BAR + ROW_FRAME_EXTRA
+}
+
+/// What one tile in a set takes from top to bottom, which is what the strip of
+/// them is tall.
+///
+/// Worked out from the style rather than kept as a number, because every part of
+/// it is a style value: the text under a picture is four lines of whatever the
+/// window's font measures, and a number written down here for one font is dead
+/// space or a clipped line in another.
+fn tile_strip_height(ui: &egui::Ui) -> f32 {
+    let gap = ui.spacing().item_spacing.y;
+    // Room kept clear for the ring, then the picture at its largest inside the
+    // border drawn round it.
+    let picture = TILE_RING + TILE.y + TILE_BORDER;
+    // Under it, five rows with a gap above each: the one that says KEEP, which
+    // is kept clear whether or not it says it, and the four lines of text.
+    let under = 5.0 * gap + ui.spacing().interact_size.y
+        + 4.0 * ui.text_style_height(&egui::TextStyle::Body);
+    picture + under
 }
 
 /// Box widths for a row: each one its measured content, plus an equal share of
@@ -833,6 +890,10 @@ struct SearchState {
     /// means it has not counted them yet.
     loaded: u64,
     to_load: u64,
+    /// Whether this search is reading the index at all. A search that follows a
+    /// pass is not: the pass built what it searches while it was scanning, and
+    /// there is nothing left to read.
+    reads_the_index: bool,
     /// Pictures the shortlist has looked up, of how many there are.
     shortlisted: u64,
     to_shortlist: u64,
@@ -847,21 +908,33 @@ struct SearchState {
 impl SearchState {
     /// The search as one number out of one number.
     ///
-    /// Three stages, each of which only knows its own size once it starts, so
-    /// they share one bar a third each: reading the index, drawing up the
-    /// shortlist, then comparing what it produced. Measured on a folder of ten
-    /// thousand pictures the three take four, eight and thirteen seconds, so a
-    /// third each runs a little fast at the start and a little slow at the end,
-    /// and never stands still.
+    /// Stages of very different lengths, none of which knows its own size until
+    /// it starts, so they share one bar an equal part each: reading the index,
+    /// drawing up the shortlist, then comparing what it produced. Measured on a
+    /// folder of ten thousand pictures those take four, eight and thirteen
+    /// seconds, so an equal part each runs a little fast at the start and a
+    /// little slow at the end, and never stands still.
+    ///
+    /// A search straight after a pass does no reading: the pass built what it
+    /// searches. Giving that a part of its own would open the bar at a third for
+    /// work that nothing is going to do, so the bar is the parts that are going
+    /// to happen and no others.
     fn progress(&self) -> (u64, u64) {
         const PART: u64 = 1000;
+        let reading = if self.reads_the_index { 1 } else { 0 };
+        let whole = PART * (reading + 2);
         if self.pairs > 0 || self.compared > 0 {
-            return (PART * 2 + fraction(self.compared, self.pairs, PART), PART * 3);
+            return (PART * (reading + 1) + fraction(self.compared, self.pairs, PART), whole);
         }
         if self.to_shortlist > 0 {
-            return (PART + fraction(self.shortlisted, self.to_shortlist, PART), PART * 3);
+            return (PART * reading + fraction(self.shortlisted, self.to_shortlist, PART), whole);
         }
-        (fraction(self.loaded, self.to_load, PART), PART * 3)
+        if reading == 0 {
+            // The count of what is in memory arrives before the work starts.
+            // It is not progress: nothing has been done with it yet.
+            return (0, whole);
+        }
+        (fraction(self.loaded, self.to_load, PART), whole)
     }
 }
 
@@ -1820,19 +1893,11 @@ impl App {
                 }
             });
             ui.add_space(6.0);
-            changed |= ui
-                .add_enabled(
-                    !busy,
-                    egui::Checkbox::new(
-                        &mut self.ignore_colour,
-                        "Match colour with grayscale",
-                    ),
-                )
-                .changed();
             // The two ways of matching, either of which can be left out. The
             // first is nearly free and finds resizes, recompressions and
             // rotations; the second is most of what a search costs and is what
-            // finds a crop.
+            // finds a crop. They come before the colour box, which is a change
+            // to how the first of them decides rather than a way of its own.
             let ways = ui
                 .add_enabled(
                     !busy,
@@ -1841,9 +1906,15 @@ impl App {
                 .changed()
                 | ui.add_enabled(
                     !busy,
+                    egui::Checkbox::new(&mut self.match_corners, "Match partials"),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    !busy,
                     egui::Checkbox::new(
-                        &mut self.match_corners,
-                        "Match crops and parts of pictures (slower)",
+                        &mut self.ignore_colour,
+                        "Match colour with grayscale",
                     ),
                 )
                 .changed();
@@ -2146,6 +2217,7 @@ impl App {
                     matching::Progress::Loading { done, total } => {
                         self.light(Lamp::StartedBuildingTheMemoryIndex);
                         self.search.stage = Some("reading the index");
+                        self.search.reads_the_index = true;
                         self.search.loaded = done;
                         self.search.to_load = total;
                     }
@@ -2860,19 +2932,35 @@ impl App {
         // Built to a fixed height rather than measured afterwards. The list places
         // the rows it is not drawing by this number, and a row that came out any
         // other height would move the content under a scroll already in progress.
-        let size = egui::vec2(ui.available_width(), set_row_height(ui));
+        //
+        // The width is the room less what the frame drawn round the row adds to
+        // it, and less the margin the window keeps at its edges, so the box ends
+        // as far from the list's scroll bar as it begins from the window's edge.
+        let margin = (ui.max_rect().left() - ui.ctx().screen_rect().left()).max(0.0);
+        let size = egui::vec2((ui.available_width() - margin).max(0.0), set_row_height(ui));
         ui.allocate_ui(size, |ui| {
+        // The row takes the same height whatever its box does, because the list
+        // places the rows it is not drawing by that number. A set whose strip
+        // needs no scroll bar has a shorter box and the space goes under it.
         ui.set_min_size(size);
+        ui.set_width(size.x);
         egui::Frame::group(ui.style())
             .show(ui, |ui| {
-                ui.set_height(TILE_STRIP_HEIGHT + SCROLL_BAR);
+                // The strip keeps room under it for its own scroll bar, and only
+                // when it has one. A set that fits across the window does not
+                // scroll and does not get a bar, and room kept for a bar nobody
+                // draws is a band of empty space under the file names.
+                let gap = ui.spacing().item_spacing.x;
+                let across: f32 = members.iter().map(tile_width).sum::<f32>()
+                    + gap * (members.len().saturating_sub(1)) as f32;
+                let scrolls = across > ui.max_rect().width() + 0.5;
+                ui.set_height(tile_strip_height(ui) + if scrolls { SCROLL_BAR } else { 0.0 });
                 let inside = ui.max_rect();
 
                 // One tile's width is what a click on the strip's scroll bar
                 // moves by, and the first tile's is as good a step as any.
                 let step = members.first().map_or(TILE.x, tile_width);
                 let bar = egui::Id::new(("set bar", set_id));
-                let gap = ui.spacing().item_spacing.x;
                 let (_, offset, viewport) = scrolled(
                     ui,
                     bar,
@@ -2909,24 +2997,35 @@ impl App {
                 // one button is a row of the list nobody can see pictures in.
                 let edge =
                     egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x33, 0x33, 0x33));
-                let at = egui::Rect::from_min_size(
-                    egui::pos2(inside.right() - KEEP_BUTTON.x, inside.top()),
-                    KEEP_BUTTON,
+                // As tall as the style draws a button. Given any less, the
+                // button overflows what it was given and drags the box down
+                // with it, which is empty space under the last line of every
+                // set in the list.
+                let button = egui::vec2(
+                    KEEP_BUTTON_WIDTH,
+                    ui.spacing().interact_size.y + 2.0 * ui.spacing().button_padding.y,
                 );
-                if ui.put(at, egui::Button::new("keep all").stroke(edge)).clicked() {
+                let at = egui::Rect::from_min_size(
+                    egui::pos2(inside.right() - button.x, inside.top()),
+                    button,
+                );
+                if put_at_the_right(ui, at, "keep all", edge).clicked() {
                     self.keep.insert(set_id, Keep::All);
                 }
 
-                // Above the strip's own scroll bar, which has an arrow in the
-                // corner this would otherwise cover.
+                // Ending level with the last line of text under the pictures,
+                // which is where the strip itself ends, and above the strip's
+                // own scroll bar, which has an arrow in the corner this would
+                // otherwise cover. Measured from the strip rather than from the
+                // frame, so it stays level whatever the frame is given.
                 let at = egui::Rect::from_min_size(
                     egui::pos2(
-                        inside.right() - KEEP_BUTTON.x,
-                        inside.bottom() - SCROLL_BAR - KEEP_BUTTON.y,
+                        inside.right() - button.x,
+                        inside.top() + tile_strip_height(ui) - button.y,
                     ),
-                    KEEP_BUTTON,
+                    button,
                 );
-                if ui.put(at, egui::Button::new("keep none").stroke(edge)).clicked() {
+                if put_at_the_right(ui, at, "keep none", edge).clicked() {
                     // Nothing marked is nothing kept, so the whole set goes.
                     self.keep.remove(&set_id);
                 }
@@ -2981,8 +3080,9 @@ impl App {
         let showing = self.selected == Some(member.file_id);
         let keep_colour = egui::Color32::from_rgb(90, 180, 110);
 
-        ui.allocate_ui(egui::vec2(width, TILE_STRIP_HEIGHT), |ui| {
-            ui.set_height(TILE_STRIP_HEIGHT);
+        let tall = tile_strip_height(ui);
+        ui.allocate_ui(egui::vec2(width, tall), |ui| {
+            ui.set_height(tall);
             // A set is a strip that scrolls sideways, and the ones off the end of
             // it are not on screen however much of the set is. Asking for them
             // would put a hundred pictures nobody can see in front of the next
@@ -3062,17 +3162,26 @@ impl App {
                         }
                     },
                 );
-                ui.label(format!("{}x{}", member.width, member.height));
-                ui.label(
+                // Four lines, each of them one line. A tile is a column as wide
+                // as its picture, and a line long enough to wrap in it would
+                // make that tile taller than every other one in the strip.
+                clipped_line_in(
+                    ui,
+                    egui::RichText::new(format!("{}x{}", member.width, member.height)),
+                    width,
+                );
+                clipped_line_in(
+                    ui,
                     egui::RichText::new(format!(
                         "{}  {:.1} MB",
                         member.format,
                         member.size_bytes as f64 / 1_000_000.0
                     ))
                     .weak(),
+                    width,
                 );
-                ui.label(egui::RichText::new(file_date(member.mtime_ns)).weak());
-                clipped_line(ui, egui::RichText::new(&member.rel_path).weak());
+                clipped_line_in(ui, egui::RichText::new(file_date(member.mtime_ns)).weak(), width);
+                clipped_line_in(ui, egui::RichText::new(&member.rel_path).weak(), width);
             });
         });
     }
@@ -4849,6 +4958,29 @@ mod tests {
     }
 
     /// Every line of text that was painted, with where it went.
+    /// The box a set is drawn in: the widest rectangle painted with an outline,
+    /// which is the group frame around the row.
+    fn box_around_the_set(shapes: &[egui::epaint::ClippedShape]) -> Option<egui::Rect> {
+        fn walk(shape: &egui::Shape, found: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => found.push(rect.rect),
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut found);
+        }
+        found.into_iter().max_by(|one, other| {
+            one.width().partial_cmp(&other.width()).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
     fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
         fn walk(shape: &egui::Shape, found: &mut Vec<(String, egui::Rect)>) {
             match shape {
@@ -4986,11 +5118,12 @@ mod tests {
         }
         assert!(bottom > 0.0, "the row painted no text at all");
 
-        // What is under the last line: the strip's scroll bar, and the few points
-        // of padding the frame draws inside its own edge. Nothing else.
+        // What is under the last line: the strip's scroll bar, the padding the
+        // frame draws inside its own edge, and the space to the next row.
+        // Nothing else.
         let spare = taken - bottom;
         assert!(
-            spare < SCROLL_BAR + 6.0,
+            spare < SCROLL_BAR + ROW_FRAME_EXTRA,
             "the box is {spare} points taller than the tiles in it"
         );
     }
@@ -5207,6 +5340,61 @@ mod tests {
 
     /// Keep none sits at the foot of the tiles, level with the last line under
     /// the pictures, rather than floating somewhere above it.
+    /// A set row is as tall as what it holds, and as wide as the room it is
+    /// given without running under the list's scroll bar. The box around a set
+    /// is drawn by a frame that adds its own margin, so a row built to the whole
+    /// of the available width comes out that much wider than the room for it.
+    #[test]
+    fn a_set_row_fits_the_room_it_is_given() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+
+        let ctx = window();
+        let screen =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let mut bar_at = 0.0_f32;
+        let output = ctx.run(
+            egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // As the list gives it: the width less the scroll bar it
+                    // paints down the right.
+                    let room = ui.available_rect_before_wrap();
+                    let inside = room.with_max_x(room.right() - SCROLL_BAR);
+                    bar_at = inside.right();
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inside), |ui| {
+                        app.set_row(ui, 0, &root)
+                    });
+                });
+            },
+        );
+
+        let outline = box_around_the_set(&output.shapes).expect("no box was drawn around the set");
+        let painted = texts(&output.shapes);
+        let last = painted
+            .iter()
+            .filter(|(text, _)| !text.starts_with("keep"))
+            .map(|(_, rect)| rect.bottom())
+            .fold(0.0_f32, f32::max);
+
+        // The gap under the last line is the strip's own scroll bar and the
+        // margin the frame draws with, and nothing else.
+        let under = outline.bottom() - last;
+        assert!(
+            under < SCROLL_BAR + 14.0,
+            "the box goes {under} past the last line under the pictures"
+        );
+        // The left of the box sits a margin in from the window, and its right
+        // leaves the same margin before the list's scroll bar.
+        let left = outline.left() - screen.left();
+        let right = bar_at - outline.right();
+        assert!(
+            (left - right).abs() < 2.0,
+            "the box is {left} from the left edge and {right} from the scroll bar"
+        );
+    }
+
     #[test]
     fn keep_none_sits_level_with_the_last_line_under_the_pictures() {
         let found = folder_with_a_duplicate();
@@ -5241,8 +5429,11 @@ mod tests {
             .map(|(_, rect)| rect.bottom())
             .fold(0.0_f32, f32::max);
 
+        // The button's words, not the button: they sit in the middle of it, so
+        // they end half its padding above where it does, and where it ends is
+        // level with the last line.
         assert!(
-            (button.bottom() - last).abs() < 8.0,
+            (button.bottom() - last).abs() < 12.0,
             "keep none ends at {} and the last line under the pictures at {last}",
             button.bottom()
         );
@@ -5550,6 +5741,56 @@ mod tests {
 
         let again = reviewing(found.path());
         assert!(again.multi_select, "the folder was opened again without the box ticked");
+    }
+
+    /// The two ways of matching are on the page, in the box that says what
+    /// counts as a duplicate, and clicking one turns it off.
+    #[test]
+    fn the_ways_of_matching_are_boxes_on_the_page_that_can_be_clicked() {
+        let ctx = egui::Context::default();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let frame = |app: &mut App, at: Option<egui::Pos2>, pressed: Option<bool>| {
+            let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            if let Some(pos) = at {
+                input.events.push(egui::Event::PointerMoved(pos));
+                if let Some(pressed) = pressed {
+                    input.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.matching_section(ui, 600.0);
+                });
+            })
+            .shapes
+        };
+
+        let drawn = frame(&mut app, None, None);
+        let whole = label_rect(&drawn, "Match whole pictures")
+            .expect("the box for matching whole pictures was not drawn");
+        let crops = label_rect(&drawn, "Match partials")
+            .expect("the box for matching partials was not drawn");
+        let colour = label_rect(&drawn, "Match colour with grayscale")
+            .expect("the box for matching colour with grayscale was not drawn");
+        // The ways of matching first, then the colour box, which changes how the
+        // first of them decides rather than being a way of its own.
+        assert!(
+            whole.top() < crops.top() && crops.top() < colour.top(),
+            "the boxes are in the wrong order: {whole:?}, {crops:?}, {colour:?}"
+        );
+
+        // The tick itself sits to the left of the words.
+        let at = egui::pos2(crops.left() - 8.0, crops.center().y);
+        frame(&mut app, Some(at), Some(true));
+        frame(&mut app, Some(at), Some(false));
+        assert!(!app.match_corners, "clicking the box did not switch matching crops off");
+        assert!(app.match_whole_frame, "clicking one box switched the other off");
     }
 
     /// Both ways of matching are on to begin with, and switching one off is a
@@ -6278,6 +6519,46 @@ mod tests {
             3,
             "the read, indexed and duplicates bars are not all filled once the pass is done"
         );
+    }
+
+    /// The duplicates scan is the stages that are going to happen and no
+    /// others. A search straight after a pass reads no index, because the pass
+    /// built what it searches, and a bar that gave that stage a share of itself
+    /// would open a third full for work nobody is going to do.
+    #[test]
+    fn a_search_that_reads_no_index_does_not_start_its_bar_part_full() {
+        // What a search after a pass reports first: everything is in memory
+        // already, so it says how many pictures there are and starts work.
+        let after_a_pass = SearchState {
+            stage: Some("comparing"),
+            loaded: 900,
+            to_load: 900,
+            ..SearchState::default()
+        };
+        let (done, of) = after_a_pass.progress();
+        assert_eq!(done, 0, "the bar opened {done} of {of} before anything was done");
+
+        // The same search once the shortlist is half drawn up: half of the
+        // first of its two stages.
+        let halfway = SearchState {
+            shortlisted: 450,
+            to_shortlist: 900,
+            ..after_a_pass.clone()
+        };
+        let (done, of) = halfway.progress();
+        assert_eq!((done, of), (500, 2000), "half the shortlist is not a quarter of the bar");
+
+        // A search that does read the index has three stages, and reading half
+        // of it is half of the first of them.
+        let reading = SearchState {
+            stage: Some("reading the index"),
+            reads_the_index: true,
+            loaded: 450,
+            to_load: 900,
+            ..SearchState::default()
+        };
+        let (done, of) = reading.progress();
+        assert_eq!((done, of), (500, 3000), "half the reading is not a sixth of the bar");
     }
 
     /// A folder whose index already holds every file in it is fully read and

@@ -10,7 +10,10 @@ A cross-platform desktop program that indexes a folder of images, finds duplicat
 - WebP
 - TIFF
 - HEIC
-- Camera raw: CR2 and CR3 (Canon), NEF (Nikon), ARW (Sony), RW2 (Panasonic)
+- Canon CR2 and CR3
+- Nikon NEF
+- Sony ARW
+- Panasonic RW2
 
 Raw files are indexed from the JPEG preview the camera writes inside them: the
 sensor data itself needs the manufacturer's own demosaic, and the preview is the
@@ -23,7 +26,7 @@ Each step has its own "page" in the UI.
 
 **Scan.** Walks the folder (subfolders optional), decodes and fingerprints every file that is new or has changed, and writes the results to `imgdedupe.sqlite` in that folder. Files whose size and modification time match the index are skipped.
 
-What counts as a duplicate is set here: how far apart two pictures may be, whether colour is ignored, and which of the two ways of matching to use. "Match whole pictures" is the hash and the colour signature, which finds resizes, recompressions and rotations for almost nothing; "match crops and parts of pictures" is the corners, which is what finds a crop and what most of a search's time goes on. Both are on to begin with, and both are kept in the folder's index, so a folder searched one way is searched that way again when it is opened.
+What counts as a duplicate is set here: how far apart two pictures may be, whether colour is ignored, and which of the two ways of matching to use. "Match whole pictures" is the hash and the colour signature, which finds resizes, recompressions and rotations for almost nothing; "match partials" is the corners, which is what finds a crop and what most of a search's time goes on. Both are on to begin with, and both are kept in the folder's index, so a folder searched one way is searched that way again when it is opened.
 
 Three bars report a run: read, indexed, and the duplicates scan, which is itself in three parts of roughly equal length, reading the index, drawing up the shortlist, and comparing what it produced.
 
@@ -97,9 +100,9 @@ On Windows and Linux the result is compressed with UPX if installed. UPX-style b
 
 ## Tests
 
-`test.bat` or `test.sh`. Arguments are passed to cargo, so a single test can be run by name. [tests.md](./tests.md) documents every test.
+Run `test.bat` (on Windows) or `./test.sh` (Everywhere else). Arguments are passed to Cargo, so a single test can be run by name. [tests.md](./tests.md) documents every test.
 
-You can build a special test binary by using `--test` as argument to the build script, which yields a binary that lets you run it with the `--log` flag, which will log a stupid amount of information in order to assist in debugging.
+You run a special logging-enabled build by using `build.bat --test` or `./build.sh --test` as argument to the build script, which yields a binary that lets you run it with the `--log` flag. This will cause it to log a ton of information to a log file in order to assist in debugging.
 
 ## Questions and comments
 
