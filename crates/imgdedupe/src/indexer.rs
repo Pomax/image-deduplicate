@@ -26,6 +26,8 @@ pub enum Update {
         disposal: Option<String>,
         move_dir: Option<String>,
         multi_select: Option<bool>,
+        match_whole_frame: Option<bool>,
+        match_corners: Option<bool>,
     },
     /// The folder is being listed, and this is how many files that has found so
     /// far. There is no total yet: the listing is what produces it.
@@ -131,6 +133,8 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
                     disposal: meta("disposal"),
                     move_dir: meta("move_dir"),
                     multi_select: meta("multi_select").map(|value| value == "1"),
+                    match_whole_frame: meta("match_whole_frame").map(|value| value == "1"),
+                    match_corners: meta("match_corners").map(|value| value == "1"),
                 });
             }
             say(scan::Step::FinishedReadingTheIndexSettings);

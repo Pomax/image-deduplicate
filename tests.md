@@ -214,6 +214,13 @@ as they were before it, which is the property the whole thing rests on.
 
 What goes into the index comes back out of it unchanged.
 
+### corners_that_all_match_the_same_corner_do_not_agree_on_anything
+
+Forty corners spread over one picture whose nearest description in the other is
+all the same single corner. One pair survives, not forty, and they agree on
+nothing: a heap of matches that all end in the same place is not two pictures
+arranged the same way.
+
 ## crates/imgdedupe-core/src/fingerprint.rs
 
 ### a_rotated_non_square_image_matches_the_original
@@ -723,6 +730,16 @@ The whole-frame hash cannot do this: cropping stretches a different region over
 the same square and every number in it changes at once, while the corners the
 crop kept are still where they were.
 
+### with_the_corners_switched_off_a_crop_is_not_found
+
+The same picture and crop, searched with the corner match switched off. Nothing
+is found, which is what switching it off is for.
+
+### with_the_whole_frame_switched_off_a_resize_is_not_found
+
+A picture and a half-size copy of it are one set with everything on, and nothing
+at all with both ways of matching switched off.
+
 ### an_index_from_a_build_without_corners_is_brought_up_to_date
 
 An index as an older build left it: no column for the corners, and rows saying
@@ -1149,6 +1166,11 @@ because the file is read off another thread.
 Ticks allow multi-select on a scanned folder and opens that folder again. The box
 starts unticked, and the folder's own index is what remembers that it was
 ticked.
+
+### the_index_keeps_which_ways_of_matching_were_ticked
+
+Both ways of matching are on when a folder is opened. Switching the corner match
+off and opening the folder again comes back with it off and the other still on.
 
 ### without_multi_selected_marking_a_picture_lets_the_last_one_go
 

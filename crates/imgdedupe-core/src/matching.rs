@@ -18,6 +18,13 @@ pub struct Thresholds {
     pub max_ring: f32,
     /// Skip the colour check, so a colourised copy and its grayscale original match.
     pub ignore_colour: bool,
+    /// Look for pictures that fill the frame the same way: the hash and the
+    /// colour signature. This is what finds a resize, a recompression or a
+    /// rotation, and it costs almost nothing.
+    pub whole_frame: bool,
+    /// Look for one picture inside another: the corners. This is what finds a
+    /// crop, and it is most of what a search spends its time on.
+    pub corners: bool,
 }
 
 /// The largest distance the band lookup is guaranteed to find.
@@ -85,6 +92,8 @@ impl Thresholds {
             max_bits: share(percent),
             max_ring: (0.005 * percent).max(0.005) as f32,
             ignore_colour: false,
+            whole_frame: true,
+            corners: true,
         }
     }
 
@@ -291,6 +300,10 @@ const INDEXED_CORNERS: usize = 128;
 /// difference happens to fall inside it.
 const CORNER_TABLES: usize = 16;
 
+/// Pictures the shortlist gets through between saying so. Often enough that the
+/// bar moves on a small folder, rarely enough that saying so costs nothing.
+const SHORTLIST_REPORT_EVERY: u64 = 16;
+
 /// Corners a bucket is meant to hold, which is what one look at one table reads.
 /// The number of buckets follows the folder to keep it there, so a folder ten
 /// times the size is ten times the buckets and the same reading per picture.
@@ -421,6 +434,7 @@ fn pairs_by_corner(
     images: &[Image],
     of: &[u32],
     stopped: &(dyn Fn() -> bool + Sync),
+    report: &(dyn Fn(Progress) + Sync),
 ) -> Vec<(u32, u32)> {
     // An entry is a picture and one of its corners in one number, which stops
     // being true at a folder of thirty three million pictures. Nothing else
@@ -441,10 +455,16 @@ fn pairs_by_corner(
         1 << bits,
         most_in_a_bucket
     );
+    let looked = AtomicU64::new(0);
+    report(Progress::Shortlisting { done: 0, total: of.len() as u64 });
     of.par_iter()
         .flat_map_iter(|id| {
             let mut agreeing: std::collections::HashMap<u32, u64> =
                 std::collections::HashMap::new();
+            let done = looked.fetch_add(1, Ordering::Relaxed) + 1;
+            if done % SHORTLIST_REPORT_EVERY == 0 || done == of.len() as u64 {
+                report(Progress::Shortlisting { done, total: of.len() as u64 });
+            }
             if !stopped() {
                 let asking = images[*id as usize].corners.iter().take(QUICK_CORNERS);
                 for (place, corner) in asking.enumerate() {
@@ -539,7 +559,8 @@ fn fold_identical(images: &[Image]) -> Vec<Vec<u32>> {
 /// Whether a candidate pair really is the same picture. `a` is the one with the
 /// lower file id, which is the side that contributes all eight of its variants.
 fn is_match(a: &Image, b: &Image, thresholds: Thresholds) -> bool {
-    whole_frame_match(a, b, thresholds) || same_picture_inside(a, b)
+    (thresholds.whole_frame && whole_frame_match(a, b, thresholds))
+        || (thresholds.corners && same_picture_inside(a, b))
 }
 
 /// The two pictures are the same picture filling the frame the same way: a
@@ -611,6 +632,10 @@ pub enum Progress {
     Loading { done: u64, total: u64 },
     /// Every row is in memory and the structure the search works on is built.
     Loaded { images: u64 },
+    /// Pictures whose corners have been looked up, of how many there are. This
+    /// is the shortlist being drawn up, and on a large folder it is the longest
+    /// part of a search.
+    Shortlisting { done: u64, total: u64 },
     /// Pairs compared, of how many the shortlist produced.
     Comparing { done: u64, total: u64 },
     /// Everything is compared and the sets are being put together.
@@ -804,10 +829,13 @@ pub fn find_sets_in(
         one_of_each.len()
     );
 
+    // Each way of matching draws up its own shortlist, and a way that is turned
+    // off draws up none: there is nothing to be gained by shortlisting pairs for
+    // a test that is not going to be made.
     let by_band: Vec<Vec<(u32, u32)>> = (0..fingerprint::BANDS)
         .into_par_iter()
         .map(|band| {
-            if stopped() {
+            if stopped() || !thresholds.whole_frame {
                 return Vec::new();
             }
             pairs_in_band(&images, &one_of_each, band)
@@ -822,7 +850,11 @@ pub fn find_sets_in(
     timing.step("banding", candidates.len(), "candidate pairs");
     // The second way in: pictures holding some of the same corners. The bands
     // above only ever put together pictures that fill the frame the same way.
-    let by_corner = pairs_by_corner(images, &one_of_each, &stopped);
+    let by_corner = if thresholds.corners {
+        pairs_by_corner(images, &one_of_each, &stopped, report)
+    } else {
+        Vec::new()
+    };
     #[cfg(feature = "logging")]
     timing.step("corners", by_corner.len(), "candidate pairs");
     candidates.extend(by_corner);
@@ -1085,7 +1117,17 @@ mod tests {
         insert(&mut conn, "a.jpg", 0b0000, 800, 600, 100_000, ring(0.5));
         insert(&mut conn, "b.jpg", 0b0011, 800, 600, 100_000, ring(0.5));
         insert(&mut conn, "c.jpg", 0b1111, 800, 600, 100_000, ring(0.5));
-        let sets = find_sets(&conn, Thresholds { max_bits: 2, max_ring: 1.0, ignore_colour: true }).expect("find");
+        let sets = find_sets(
+            &conn,
+            Thresholds {
+                max_bits: 2,
+                max_ring: 1.0,
+                ignore_colour: true,
+                whole_frame: true,
+                corners: true,
+            },
+        )
+        .expect("find");
         assert_eq!(sets.len(), 1, "the chain did not collapse into one set");
         assert_eq!(sets[0].members.len(), 3);
     }
@@ -1096,10 +1138,30 @@ mod tests {
         insert(&mut conn, "colour.jpg", 0x1234, 800, 600, 100_000, ring(0.5));
         insert(&mut conn, "gray.jpg", 0x1234, 800, 600, 100_000, ring(0.0));
 
-        let split = find_sets(&conn, Thresholds { max_bits: 6, max_ring: 0.05, ignore_colour: false }).expect("find");
+        let split = find_sets(
+            &conn,
+            Thresholds {
+                max_bits: 6,
+                max_ring: 0.05,
+                ignore_colour: false,
+                whole_frame: true,
+                corners: true,
+            },
+        )
+        .expect("find");
         assert!(split.is_empty(), "the colour check did not separate them");
 
-        let joined = find_sets(&conn, Thresholds { max_bits: 6, max_ring: 0.05, ignore_colour: true }).expect("find");
+        let joined = find_sets(
+            &conn,
+            Thresholds {
+                max_bits: 6,
+                max_ring: 0.05,
+                ignore_colour: true,
+                whole_frame: true,
+                corners: true,
+            },
+        )
+        .expect("find");
         assert_eq!(joined.len(), 1, "the setting did not rejoin them");
     }
 
@@ -1336,7 +1398,13 @@ mod tests {
         }
 
         let thresholds =
-            Thresholds { max_bits: GUARANTEED_RADIUS, max_ring: 1.0, ignore_colour: true };
+            Thresholds {
+                max_bits: GUARANTEED_RADIUS,
+                max_ring: 1.0,
+                ignore_colour: true,
+                whole_frame: true,
+                corners: true,
+            };
         let found = find_sets(&conn, thresholds).expect("search");
 
         let never = AtomicBool::new(false);

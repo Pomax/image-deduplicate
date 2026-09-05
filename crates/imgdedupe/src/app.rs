@@ -833,6 +833,9 @@ struct SearchState {
     /// means it has not counted them yet.
     loaded: u64,
     to_load: u64,
+    /// Pictures the shortlist has looked up, of how many there are.
+    shortlisted: u64,
+    to_shortlist: u64,
     /// Pairs compared, of how many the shortlist produced.
     compared: u64,
     pairs: u64,
@@ -844,17 +847,21 @@ struct SearchState {
 impl SearchState {
     /// The search as one number out of one number.
     ///
-    /// Two stages of very different lengths, and the second's size is not known
-    /// until the first has finished, so they share a bar rather than each having
-    /// one that is empty for half the time. Reading the index is the first half
-    /// of the bar and comparing is the second.
+    /// Three stages, each of which only knows its own size once it starts, so
+    /// they share one bar a third each: reading the index, drawing up the
+    /// shortlist, then comparing what it produced. Measured on a folder of ten
+    /// thousand pictures the three take four, eight and thirteen seconds, so a
+    /// third each runs a little fast at the start and a little slow at the end,
+    /// and never stands still.
     fn progress(&self) -> (u64, u64) {
-        const HALF: u64 = 1000;
-        let read = fraction(self.loaded, self.to_load, HALF);
-        if self.pairs == 0 && self.compared == 0 {
-            return (read, HALF * 2);
+        const PART: u64 = 1000;
+        if self.pairs > 0 || self.compared > 0 {
+            return (PART * 2 + fraction(self.compared, self.pairs, PART), PART * 3);
         }
-        (HALF + fraction(self.compared, self.pairs, HALF), HALF * 2)
+        if self.to_shortlist > 0 {
+            return (PART + fraction(self.shortlisted, self.to_shortlist, PART), PART * 3);
+        }
+        (fraction(self.loaded, self.to_load, PART), PART * 3)
     }
 }
 
@@ -1015,6 +1022,11 @@ pub struct App {
     previous: Vec<PathBuf>,
     recurse: bool,
     ignore_colour: bool,
+    /// The ways of matching that are switched on. Both to begin with, and both
+    /// kept in the folder's own index: a folder searched one way is searched
+    /// that way again when it is opened.
+    match_whole_frame: bool,
+    match_corners: bool,
     /// How far apart two pictures may be and still count as the same one, as a
     /// share of the hash. The presets set this; the slider overrides them.
     sensitivity: f64,
@@ -1141,6 +1153,8 @@ impl App {
             previous: crate::settings::sorted(&saved.previous),
             recurse: saved.recurse,
             ignore_colour: saved.ignore_colour,
+            match_whole_frame: true,
+            match_corners: true,
             // What counts as a duplicate is a decision about the pictures in
             // front of the person making it, so every run starts on the default
             // rather than on whatever the last one was left at.
@@ -1336,7 +1350,14 @@ impl App {
                     self.light(step.into());
                 }
                 Update::Images(images) => self.images = Some(images),
-                Update::Settings { recurse, disposal, move_dir, multi_select } => {
+                Update::Settings {
+                    recurse,
+                    disposal,
+                    move_dir,
+                    multi_select,
+                    match_whole_frame,
+                    match_corners,
+                } => {
                     // An index built over the subfolders has to be scanned that
                     // way again, or the next pass drops every row under them.
                     if let Some(setting) = recurse {
@@ -1350,6 +1371,12 @@ impl App {
                     }
                     if let Some(setting) = multi_select {
                         self.multi_select = setting;
+                    }
+                    if let Some(setting) = match_whole_frame {
+                        self.match_whole_frame = setting;
+                    }
+                    if let Some(setting) = match_corners {
+                        self.match_corners = setting;
                     }
                 }
                 Update::Walking { found, of } => {
@@ -1710,6 +1737,9 @@ impl App {
             self.sensitivity = matching::DEFAULT_SENSITIVITY;
             self.ignore_colour = false;
             self.recurse = false;
+            // Both ways of matching, until this folder's index says otherwise.
+            self.match_whole_frame = true;
+            self.match_corners = true;
             // A folder that has an index arrives with the box already ticked.
             self.keep_index = has_index;
             self.destination = Destination::Trash;
@@ -1799,7 +1829,28 @@ impl App {
                     ),
                 )
                 .changed();
-            if changed {
+            // The two ways of matching, either of which can be left out. The
+            // first is nearly free and finds resizes, recompressions and
+            // rotations; the second is most of what a search costs and is what
+            // finds a crop.
+            let ways = ui
+                .add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.match_whole_frame, "Match whole pictures"),
+                )
+                .changed()
+                | ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(
+                        &mut self.match_corners,
+                        "Match crops and parts of pictures (slower)",
+                    ),
+                )
+                .changed();
+            if ways {
+                self.remember_ways_of_matching();
+            }
+            if changed || ways {
                 self.remember();
             }
             },
@@ -1910,7 +1961,7 @@ impl App {
                 (false, true) => Stage::Running,
                 (false, false) => Stage::Waiting,
             };
-            bar(ui, "duplicates", searching, duplicates, of);
+            bar(ui, "duplicates scan", searching, duplicates, of);
             ui.add_space(6.0);
             // How many files the folder holds. The listing is what produces that
             // number, so before it is over the count it has reached so far is
@@ -2046,12 +2097,16 @@ impl App {
         self.search = SearchState { stage: Some("starting"), ..SearchState::default() };
         let mut thresholds = Thresholds::at(self.sensitivity);
         thresholds.ignore_colour = self.ignore_colour;
+        thresholds.whole_frame = self.match_whole_frame;
+        thresholds.corners = self.match_corners;
         runlog::log_line!(
-            "matching {} at {:.1}% ({} bits), ignore_colour {}",
+            "matching {} at {:.1}% ({} bits), ignore_colour {}, whole frame {}, corners {}",
             db_path.display(),
             self.sensitivity,
             thresholds.max_bits,
-            thresholds.ignore_colour
+            thresholds.ignore_colour,
+            thresholds.whole_frame,
+            thresholds.corners
         );
 
         // What the last pass ended with says nothing about this one.
@@ -2099,6 +2154,11 @@ impl App {
                         self.search.stage = Some("comparing");
                         self.search.loaded = images;
                         self.search.to_load = self.search.to_load.max(images);
+                    }
+                    matching::Progress::Shortlisting { done, total } => {
+                        self.search.stage = Some("shortlisting");
+                        self.search.shortlisted = done;
+                        self.search.to_shortlist = total;
                     }
                     matching::Progress::Comparing { done, total } => {
                         self.search.stage = Some("comparing");
@@ -2324,6 +2384,24 @@ impl App {
             db::open_for_notes(db_path).and_then(|conn| db::set_meta(&conn, "multi_select", stored));
         if let Err(err) = result {
             runlog::log_line!("the multi-select choice could not be written: {err:#}");
+        }
+    }
+
+    /// Which ways of matching this folder is searched with. A fact about the
+    /// folder: a folder where crops matter is searched for crops every time it
+    /// is opened, and one where they do not is not made to wait for them.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn remember_ways_of_matching(&self) {
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        let mark = |on: bool| if on { "1" } else { "0" };
+        let result = db::open_for_notes(db_path).and_then(|conn| {
+            db::set_meta(&conn, "match_whole_frame", mark(self.match_whole_frame))?;
+            db::set_meta(&conn, "match_corners", mark(self.match_corners))
+        });
+        if let Err(err) = result {
+            runlog::log_line!("the ways of matching could not be written: {err:#}");
         }
     }
 
@@ -5472,6 +5550,24 @@ mod tests {
 
         let again = reviewing(found.path());
         assert!(again.multi_select, "the folder was opened again without the box ticked");
+    }
+
+    /// Both ways of matching are on to begin with, and switching one off is a
+    /// fact about the folder: the index keeps it and opening that folder again
+    /// comes back with it.
+    #[test]
+    fn the_index_keeps_which_ways_of_matching_were_ticked() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert!(app.match_whole_frame, "whole pictures were not being matched to begin with");
+        assert!(app.match_corners, "crops were not being matched to begin with");
+
+        app.match_corners = false;
+        app.remember_ways_of_matching();
+
+        let again = reviewing(found.path());
+        assert!(again.match_whole_frame, "whole pictures came back switched off");
+        assert!(!again.match_corners, "the folder was opened again still matching crops");
     }
 
     /// With the box unticked the mark moves: keeping one picture lets go of the

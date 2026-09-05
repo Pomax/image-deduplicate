@@ -895,6 +895,57 @@ mod tests {
         assert_eq!(names, vec!["cropped.png", "whole.png"]);
     }
 
+    /// The same folder searched with the corners switched off. Matching one
+    /// picture inside another is what finds a crop and it is most of what a
+    /// search costs, so it can be left out, and then the crop is not found.
+    #[test]
+    fn with_the_corners_switched_off_a_crop_is_not_found() {
+        let fx = fixture();
+        let whole = fx.dir.path().join("whole.png");
+        write_detailed(&whole, 900, 700, 4);
+        write_crop(&whole, &fx.dir.path().join("cropped.png"), 60);
+
+        let mut conn = db::open(&fx.options.db_path).expect("open");
+        let cancel = AtomicBool::new(false);
+        run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+
+        let mut thresholds = crate::matching::Thresholds::at(15.0);
+        thresholds.corners = false;
+        let sets = crate::matching::find_sets(&conn, thresholds).expect("search");
+        assert!(sets.is_empty(), "the crop was found with the corners off: {sets:?}");
+    }
+
+    /// And with the whole frame switched off, a resize of a picture is not
+    /// found: that is the test the hash makes, and it is the one left out.
+    #[test]
+    fn with_the_whole_frame_switched_off_a_resize_is_not_found() {
+        let fx = fixture();
+        let whole = fx.dir.path().join("whole.png");
+        write_detailed(&whole, 900, 700, 4);
+        let picture = image::open(&whole).expect("read").to_rgb8();
+        let smaller = image::imageops::resize(
+            &picture,
+            450,
+            350,
+            image::imageops::FilterType::CatmullRom,
+        );
+        smaller.save(fx.dir.path().join("smaller.png")).expect("write");
+
+        let mut conn = db::open(&fx.options.db_path).expect("open");
+        let cancel = AtomicBool::new(false);
+        run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+
+        let both = crate::matching::find_sets(&conn, crate::matching::Thresholds::at(15.0))
+            .expect("search");
+        assert_eq!(both.len(), 1, "the resize was not found with everything on");
+
+        let mut thresholds = crate::matching::Thresholds::at(15.0);
+        thresholds.whole_frame = false;
+        thresholds.corners = false;
+        let neither = crate::matching::find_sets(&conn, thresholds).expect("search");
+        assert!(neither.is_empty(), "something matched with both ways off: {neither:?}");
+    }
+
     /// An index made by a build that had no feature fingerprint is read, given
     /// the column it lacks, and every row in it read again: the fingerprint
     /// version moved, and a row written under an older one is out of date by

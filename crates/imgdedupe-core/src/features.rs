@@ -433,29 +433,50 @@ const ATTEMPTS: usize = 200;
 type Pair = ((f32, f32), (f32, f32));
 
 fn paired(one: &[Keypoint], other: &[Keypoint]) -> Vec<Pair> {
-    let mut out = Vec::new();
-    for point in one {
-        let (mut best, mut second) = (u32::MAX, u32::MAX);
-        let mut at = None;
-        for candidate in other {
-            let bits = distance(&point.descriptor, &candidate.descriptor);
-            if bits < best {
-                second = best;
-                best = bits;
-                at = Some(candidate);
-            } else if bits < second {
-                second = bits;
+    // Each corner's best in the other picture, in both directions. Both,
+    // because a corner of one picture being another's best is not the same
+    // thing as the other way round: line art and repeated texture give a
+    // dozen corners of one picture the same best corner in the other, and a
+    // dozen pairs that all end at one place is not two pictures arranged the
+    // same way. It measured as exactly that: sixteen corners of one picture
+    // agreeing on an arrangement that put all of them on two places in the
+    // other, which is what let unrelated drawings reach the threshold.
+    let mut best_of_other = vec![(u32::MAX, usize::MAX); other.len()];
+    let mut best_of_one = vec![(u32::MAX, u32::MAX, usize::MAX); one.len()];
+    for (which, point) in one.iter().enumerate() {
+        for (candidate, held) in other.iter().enumerate() {
+            let bits = distance(&point.descriptor, &held.descriptor);
+            let (best, second, at) = &mut best_of_one[which];
+            if bits < *best {
+                *second = *best;
+                *best = bits;
+                *at = candidate;
+            } else if bits < *second {
+                *second = bits;
+            }
+            if bits < best_of_other[candidate].0 {
+                best_of_other[candidate] = (bits, which);
             }
         }
-        let Some(found) = at else {
+    }
+
+    let mut out = Vec::new();
+    for (which, (best, second, at)) in best_of_one.into_iter().enumerate() {
+        if at == usize::MAX {
             continue;
-        };
-        if best > SAME_CORNER || best * 10 > second * CLEARLY_BETTER {
+        }
+        // Saturating, because a picture with one corner in it has no runner-up
+        // to be clearly better than, and nothing to multiply.
+        if best > SAME_CORNER || best.saturating_mul(10) > second.saturating_mul(CLEARLY_BETTER) {
+            continue;
+        }
+        // Each corner pairs with the corner that also picked it.
+        if best_of_other[at].1 != which {
             continue;
         }
         out.push((
-            (point.x as f32, point.y as f32),
-            (found.x as f32, found.y as f32),
+            (one[which].x as f32, one[which].y as f32),
+            (other[at].x as f32, other[at].y as f32),
         ));
     }
     out
@@ -600,5 +621,36 @@ mod tests {
         let found = features(&picture(400, 300, 9));
         assert_eq!(unpack(&pack(&found)), found);
         assert!(pack(&found).len() % KEYPOINT_BYTES == 0);
+    }
+
+    /// Corners spread over one picture whose best match in the other is all the
+    /// same corner. Line art does this: a dozen places described almost the same
+    /// way, and one place in the other picture that each of them is nearest to.
+    /// A dozen pairs that all end in the same place is not two pictures arranged
+    /// the same way, and it is how unrelated drawings were reaching the
+    /// threshold: sixteen corners agreeing on an arrangement that put every one
+    /// of them on two places.
+    #[test]
+    fn corners_that_all_match_the_same_corner_do_not_agree_on_anything() {
+        let mut one = Vec::new();
+        for which in 0..40u16 {
+            one.push(Keypoint {
+                x: which * 13,
+                y: which * 7,
+                descriptor: std::array::from_fn(|byte| {
+                    // Alike enough to pair, different enough to be corners of
+                    // different places.
+                    if byte == 31 { which as u8 } else { 0x5A }
+                }),
+            });
+        }
+        let other = vec![Keypoint {
+            x: 100,
+            y: 100,
+            descriptor: std::array::from_fn(|byte| if byte == 31 { 0 } else { 0x5A }),
+        }];
+
+        assert_eq!(paired(&one, &other).len(), 1, "more than one corner paired with the one");
+        assert_eq!(agreement(&one, &other), 0, "corners agreed on an arrangement onto one place");
     }
 }

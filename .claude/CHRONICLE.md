@@ -342,6 +342,24 @@ Measured on the folder above: 8 seconds for the corner pass, 21 for the whole se
 
 The speed test had missed all of this because its fixture pictures had no corners at all, so the quadratic pass never ran in it. There is a test with corners in it now.
 
+### Five pictures that are nothing alike
+
+**Asked:** these five images are nothing alike, what part of the feature detection claims they are?
+
+**What happened:** the corners, and only the corners. Their hashes were 104 to 120 bits apart out of 255, forty percent and more, where the threshold is fifteen. Every pair of them scored exactly sixteen to nineteen agreeing corners, and sixteen is the bar, so one picture in the middle reached it against each of the others and the union-find chained all five into one set.
+
+Sixteen out of nowhere is not a coincidence, and the instrumented run said why: the winning arrangement held sixteen matches that came from fourteen places in one picture and landed on **two** places in the other. Corners were paired by nearest description with a ratio test against the runner-up, but nothing said a corner of the other picture could only be used once. Line art gives a dozen corners the same nearest description, and a shrinking transform puts all dozen within six pixels of one place, so they all vote for it.
+
+Corners now have to pick each other: a pair survives only if each is the other's nearest. That is one extra pass over a table the matching already builds, so it costs nothing. Every one of the ten pairs above dropped from sixteen to nineteen agreeing corners to zero. On the folder of 9490: 231 matches became 162, and 168 sets became 148. The crop test still passes.
+
+### Checkboxes for the ways of matching
+
+**Asked:** a checkbox for each matching method, prechecked, stored in the database.
+
+**What happened:** two, in the box that says what counts as a duplicate. Matching whole pictures is the hash and the colour signature; matching crops and parts is the corners. A way that is switched off draws up no shortlist either, so switching off the corners takes the eight second shortlist with it. Both are kept in the folder's index beside the multi-select box, and both come back on for a folder that has never said otherwise.
+
+The bar was relabelled in the same pass: it says "duplicates scan", and it is three parts rather than two, because the corner shortlist ran between the two old halves and reported nothing, which is why it sat at fifty percent for eight seconds and then jumped.
+
 ## The shape of the work so far
 
 Roughly in order, because knowing what was already tried saves repeating it.
