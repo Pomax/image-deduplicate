@@ -4,8 +4,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
-use imgdedupe_core::decode::decode_at_most;
-use imgdedupe_core::format::{self, SNIFF_LEN};
+use imgdedupe_core::decode::{decode_at_most, turn_upright};
+use imgdedupe_core::format::{self, Format, SNIFF_LEN};
+use imgdedupe_core::preview;
 
 /// Long edge of a grid thumbnail.
 pub const THUMB_EDGE: u32 = 256;
@@ -151,7 +152,13 @@ impl Tally {
     }
 
     fn say(&mut self, force: bool) {
-        if self.arrived == 0 || (!force && self.arrived < self.said + Self::EVERY) {
+        // Nothing new since the last time is nothing to say, however forced.
+        // Once every picture had arrived, this spoke on every frame for as long
+        // as the window was open.
+        if self.arrived == 0
+            || self.arrived == self.said
+            || (!force && self.arrived < self.said + Self::EVERY)
+        {
             return;
         }
         self.said = self.arrived;
@@ -447,8 +454,25 @@ fn load(path: &Path, edge: u32) -> Option<ColorImage> {
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let format = format::detect(head)?;
     let decoded = decode_at_most(format, &bytes, edge).ok()?;
-    let size = [decoded.small.width() as usize, decoded.small.height() as usize];
-    Some(ColorImage::from_rgb(size, decoded.small.as_raw()))
+    // A camera held on its side writes the picture the way the sensor read it
+    // and a number saying which way up it goes. Everything that draws it has to
+    // do that turn, and this is the one place either the tiles or the preview
+    // gets a picture from.
+    let upright = turn_upright(decoded.small, the_way_up(&bytes, format));
+    let size = [upright.width() as usize, upright.height() as usize];
+    Some(ColorImage::from_rgb(size, upright.as_raw()))
+}
+
+/// Which way up the file says its picture goes.
+///
+/// A raw file is shown through the preview inside it, and the preview is written
+/// the way the sensor read it like everything else in there, so the number in
+/// the raw's own directory is the one that applies to it.
+fn the_way_up(bytes: &[u8], format: Format) -> u16 {
+    match format {
+        Format::Cr3 | Format::Heic => 1,
+        _ => preview::the_way_up(bytes),
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +487,47 @@ mod tests {
         DynamicImage::ImageRgb8(image)
             .save_with_format(path, image::ImageFormat::Png)
             .expect("writing a fixture");
+    }
+
+    /// A camera held on its side writes a wide picture and a number saying to
+    /// turn it. Both the tiles and the preview come through here, so this is
+    /// where the turn has to happen, and a picture that arrives on its end is
+    /// the proof it did.
+    #[test]
+    fn a_picture_the_file_says_to_turn_arrives_turned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wide = image::RgbImage::from_fn(400, 200, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        });
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(wide)
+            .write_to(&mut bytes, image::ImageFormat::Jpeg)
+            .expect("encoding a fixture");
+        let mut bytes = bytes.into_inner();
+
+        // The segment a camera writes to say which way up the picture goes: a
+        // quarter turn clockwise.
+        let mut segment = vec![0xFF, 0xE1, 0x00, 0x20];
+        segment.extend_from_slice(b"Exif\0\0II\x2a\x00");
+        segment.extend_from_slice(&8u32.to_le_bytes());
+        segment.extend_from_slice(&1u16.to_le_bytes());
+        segment.extend_from_slice(&0x0112u16.to_le_bytes());
+        segment.extend_from_slice(&3u16.to_le_bytes());
+        segment.extend_from_slice(&1u32.to_le_bytes());
+        segment.extend_from_slice(&6u16.to_le_bytes());
+        segment.extend_from_slice(&[0, 0]);
+        segment.extend_from_slice(&0u32.to_le_bytes());
+        bytes.splice(2..2, segment);
+
+        let path = dir.path().join("sideways.jpg");
+        std::fs::write(&path, &bytes).expect("writing a fixture");
+
+        let shown = load(&path, THUMB_EDGE).expect("decoded");
+        assert!(
+            shown.size[1] > shown.size[0],
+            "a picture the file says to stand on its end came back lying down: {:?}",
+            shown.size
+        );
     }
 
     #[test]

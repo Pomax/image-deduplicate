@@ -58,6 +58,7 @@ fn build(path: &std::path::Path, files: usize) -> Connection {
                 dct_hashes: [hash; fingerprint::VARIANTS],
                 ring_stats: vec![0u8; 48 * 4],
             },
+            corners: Vec::new(),
         };
         db::upsert(&tx, &record, 1).expect("upsert");
     }
@@ -141,6 +142,7 @@ fn time_copies(path: &std::path::Path, copies: usize) -> f64 {
                 dct_hashes: [hash; fingerprint::VARIANTS],
                 ring_stats: vec![0u8; 48 * 4],
             },
+            corners: Vec::new(),
         };
         db::upsert(&tx, &record, 1).expect("upsert");
     }

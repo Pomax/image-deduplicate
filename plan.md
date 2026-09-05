@@ -444,3 +444,17 @@ The GUI binary also runs headless for scripting, with `report` (duplicate sets a
 - **No SIFT.** Keypoint matching does not work at this number of images without a visual vocabulary index, which is a much larger project. The three fingerprints handle resize, recompression, format change, rotation and mirror. They do not handle heavy cropping or substantial edits.
 - **Deletion goes to the recycle bin.** Permanent deletion exists, is not the default, and needs a separate confirmation.
 - **The database is written into the scanned folder.** That makes the folder and its index portable together, but it writes a file into the folder being scanned.
+
+## What has changed since this plan was approved
+
+Four of the decisions above no longer hold. They are left as written, because they were the reasoning at the time, and corrected here.
+
+**HEIC is supported.** The plan rejected it because the decoders existed only as C libraries. There is now a pure-Rust HEVC decoder, [heic](https://github.com/imazen/heic), so HEIC decodes with no C linked and the single self-contained executable is intact. AVIF and JPEG XL are still out.
+
+**TIFF and camera raw are supported.** CR2 and CR3 (Canon), NEF (Nikon), ARW (Sony) and RW2 (Panasonic). The plan called raw "sensor readings, not a picture", which is true of the sensor data and not of the file: every camera writes a JPEG of the picture beside it, and that is what is indexed. The raw's own dimensions are recorded rather than the preview's. TIFF decodes through `image`, not through the `tiff` crate directly.
+
+**There is a feature fingerprint, and it is not SIFT.** The plan rejected keypoint matching because it needs a visual vocabulary index at this scale, which was the right objection to the wrong part of the problem: the fingerprint is per picture and needs no vocabulary, and the shortlist that would have needed one is a cheap all-pairs look instead. FAST corners with steered BRIEF descriptors, 320 per picture, matched by description and then by geometry. It costs 11 KB a picture in the index and about 100 microseconds a pair to shortlist, and it is what finds a crop, which the plan correctly said the three original fingerprints would never do.
+
+**The index is bigger.** About 13 KB a picture, most of it the corners, against the plan's estimate for the hashes alone.
+
+Everything else in the plan stands, including the band shortlist for the whole-frame hash, the eight symmetry variants, the ring colour signature, the keeper score, and the reasons for Rust and egui.

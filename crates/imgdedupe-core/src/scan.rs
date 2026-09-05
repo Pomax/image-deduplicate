@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::db::{self, Record};
-use crate::decode::{decode_at_most, SMALL_EDGE};
+use crate::decode::decode_for_indexing;
 use crate::dirlist;
 use crate::fingerprint::{fingerprint, FINGERPRINT_VERSION};
 use crate::format::{self, SNIFF_LEN};
@@ -349,8 +349,8 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
 
     #[cfg(feature = "logging")]
     let at = Instant::now();
-    let decoded = match decode_at_most(format, &bytes, SMALL_EDGE) {
-        Ok(decoded) => decoded,
+    let ready = match decode_for_indexing(format, &bytes) {
+        Ok(ready) => ready,
         Err(err) => {
             return Outcome::Failed {
                 path: candidate.rel_path.clone(),
@@ -358,6 +358,7 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
             }
         }
     };
+    let decoded = ready.decoded;
     #[cfg(feature = "logging")]
     Spent::add(&spent.decoding, at);
     crate::log_line!(
@@ -371,6 +372,14 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
     #[cfg(feature = "logging")]
     let at = Instant::now();
     let print = fingerprint(&decoded);
+    let corners = crate::features::pack(&crate::features::features(&ready.detail));
+    // The size of the picture, not of the sensor read that produced it: a camera
+    // held on its side writes a wide picture and a number saying to turn it, and
+    // the tile beside the turned picture has to say what is on it.
+    let (width, height) = match crate::preview::the_way_up(&bytes) {
+        5..=8 => (decoded.height, decoded.width),
+        _ => (decoded.width, decoded.height),
+    };
     #[cfg(feature = "logging")]
     Spent::add(&spent.fingerprinting, at);
 
@@ -378,11 +387,12 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
         rel_path: candidate.rel_path.clone(),
         size_bytes: candidate.size_bytes,
         mtime_ns: candidate.mtime_ns,
-        width: decoded.width,
-        height: decoded.height,
+        width,
+        height,
         format,
         channels: decoded.channels,
         fingerprint: print,
+        corners,
     }))
 }
 
@@ -803,6 +813,131 @@ mod tests {
         DynamicImage::ImageRgb8(image)
             .save_with_format(path, image::ImageFormat::Png)
             .expect("writing a fixture");
+    }
+
+    /// A picture with corners in it: blocks of varying shade, which is a corner
+    /// at every join. The gradient above has none, and a picture with no corners
+    /// is one the feature fingerprint has nothing to say about.
+    fn write_detailed(path: &Path, width: u32, height: u32, seed: u32) {
+        // Blobs of their own shade, none like another, with soft edges.
+        //
+        // Two things this has to be. Every neighbourhood different, or every
+        // corner describes the same thing as every other and a corner that
+        // matches everywhere matches nothing. And soft, because a picture of
+        // hard-edged blocks a few pixels across turns into something else when
+        // it is scaled, in a way a photograph never does: the blocks alias and
+        // the corners land in different places.
+        let shade = |x: u32, y: u32| {
+            let cell = (x / 24).wrapping_mul(73_856_093)
+                ^ (y / 24).wrapping_mul(19_349_663)
+                ^ seed.wrapping_mul(83_492_791);
+            let base = (cell.wrapping_mul(2_654_435_761) >> 24) as f32;
+            let wave = ((x as f32 / 9.0).sin() + (y as f32 / 7.0).cos()) * 24.0;
+            (base + wave).clamp(0.0, 255.0)
+        };
+        let image = RgbImage::from_fn(width, height, |x, y| {
+            // Averaged with its neighbours, which is what makes the edges soft.
+            let mut total = 0.0;
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    total += shade(x + dx, y + dy);
+                }
+            }
+            let value = (total / 9.0) as u8;
+            image::Rgb([value, value.wrapping_add(40), value / 2 + 60])
+        });
+        DynamicImage::ImageRgb8(image)
+            .save_with_format(path, image::ImageFormat::Png)
+            .expect("writing a fixture");
+    }
+
+    /// The middle of a picture, saved beside it: what a crop is.
+    fn write_crop(from: &Path, to: &Path, keep: u32) {
+        let whole = image::open(from).expect("reading a fixture").to_rgb8();
+        let (width, height) = (whole.width() * keep / 100, whole.height() * keep / 100);
+        let cut = image::imageops::crop_imm(
+            &whole,
+            (whole.width() - width) / 2,
+            (whole.height() - height) / 2,
+            width,
+            height,
+        )
+        .to_image();
+        DynamicImage::ImageRgb8(cut)
+            .save_with_format(to, image::ImageFormat::Png)
+            .expect("writing a fixture");
+    }
+
+    /// A crop is the same picture, and the whole-frame hash cannot see it: cut a
+    /// picture down and every number in that hash changes at once. The corners
+    /// that are still in the crop are still where they were, and that is what
+    /// puts the two in one set.
+    #[test]
+    fn a_crop_of_a_picture_is_found_to_be_the_same_picture() {
+        let fx = fixture();
+        let whole = fx.dir.path().join("whole.png");
+        write_detailed(&whole, 900, 700, 4);
+        write_crop(&whole, &fx.dir.path().join("cropped.png"), 60);
+        // A different picture, to be sure the answer is not "everything matches".
+        write_detailed(&fx.dir.path().join("other.png"), 900, 700, 91);
+
+        let mut conn = db::open(&fx.options.db_path).expect("open");
+        let cancel = AtomicBool::new(false);
+        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        assert_eq!(summary.indexed, 3);
+
+        let sets = crate::matching::find_sets(&conn, crate::matching::Thresholds::at(15.0))
+            .expect("search");
+        assert_eq!(sets.len(), 1, "the crop and the picture are not one set: {sets:?}");
+        let mut names: Vec<&str> =
+            sets[0].members.iter().map(|member| member.rel_path.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["cropped.png", "whole.png"]);
+    }
+
+    /// An index made by a build that had no feature fingerprint is read, given
+    /// the column it lacks, and every row in it read again: the fingerprint
+    /// version moved, and a row written under an older one is out of date by
+    /// definition. Nothing else about the file changes.
+    #[test]
+    fn an_index_from_a_build_without_corners_is_brought_up_to_date() {
+        let fx = fixture();
+        write_detailed(&fx.dir.path().join("a.png"), 300, 200, 1);
+        write_detailed(&fx.dir.path().join("b.png"), 300, 200, 2);
+        scan(&fx);
+
+        // The index as an older build left it: no corners column, and rows that
+        // say they were fingerprinted by the version before this one.
+        let conn = db::open(&fx.options.db_path).expect("open");
+        conn.execute_batch(
+            "DROP VIEW IF EXISTS indexed_images;
+             ALTER TABLE fingerprints DROP COLUMN corners;
+             UPDATE fingerprints SET fingerprint_version = 1;",
+        )
+        .expect("making an older index");
+        db::close(conn, &fx.options.db_path).expect("close");
+
+        let mut conn = db::open(&fx.options.db_path).expect("reopen");
+        let corners: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('fingerprints') WHERE name = 'corners'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("looking for the column");
+        assert_eq!(corners, 1, "the column an older index lacks was not added");
+
+        let cancel = AtomicBool::new(false);
+        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        assert_eq!(summary.indexed, 2, "the rows from the older build were not read again");
+        assert_eq!(summary.unchanged, 0, "a row from the older build was left as it was");
+
+        let filled: i64 = conn
+            .query_row("SELECT count(*) FROM fingerprints WHERE length(corners) > 0", [], |row| {
+                row.get(0)
+            })
+            .expect("counting");
+        assert_eq!(filled, 2, "the rows were read again without their corners being written");
     }
 
     struct Fixture {

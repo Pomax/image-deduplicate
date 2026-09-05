@@ -8,7 +8,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.89"
 
 [profile.release]
 # Cross-crate inlining and one codegen unit let the linker drop what is never
@@ -43,13 +43,14 @@ clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.29", default-features = false, features = ["glow", "wayland", "x11"] }
 egui = { version = "0.29", default-features = false }
 # No "jpeg": JPEG decoding goes through `jpeg-decoder` for its scaled path, and
-# enabling it here links a second JPEG decoder that nothing calls.
-#
-# No "tiff": `image` declares the `tiff` crate with its default features, which
-# include `jpeg`, and features only ever union, so a second JPEG decoder cannot
-# be subtracted from this side.
-image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
+# enabling it here links a second JPEG decoder that nothing calls. The `tiff`
+# feature brings the `tiff` crate in with its own `jpeg` feature, which is this
+# same `jpeg-decoder` and not another one.
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp", "tiff"] }
 jpeg-decoder = "0.3"
+# HEVC, which is what the picture inside a HEIC file is. Pure Rust, so the
+# single executable stays single.
+heic = "0.1.6"
 rayon = "1"
 rfd = "0.15"
 rusqlite = { version = "0.32", features = ["bundled", "functions", "window", "serialize"] }

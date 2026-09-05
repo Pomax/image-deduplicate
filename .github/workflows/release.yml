@@ -1,0 +1,104 @@
+name: Release
+
+# A tag makes a release: the three platforms build at the same time and their
+# executables go up as one set. Anything else that pushes builds without
+# releasing, so a break is found when it lands rather than at a tag.
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            built: dist/windows/imgdedupe.exe
+            asset: imgdedupe-windows.exe
+          - os: macos-latest
+            name: macos
+            built: dist/macos/imgdedupe
+            asset: imgdedupe-macos
+          - os: ubuntu-latest
+            name: linux
+            built: dist/linux/imgdedupe
+            asset: imgdedupe-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The window is drawn with OpenGL through X11 and Wayland, and the file
+      # dialog goes through the desktop portal, which needs none of GTK. These
+      # are the headers those link against.
+      - name: What Linux needs to build a window
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev upx-ucl
+
+      # The build packs the executable when upx is on the path and leaves it
+      # alone when it is not, so this failing is not a reason to stop.
+      - name: Something to pack it with
+        if: matrix.name == 'windows'
+        continue-on-error: true
+        run: choco install upx --no-progress --yes
+
+      - name: Build
+        if: matrix.name == 'windows'
+        shell: cmd
+        run: build.bat
+
+      - name: Build
+        if: matrix.name != 'windows'
+        shell: bash
+        run: bash build.sh
+
+      - name: Name it for the platform it was built on
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "${{ matrix.built }}" "out/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    # Only a tag is a release. The rest of the builds are there to say whether
+    # the three platforms still build.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: built
+          merge-multiple: true
+
+      # One release holding all three, made with the tool GitHub ships on its
+      # own runners rather than somebody else's action.
+      - name: Put the three of them out as one release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            built/imgdedupe-windows.exe \
+            built/imgdedupe-macos \
+            built/imgdedupe-linux

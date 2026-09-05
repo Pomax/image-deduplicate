@@ -8,7 +8,17 @@ pub fn is_animated(format: Format, bytes: &[u8]) -> bool {
         Format::Gif => gif_has_multiple_frames(bytes),
         Format::Png => png_has_actl(bytes),
         Format::WebP => webp_is_animated(bytes),
-        Format::Jpeg => false,
+        // A raw file, a TIFF and a HEIC hold one picture. A TIFF can hold pages
+        // and a HEIC can hold a burst, but neither is video in an image
+        // container, which is what this is about.
+        Format::Jpeg
+        | Format::Tiff
+        | Format::Heic
+        | Format::Cr2
+        | Format::Cr3
+        | Format::Nef
+        | Format::Arw
+        | Format::Rw2 => false,
     }
 }
 

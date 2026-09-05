@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::Connection;
 
+use crate::features;
 use crate::fingerprint::{self, Words};
 use crate::format::Format;
 use crate::score::keep_score;
@@ -137,6 +138,13 @@ fn parse_format(name: &str) -> Format {
         "png" => Format::Png,
         "gif" => Format::Gif,
         "webp" => Format::WebP,
+        "tiff" => Format::Tiff,
+        "heic" => Format::Heic,
+        "cr2" => Format::Cr2,
+        "cr3" => Format::Cr3,
+        "nef" => Format::Nef,
+        "arw" => Format::Arw,
+        "rw2" => Format::Rw2,
         _ => Format::Jpeg,
     }
 }
@@ -171,11 +179,14 @@ pub struct Image {
     bands: [[u16; fingerprint::BANDS]; fingerprint::VARIANTS],
     /// The ring signature, pre-weighted. Empty when it cannot be compared.
     ring: Vec<f32>,
+    /// The picture's corners and what each one looks like. Empty for a picture
+    /// with nothing corner-shaped in it, and for one indexed before this build.
+    corners: Vec<features::Keypoint>,
 }
 
 const LOAD_IMAGES: &str = "
 SELECT id, rel_path, width, height, format, channels, size_bytes, mtime_ns,
-       dct_hashes, ring_stats
+       dct_hashes, ring_stats, corners
 FROM indexed_images
 ORDER BY id
 ";
@@ -247,6 +258,71 @@ fn pairs_in_band(images: &[Image], of: &[u32], band: usize) -> Vec<(u32, u32)> {
     out
 }
 
+/// Corners of one picture the quick look tries, against all of the other's. The
+/// strongest, because those are the ones another picture of the same thing also
+/// picked out.
+const QUICK_CORNERS: usize = 48;
+
+/// How alike two descriptions have to be for the quick look to count them.
+///
+/// Tight, and that is the whole trick. Loosely alike means nothing: with three
+/// hundred corners to choose from, almost every corner of an unrelated
+/// photograph has one within a quarter of its bits somewhere, and measured that
+/// way unrelated pictures scored forty-one out of forty-eight. Within a
+/// twelfth of the bits, unrelated pictures scored three and a picture against a
+/// crop of itself scored thirty-five.
+const QUICK_BITS: u32 = 24;
+
+/// Corners that have to look alike before a pair is worth the real test. Three
+/// was the most any of a hundred and ninety unrelated pairs managed.
+const QUICK_AGREEING: usize = 5;
+
+/// Pairs of pictures worth comparing corner by corner.
+///
+/// Filing corners under the value of some of their bits does not work: two
+/// pictures of the same thing describe a corner a little differently, and a
+/// little differently is a different value, so the pair is never filed together
+/// and never compared. Measured on a picture and a crop of it, an index like that
+/// found the pair about a tenth of the time.
+///
+/// So every pair is looked at, cheaply: the strongest few dozen corners of one
+/// against the strongest few dozen of the other, counting how many look alike at
+/// all. That is a fiftieth of the work of the real test and it throws out almost
+/// everything, because unrelated photographs have almost no corners in common.
+/// Nothing here is learned from the folder.
+fn pairs_by_corner(images: &[Image], of: &[u32]) -> Vec<(u32, u32)> {
+    (0..of.len())
+        .into_par_iter()
+        .flat_map_iter(|first| {
+            let one = &images[of[first] as usize].corners;
+            let mut out = Vec::new();
+            for second in first + 1..of.len() {
+                let other = &images[of[second] as usize].corners;
+                if worth_comparing(one, other) {
+                    out.push((of[first].min(of[second]), of[first].max(of[second])));
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+fn worth_comparing(one: &[features::Keypoint], other: &[features::Keypoint]) -> bool {
+    let mut alike = 0;
+    for corner in one.iter().take(QUICK_CORNERS) {
+        let close = other.iter().any(|candidate| {
+            features::distance(&corner.descriptor, &candidate.descriptor) <= QUICK_BITS
+        });
+        if close {
+            alike += 1;
+            if alike >= QUICK_AGREEING {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Everything the comparison looks at. Two images with the same one of these
 /// answer the same way to every test the search makes, against every other image,
 /// so only one of them has to be compared to anything.
@@ -301,6 +377,13 @@ fn fold_identical(images: &[Image]) -> Vec<Vec<u32>> {
 /// Whether a candidate pair really is the same picture. `a` is the one with the
 /// lower file id, which is the side that contributes all eight of its variants.
 fn is_match(a: &Image, b: &Image, thresholds: Thresholds) -> bool {
+    whole_frame_match(a, b, thresholds) || same_picture_inside(a, b)
+}
+
+/// The two pictures are the same picture filling the frame the same way: a
+/// resize, a recompression, a rotation. Cheap, and it is most of what a folder
+/// of duplicates holds.
+fn whole_frame_match(a: &Image, b: &Image, thresholds: Thresholds) -> bool {
     if !aspect_ok(a.width as f64, a.height as f64, b.width as f64, b.height as f64) {
         return false;
     }
@@ -311,6 +394,16 @@ fn is_match(a: &Image, b: &Image, thresholds: Thresholds) -> bool {
     }
     thresholds.ignore_colour
         || fingerprint::ring_distance_weighted(&a.ring, &b.ring) <= thresholds.max_ring
+}
+
+/// One picture is the other, or part of it.
+///
+/// Enough of the corners describe the same things, arranged the same way, which
+/// a crop of a picture keeps and a different picture of the same subject does
+/// not. This is what the whole-frame hash cannot see: crop a picture and every
+/// number in that hash changes at once, while its corners stay where they were.
+fn same_picture_inside(a: &Image, b: &Image) -> bool {
+    features::agreement(&a.corners, &b.corners) >= features::AGREEING_CORNERS
 }
 
 /// Which images ended up connected to which. Matched pairs are edges and a set is
@@ -405,6 +498,7 @@ pub fn load_images(
             continue;
         };
         let ring: Vec<u8> = row.get(9)?;
+        let corners: Vec<u8> = row.get(10).unwrap_or_default();
         let width = row.get::<_, i64>(2)? as u32;
         let height = row.get::<_, i64>(3)? as u32;
         let format: String = row.get(4)?;
@@ -432,6 +526,7 @@ pub fn load_images(
             variants: hashes.map(|hash| fingerprint::words(&hash)),
             bands: hashes.map(|hash| fingerprint::bands(&hash)),
             ring: fingerprint::ring_weighted(&ring),
+            corners: features::unpack(&corners),
         });
     }
     report(Progress::Loading { done: images.len() as u64, total: total as u64 });
@@ -561,6 +656,9 @@ pub fn find_sets_in(
     }
 
     let mut candidates: Vec<(u32, u32)> = by_band.concat();
+    // The second way in: pictures holding some of the same corners. The bands
+    // above only ever put together pictures that fill the frame the same way.
+    candidates.extend(pairs_by_corner(&images, &one_of_each));
     candidates.par_sort_unstable();
     candidates.dedup();
     #[cfg(feature = "logging")]
@@ -756,6 +854,7 @@ mod tests {
                 dct_hashes: [hash, hash, hash, hash, hash, hash, hash, hash],
                 ring_stats: ring,
             },
+            corners: Vec::new(),
         };
         let tx = conn.transaction().expect("tx");
         db::upsert(&tx, &record, 1).expect("upsert");

@@ -16,6 +16,7 @@ logging = []
 
 [dependencies]
 anyhow.workspace = true
+heic.workspace = true
 image.workspace = true
 jpeg-decoder.workspace = true
 rayon.workspace = true

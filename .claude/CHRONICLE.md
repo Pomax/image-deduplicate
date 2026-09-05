@@ -262,6 +262,66 @@ Each entry: what was asked, what happened, what was wrong with it, what fixed it
 
 **Rule:** state what is actually known about where commands run, once, plainly, and then act on it. Check `uname` and the working directory rather than assuming either way.
 
+### Stripping the log out of a normal build
+
+**Asked:** make `build.bat` and `build.sh` take `--test`. With it, `--log` works. Without it, every line of `--log` handling must be gone from the compile, not merely inert.
+
+**What happened:** a `logging` feature on both crates, off by default. Every write became a macro that expands to `()` without the feature, so the arguments are never evaluated, formatted or compiled. The module's whole body, the `--log` flag in both entry points, the timing locals that fed the log, the search's `Timing` struct and the scan's per-thread `Spent` counters all sit behind it, the last as a zero-sized stand-in so `index_one`'s signature does not need two versions. `build --test` passes `--features imgdedupe/logging`; anything else as an argument is refused. Proved by grepping the unpacked binaries: `PANIC on thread`, `cleanup starting`, `settings {}` and `thumbnails:` appear in the `--test` build and in none of them otherwise, and the link is 27 KB smaller.
+
+**Rule:** a function still compiles its arguments at every call site. Only a macro can remove them.
+
+### Formats: TIFF, HEIC, and five raw families
+
+**Asked:** add HEIC, TIFF, and Sony, Canon, Nikon and Panasonic raw. They embed a JPEG preview, so getting that is enough.
+
+**What happened:** raised first that HEIC is not like the others: Apple's HEIC has no embedded JPEG, its picture and its thumbnail are both HEVC, and the pure-Rust decoders for it are AGPL. Told the licence does not matter here, so `heic` 0.1.6 went in: pure Rust, no C, and it decodes the thumbnail instead of the full frame when that thumbnail is big enough to fingerprint. TIFF is `image`'s own decoder. The raw formats are a TIFF or an ISO base media container with a JPEG inside, and `preview.rs` walks both to find the biggest one.
+
+**The mistakes, all found by real files rather than by reasoning:** Canon's CR2 stores the sensor data as a *lossless* JPEG of two channels, pointed at by the same tags as the preview and several times its size, so taking the biggest JPEG took the sensor data and `jpeg-decoder` refused it, indexing nothing. Canon's CR3 keeps its preview behind a box whose size is written the long way after the name, and the walker stopped at the first of those, so it found only the 160x120 thumbnail. And CR2's directories describe pieces of the picture rather than the whole one, so an 8 megapixel camera reported 1536x1024 until the size was taken from the Exif directory instead.
+
+**Rule:** download real files from the internet and run them through the code. Hand-built fixtures cannot know that Canon writes its sensor data where the preview goes.
+
+### A feature fingerprint, for crops
+
+**Asked:** five frames of the same deer came out as two sets. Why? Then: are you not using a feature fingerprint anywhere? Then: add one.
+
+**What happened:** the measurement first. Across the two clusters the pictures were 114 to 120 bits apart out of 255, three times the threshold and about what unrelated pictures score, because cropping stretches a different region over the same square and every DCT coefficient changes at once. The opening message of the project had named SIFT as an example of what to fingerprint with, and the plan I wrote four minutes later said there would be none of it because keypoint matching does not scale; that was one line in a long plan and it was never revisited, which is on me.
+
+**What was built:** `features.rs`. FAST corners over an eight-level pyramid at 1.2, an orientation per corner from its intensity centroid, and a 256-bit description of the neighbourhood sampled in a fixed pattern rotated by that orientation, from a smoothed copy of the level. The strongest 320 spread over the frame by cell. Matching is by description with a ratio test, then by geometry: two matches propose a scale, a rotation and a shift, and the rest vote, RANSAC style. Sixteen agreeing corners is a duplicate.
+
+**Three wrong turns, each caught by measuring:** no smoothing before sampling, so single-pixel differences flipped bits and a 60% crop scored nine; a budget of 128 corners, too few for a crop to keep enough of them, which 320 fixed and took the same crop to thirty-seven; and a shortlist that filed corners under some of their bits, which fails for exactly the reason the pair needs finding, since a corner described a little differently is a different value. The shortlist is now a quick look at every pair: 48 corners of one against all of the other's, counting matches within 24 of 256 bits, five to look properly, about 100 microseconds a pair. Unrelated photographs never got past three.
+
+**Measured on the user's own folder:** 1066 files, 4346 candidate pairs, 1398 matches, 704 pictures in 186 sets, in four and a half seconds.
+
+### The way up
+
+**Asked:** take the rotation into account when showing thumbnails and previews.
+
+**What happened:** 48 of the user's 1013 files were portrait and had been drawing on their side. The tag is read from a raw file's first directory or from a JPEG's Exif segment, and the turn happens in `thumbs::load`, which is the one place both the tiles and the preview get a picture from. The recorded dimensions swap with it, so a portrait photograph reads 4040x6064 beside its upright tile. Two of the user's own files, one at 6 and one at 8, were turned and looked at to check both directions.
+
+### What the file says about itself
+
+**Asked:** show the metadata under the preview. Then, over several rounds: no namespaces, no tag numbers, no values that mean nothing, only what photographers care about, real names, readable dates.
+
+**What happened:** `metadata.rs` in the core reads Exif, IPTC, XMP, PNG text, GIF comments and WebP chunks, and `metadata.rs` in the app reads the file on a thread of its own and hands the result to the pane.
+
+**The mistakes:** the first version showed everything it could parse, including `Tag 0xA302` and every develop setting an editor had written. Then, after a whitelist, every value in the file came out labelled "Caption", because `rdf:Description` is the element every XMP property sits inside and its local name is description, so the whitelist matched the container and swallowed the block. Names were invented rather than taken from the trade: "Camera make" for Make, "Titled" for Title, "What it is of" for Description. Dates were shown as the file writes them, `2026:06:13 04:18:34`, which is a machine's ordering on a clock nobody reads.
+
+**Where it landed:** four sections, Image, Settings, Place and Description, with no mention anywhere of which standard a line came from. Only fields a photographer's panel shows, under the names the trade uses, checked against Lightroom's panel and the IPTC field guide. Numbers that stand for words are shown as the words, GPS is one Latitude line and one Longitude line rather than four fields of parts, and a date reads "June 13, 2026, 4:18:34 am".
+
+**Rule:** look up what the people using the thing expect to see, before choosing what to show and what to call it.
+
+### The bars, and what they claim
+
+**Asked:** the read bar starts full and then jumps to zero.
+
+**What happened:** the listing's count was being carried into the read bar at the handover, so the bar was pinned full before a byte had been read and the first file knocked it back down. Each bar now has a stage: empty before its work runs, the fraction while it runs, full once it is over, including a folder that needed no work at all, because an index that already holds every file is a folder fully read and fully indexed.
+
+### Naming, again
+
+**Asked:** why is that file called `facts.rs`?
+
+**What happened:** because I named it before I wrote it, after the content I imagined rather than the job it does, and never checked the name again once the job settled. It is now `metadata.rs` beside `thumbs.rs`, which is what the sibling module doing the identical work for pictures is called.
+
 ## The shape of the work so far
 
 Roughly in order, because knowing what was already tried saves repeating it.
@@ -623,7 +683,9 @@ Not decoration. Getting this wrong wastes their time on top of whatever else wen
 - The `-wal` and `-shm` files are handled on the way out, but a process killed outright still leaves them. Nothing cleans them up on the next run.
 - The review list is virtualised; the cleanup list uses row virtualisation too, but `build_plan` still rebuilds the whole plan every frame.
 - There is no way to rename or reorder the previous folders list, and no cap on its length.
-- Nothing has ever been built for Linux.
+- Nothing has ever been built for Linux or macOS; the release workflow is written but has never run.
+- Maker notes are read past rather than into, so the lens and shutter count Canon and Nikon keep in there are not shown.
+- The metadata pane reads the whole file on every click, cached for one file at a time.
 - The window has no icon.
 - The root copy of the binary is git-ignored, so a checkout has `dist/` only until someone runs the build.
 
@@ -638,6 +700,10 @@ For orientation only; none of these paths exist on another machine.
 
 ## State of the work
 
-Everything described above is in the tree and the suite passes. The most recent Windows build is packed to about 1.8 MB from a 4.7 MB link.
+Everything described above is in the tree. The Windows build is packed to about 2.0 MB from a 5.5 MB link, the growth being the HEVC decoder, the TIFF decoder and the corner fingerprint.
 
-Nothing has been compiled for macOS. The first thing to do there is a plain `./build.sh` and see what the compiler says about the Windows-specific parts: `folder_picker.rs` has a `cfg(windows)` COM implementation and an `rfd` path for everything else, and that `rfd` path has never been built here.
+The suite is 300-odd tests and does not pass: 18 fail, 14 in the core and 4 in the window, all of them in scan, db and the app's own scan handling, and all of them from work committed before this session. They were checked by restoring the pre-session files and running them again, so they are not from anything described above.
+
+Nothing has been compiled for macOS or Linux. None of the work in this session is platform-specific: no `cfg(windows)`, no platform APIs, no path assumptions. What is untested is everything else about those platforms, and two things are worth expecting. The scroll wheel over the metadata list is applied by hand, because egui was not delivering it to that pane on Windows; if it does deliver it elsewhere, that list will scroll twice as fast there. And the Linux workflow installs the X11, Wayland, xkbcommon and GL headers that eframe's glow backend is believed to need, which is a guess until a build proves it.
+
+`.github/workflows/release.yml` exists to answer that: three platforms, GitHub's own actions only, one release per `v*` tag. It has never run.

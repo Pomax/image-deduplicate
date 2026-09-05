@@ -17,10 +17,24 @@ pub const INDEX_FILENAME: &str = "imgdedupe.sqlite";
 
 /// Every statement that defines the index. Applied on open and reused by tests
 /// that want the same shape in memory.
+///
+/// `meta` holds facts about the index itself: the schema version, the last scan,
+/// how far down the folder it reaches, and where a cleanup sends what it
+/// removes. Which folder it is about is the folder the file sits in, so that is
+/// not written down anywhere.
+///
+/// `fingerprints.corners` holds the picture's corners and what each one looks
+/// like, and is empty for a picture with nothing corner-shaped in it: a flat
+/// sky, or one out of focus.
+///
+/// `phash_bands` was a table of 128 rows per picture that the search now works
+/// out as it loads, so any file still carrying one is relieved of it.
+///
+/// None of this is written into the statements below. SQLite stores their text
+/// as typed and hands it back to the parser on every open, so a comment in there
+/// is data in the file rather than a note to whoever reads this, and dropping a
+/// column rewrites that text around it.
 pub const SCHEMA: &str = "
--- Facts about the index itself: schema_version, last_scan, and where a cleanup
--- sends what it removes. The folder is the one this file sits in, so it is not
--- written down anywhere.
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -46,17 +60,16 @@ CREATE TABLE IF NOT EXISTS fingerprints (
     file_id             INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
     fingerprint_version INTEGER NOT NULL,
     dct_hashes          BLOB    NOT NULL,
-    ring_stats          BLOB    NOT NULL
+    ring_stats          BLOB    NOT NULL,
+    corners             BLOB    NOT NULL DEFAULT x''
 );
 
--- The search builds its bands from dct_hashes as it loads, so an index that
--- held 128 rows for every picture is dropped from any file that still has one.
 DROP TABLE IF EXISTS phash_bands;
 
 CREATE VIEW IF NOT EXISTS indexed_images AS
 SELECT f.id, f.rel_path, f.size_bytes, f.mtime_ns,
        i.width, i.height, i.format, i.channels,
-       p.dct_hashes, p.ring_stats
+       p.dct_hashes, p.ring_stats, p.corners
 FROM files f
 JOIN images i       ON i.file_id = f.id
 JOIN fingerprints p ON p.file_id = f.id;
@@ -91,6 +104,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     let at = std::time::Instant::now();
     conn.execute_batch(SCHEMA).context("applying the schema")?;
     drop_dead_columns(&conn)?;
+    add_new_columns(&conn)?;
     crate::log_line!("    schema: {:.2}s", at.elapsed().as_secs_f64());
 
     let existing: Option<i64> = conn
@@ -136,6 +150,30 @@ fn drop_dead_columns(conn: &Connection) -> Result<()> {
         conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
             .with_context(|| format!("dropping {table}.{column}"))?;
     }
+    conn.execute_batch(SCHEMA).context("rebuilding the schema")?;
+    Ok(())
+}
+
+/// Add the columns a newer build writes to an index made by an older one.
+///
+/// `CREATE TABLE IF NOT EXISTS` leaves a table that already exists exactly as it
+/// was, so a file from an older build keeps the shape it was made with. The rows
+/// in it are re-fingerprinted anyway, because the fingerprint version moved, and
+/// they need somewhere to be written to.
+fn add_new_columns(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA table_info(fingerprints)")?;
+    let present = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "corners");
+    drop(statement);
+    if present {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE fingerprints ADD COLUMN corners BLOB NOT NULL DEFAULT x''")
+        .context("adding the corners column")?;
+    // The view was made without it and would go on reading the old shape.
+    conn.execute_batch("DROP VIEW IF EXISTS indexed_images")?;
     conn.execute_batch(SCHEMA).context("rebuilding the schema")?;
     Ok(())
 }
@@ -439,6 +477,8 @@ pub struct Record {
     pub format: Format,
     pub channels: u8,
     pub fingerprint: Fingerprint,
+    /// The picture's corners, packed. Empty when it has none.
+    pub corners: Vec<u8>,
 }
 
 /// Write one image into every table it belongs in. Callers batch these inside a
@@ -477,17 +517,19 @@ pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<
     )?;
 
     tx.execute(
-        "INSERT INTO fingerprints(file_id, fingerprint_version, dct_hashes, ring_stats)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO fingerprints(file_id, fingerprint_version, dct_hashes, ring_stats, corners)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(file_id) DO UPDATE SET
              fingerprint_version = excluded.fingerprint_version,
              dct_hashes = excluded.dct_hashes,
-             ring_stats = excluded.ring_stats",
+             ring_stats = excluded.ring_stats,
+             corners = excluded.corners",
         params![
             file_id,
             fingerprint::FINGERPRINT_VERSION,
             fingerprint::pack_hashes(&record.fingerprint.dct_hashes),
-            record.fingerprint.ring_stats
+            record.fingerprint.ring_stats,
+            record.corners
         ],
     )?;
 
@@ -531,6 +573,7 @@ mod tests {
                 dct_hashes: [hash, hash, hash, hash, hash, hash, hash, hash],
                 ring_stats: vec![1, 2, 3, 4],
             },
+            corners: Vec::new(),
         }
     }
 

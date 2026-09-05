@@ -152,9 +152,67 @@ A GIF decodes through the general path.
 The channel count is read from the file rather than assumed, because the keeper
 score uses it.
 
+### a_picture_is_turned_the_way_the_file_says
+
+All eight ways a camera can say a picture goes, done to a picture whose corners
+are all different, so which corner ends up where says whether the turn was the
+right one. The quarter turns stand the picture on its end; a value the standard
+does not define leaves it alone.
+
 ### truncated_input_is_an_error_and_not_a_panic
 
 A cut-off file gives an error the pass can report and carry on from.
+
+### decodes_tiff_and_reports_the_original_size
+
+A TIFF is sniffed as one and decodes through the general path, like any other
+picture.
+
+### a_raw_file_is_read_from_its_preview_at_the_size_of_its_own_picture
+
+A raw file built by hand, holding a preview and saying its sensor is six
+thousand pixels across. The picture comes from the preview, and the size
+recorded is the sensor's: what the file is worth keeping for is the picture it
+holds, not the size of the copy inside it.
+
+### a_raw_file_with_no_preview_in_it_is_an_error_and_not_a_panic
+
+A raw file whose directories point at nothing, and one holding no boxes worth
+opening. Both give an error the pass can report and carry on from.
+
+### a_heic_file_that_holds_nothing_is_an_error_and_not_a_panic
+
+A HEIC header with no picture behind it is an error rather than a crash.
+
+## crates/imgdedupe-core/src/features.rs
+
+### a_picture_gives_corners_and_the_same_ones_twice
+
+A picture with things in it produces corners, and fingerprinting it twice gives
+the same ones. A fingerprint that differs between two runs over the same file
+would put a file in a set with itself and nothing else.
+
+### a_flat_picture_has_no_corners
+
+A picture of one shade has no corners, and that is not an error. A flat sky, or
+a photograph out of focus, is matched by the whole-frame hash and by nothing
+here.
+
+### corners_are_spread_over_the_picture_rather_than_bunched
+
+The strongest corners of a picture all sit wherever it has the most texture, and
+a crop of anywhere else would then match nothing. The frame is divided into
+cells that each keep their own best, and this checks both halves of a picture
+come away with corners.
+
+### corners_of_the_same_place_are_described_the_same_way
+
+A picture and the left half of it. Corners that survived the cut are described
+as they were before it, which is the property the whole thing rests on.
+
+### corners_survive_being_packed_and_read_back
+
+What goes into the index comes back out of it unchanged.
 
 ## crates/imgdedupe-core/src/fingerprint.rs
 
@@ -270,9 +328,26 @@ weighting it on every comparison.
 
 Every format the indexer reads is recognised from its first bytes.
 
+### detects_each_raw_format_and_heic
+
+Canon's two containers, Nikon, Sony, Panasonic and HEIC are each recognised from
+their first bytes: by a header of their own, by the marker after it, by the
+maker's name in the first directory, or by the brand the container declares.
+
+### a_maker_this_tool_has_no_name_for_is_a_tiff
+
+A TIFF-headed file from a manufacturer this build has no name for is read as a
+TIFF, which is what it is. The preview inside it is still found if the file
+turns out to hold one.
+
 ### rejects_formats_that_are_not_images
 
 A file that is not a picture is not claimed as one.
+
+### a_container_this_tool_does_not_read_is_not_an_image
+
+Video and audio use the same container as HEIC and CR3, and are not claimed as
+pictures because of it.
 
 ### riff_that_is_not_webp_is_not_an_image
 
@@ -426,6 +501,157 @@ but different shapes stay separate.
 The band search finds exactly what comparing every pair finds, inside the radius
 the bands guarantee.
 
+## crates/imgdedupe-core/src/metadata.rs
+
+### a_cameras_own_directory_is_read
+
+A TIFF directory as a camera writes one. The make, the model and the way up come
+back with the names this gives them rather than as numbers.
+
+### the_camera_settings_hanging_off_it_are_read_too
+
+The settings sit in a directory of their own that the first one points at, and
+its tags mean different things from the same numbers in the first, so it is read
+against its own table. The exposure comes back as the fraction a shutter speed
+is.
+
+### the_numbered_fields_of_a_wire_service_are_read
+
+Captions, credits and keywords are stored as numbered fields from the days of
+wire services. A caption, a photographer and a keyword go in and come back under
+the names those numbers stand for.
+
+### only_what_a_photographer_would_look_at_is_kept
+
+An editor writes hundreds of its own settings into a file: how much clarity was
+applied, where the highlights were pulled to, which curve was used. None of that
+is about the photograph, so none of it is shown. This also checks that
+`rdf:Description`, the element every property sits inside, is not mistaken for
+the photograph's own description, which is what once made every value in a file
+come out labelled as a caption.
+
+### a_date_is_said_the_way_somebody_would_say_it
+
+A file writes a date as 2026:06:13 04:18:34, and XMP as 2026-06-13T04:18:34.
+Both come out as June 13, 2026, 4:18:34 am. Anything that is not a date is left
+out rather than shown wrong.
+
+### adobes_xml_is_read_in_both_of_its_forms
+
+XMP writes a property either as an attribute of the description or as an element
+with the value inside it, and whatever wrote the file chose. Both are read.
+
+### a_file_that_says_nothing_about_itself_has_nothing_to_show
+
+Something that is not a picture, nothing at all, and a JPEG with no such segment
+in it: all of them say nothing, rather than saying something wrong.
+
+### a_file_that_lies_about_its_own_lengths_is_survived
+
+A file claiming a value four thousand bytes long that is not there, one cut in
+half, and a wire service field claiming more than it has. These files come off
+other people's cameras, so a length is a claim and not a fact.
+
+## crates/imgdedupe-core/src/preview.rs
+
+### the_preview_a_directory_points_at_is_found
+
+A TIFF-based raw file built by hand: a directory saying how big the sensor is
+and where the preview went. The preview comes back byte for byte, and so does
+the sensor's size.
+
+### the_biggest_preview_in_the_file_is_the_one_taken
+
+A file holding a thumbnail and a larger preview, in two directories. The larger
+one is what comes back: a fingerprint built from a postage stamp is a worse one.
+
+### a_picture_stored_as_though_it_were_the_files_pixels_is_found
+
+Canon's older bodies write the full-size JPEG where a TIFF keeps its pixels, and
+say so in the compression tag. That is followed as a preview like any other.
+
+### a_preview_in_a_directory_off_the_first_one_is_found
+
+Nikon keeps the preview in a directory that only the first one points at, so the
+directories hanging off a directory are followed too.
+
+### a_preview_written_into_a_tag_is_found
+
+Panasonic writes the whole JPEG into a tag rather than pointing at it, and
+records the size of the sensor rather than of the picture. Both are read.
+
+### a_preview_in_a_box_of_its_own_is_found
+
+Canon's newer bodies write boxes inside boxes, the preview in one of its own
+behind a name sixteen bytes long. The boxes are walked and the picture found.
+
+### a_jpeg_holding_a_smaller_one_is_measured_to_its_own_end
+
+A JPEG with a thumbnail of itself in its metadata ends twice, and the first end
+is not the file's. The markers are walked so the whole picture is taken and not
+the part before the thumbnail's end.
+
+### sensor_data_stored_as_a_lossless_jpeg_is_not_taken_for_the_preview
+
+Canon stores what came off the sensor as a lossless JPEG of two channels, in the
+same file, pointed at the same way as the preview and several times its size.
+Nothing here decodes that, so the frame header is read and the preview taken
+instead. A real Canon file indexed as nothing at all is what this is about.
+
+### a_box_that_says_its_size_the_long_way_is_still_read
+
+A box too big for a four byte size writes the size after its name instead.
+Canon's newer files put the preview behind one, and stopping at it means finding
+only the thumbnail.
+
+### the_size_of_the_picture_is_taken_from_the_camera_settings_when_it_is_there
+
+When the directories describe pieces of a picture rather than the whole one, the
+size of the picture is with the camera's settings, in a directory of its own.
+That is the size recorded, not the largest piece.
+
+### a_file_that_is_not_a_container_holds_nothing
+
+Plain text and a plain JPEG hold no preview, and asking for one gives nothing
+rather than a wrong answer.
+
+### a_directory_pointing_outside_the_file_is_not_followed
+
+A file claiming its preview sits a megabyte past its own end gives nothing. The
+files this reads come off other people's cameras and cards, so every offset is
+checked against the file's length.
+
+### a_directory_that_points_at_itself_ends
+
+A file whose directory lists itself as the next one to read stops rather than
+going round for ever.
+
+### the_way_up_comes_out_of_a_jpegs_own_segment
+
+A camera writes which way up a picture goes into a segment near the front of the
+JPEG, holding a TIFF of its own. All eight of the values the standard defines
+are read back from one built here.
+
+### the_way_up_comes_out_of_a_raw_files_first_directory
+
+A raw file says it in its first directory instead, where the rest of its tags
+are.
+
+### a_file_that_does_not_say_which_way_up_it_goes_is_upright
+
+A JPEG with no such segment, a raw file with no such tag, and something that is
+not a picture at all: all upright, which is the only safe answer.
+
+### a_way_up_that_is_not_one_of_the_eight_is_ignored
+
+A value the standard does not define means nothing, and turning a picture by
+nothing in particular is worse than leaving it alone.
+
+### the_maker_comes_out_of_the_first_directory
+
+The name of whoever made the camera is read from the first directory, which is
+what tells a Nikon raw from a Sony one when both carry a plain TIFF header.
+
 ## crates/imgdedupe-core/src/runlog.rs
 
 ### the_log_sits_beside_the_executable
@@ -488,6 +714,21 @@ into the index so a later pass does not drop what it cannot see.
 
 The index sitting in the folder is not treated as a picture, and not as a
 vanished one on the next pass.
+
+### a_crop_of_a_picture_is_found_to_be_the_same_picture
+
+Scans a picture, a crop of the middle of it, and a different picture, then
+searches. The crop and the picture are one set and the third file is on its own.
+The whole-frame hash cannot do this: cropping stretches a different region over
+the same square and every number in it changes at once, while the corners the
+crop kept are still where they were.
+
+### an_index_from_a_build_without_corners_is_brought_up_to_date
+
+An index as an older build left it: no column for the corners, and rows saying
+they were fingerprinted by the version before this one. Opening it adds the
+column, and the pass reads every file again and fills it in. An index made
+before this existed is not a dead index.
 
 ### paths_are_stored_with_forward_slashes
 
@@ -853,6 +1094,13 @@ has to elide, so the lines that need cutting are painted rather than added as
 widgets. What a control does is written on it. This is a guard against tooltips
 creeping back in one at a time.
 
+### walking_along_a_long_set_brings_the_selected_picture_into_view
+
+A set of twenty-four pictures in a window that fits three, walked from one end to
+the other with the cursor keys and back. The strip follows the selection: it does
+not move while the picture is already on screen, it moves further along with
+every step past the edge, and it comes back with the walk.
+
 ### keep_none_sits_level_with_the_last_line_under_the_pictures
 
 Draws a set from a really scanned folder and compares where the keep none button
@@ -878,6 +1126,18 @@ Draws the review over a scanned folder and reads the toolbar off the frame. The
 allow multi-select box sits against the left edge, the clean up button against the
 right, and the counts in the middle of the window rather than in the middle of
 what is left of the row.
+
+### a_click_on_the_preview_fills_the_window_and_escape_puts_it_back
+
+Really clicks the preview in a scanned folder. The picture fills the window, at
+the window's own size rather than blown up from the pane's copy, and the escape
+key puts it back.
+
+### the_preview_shows_what_the_file_says_about_itself
+
+A picture carrying a comment, clicked in the review. The name of the thing and
+what it says both appear under the picture, a frame or two after the click
+because the file is read off another thread.
 
 ### the_index_keeps_whether_multi_selected_was_ticked
 
@@ -946,7 +1206,21 @@ Opens a folder, presses scan and paints the progress panel before a single file
 has been counted, collecting the shapes that came out. Nothing is painted in the
 fill colour. egui's own progress bar widens its fill to the corner radius so the
 rounding has something to round, which puts an eighteen point bubble on a bar
-that has made no progress. After the pass has really run, both bars are filled.
+that has made no progress. After the pass has really run, all three bars are
+filled.
+
+### a_pass_with_nothing_left_to_do_fills_both_bars_anyway
+
+Scans a folder twice. The second pass reads nothing, because the index already
+holds every file in the folder, and that is a folder fully read and fully
+indexed: both bars are full. A bar left empty because no work happened would be
+a lie about a folder that is entirely done.
+
+### listing_the_folder_does_not_move_the_read_bar
+
+The listing is not the reading. While the folder is still being listed nothing
+has been read, and a total to read is not the same as having read any of it, so
+the bar for reading stays where it is: empty.
 
 ### opening_a_folder_only_scans_one_that_has_been_scanned_before
 
@@ -1007,6 +1281,15 @@ The destination on screen becomes the disposal the cleanup runs.
 ### every_destination_has_a_label_and_a_note
 
 Each choice has a name and a line saying what it does.
+
+## crates/imgdedupe/src/metadata.rs
+
+### asking_gives_nothing_back_at_once_and_something_back_later
+
+What a file says about itself is read on a thread of its own: asking for it gives
+nothing back on the spot and the answer turns up later. A raw file is tens of
+megabytes and often on another machine, and the window has to go on drawing while
+it arrives.
 
 ## crates/imgdedupe/src/folder_picker.rs
 
@@ -1215,6 +1498,12 @@ The settings file is in the platform's configuration folder, not beside the
 executable.
 
 ## crates/imgdedupe/src/thumbs.rs
+
+### a_picture_the_file_says_to_turn_arrives_turned
+
+A wide picture with a segment saying to stand it on its end, read the way the
+tiles and the preview read every picture. It comes back on its end. Both of them
+come through this one function, so this is where the turn belongs.
 
 ### loading_reduces_to_the_preview_size
 

@@ -4,7 +4,11 @@ use crate::decode::Decoded;
 
 /// Bumping this re-runs fingerprinting for every row computed by an older version,
 /// and leaves `files` and `images` alone.
-pub const FINGERPRINT_VERSION: i64 = 1;
+///
+/// 2 is the version that records the picture's corners beside the hash, which is
+/// what finds a crop of a picture. A row without them was written before that and
+/// is read again.
+pub const FINGERPRINT_VERSION: i64 = 2;
 
 /// Side of the square the perceptual hash is computed on.
 const GRID: usize = 64;

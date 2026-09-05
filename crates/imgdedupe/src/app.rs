@@ -768,6 +768,12 @@ fn unwrapped(text: egui::RichText) -> egui::Label {
 struct ScanState {
     total: u64,
     done: u64,
+    /// Whether the reading has begun, is going, or is over, and the same for the
+    /// writing. A bar is a fraction only while the work it measures is running:
+    /// before that it is empty and after it is full, whatever numbers are lying
+    /// about from the listing or from the index.
+    reading: Stage,
+    writing: Stage,
     /// Pictures turned into a record, and how many of the folder are expected to
     /// become one.
     indexed: u64,
@@ -785,6 +791,31 @@ struct ScanState {
     /// it is the only thing there is to show for the part of a pass that used to
     /// show nothing at all.
     listing: Option<u64>,
+}
+
+/// Where one stage of a pass has got to.
+///
+/// A count out of a total is worth drawing while the stage producing them is the
+/// one running, and at no other time. Before it starts there is nothing to
+/// measure and the bar is empty; once it is over everything it was going to do
+/// is done and the bar is full.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    #[default]
+    Waiting,
+    Running,
+    Over,
+}
+
+impl Stage {
+    /// Under way, unless it is already over: a report that arrives after the
+    /// stage that sent it finished does not start it again.
+    fn begun(self) -> Stage {
+        match self {
+            Stage::Over => Stage::Over,
+            _ => Stage::Running,
+        }
+    }
 }
 
 /// What the search is doing, kept entirely apart from what the pass did.
@@ -817,17 +848,6 @@ impl SearchState {
     /// of the bar and comparing is the second.
     fn progress(&self) -> (u64, u64) {
         const HALF: u64 = 1000;
-        if self.done {
-            // A search over nothing is not a finished search. Filling the bar for
-            // it says the work was done.
-            if self.to_load == 0 && self.pairs == 0 {
-                return (0, 0);
-            }
-            return (HALF * 2, HALF * 2);
-        }
-        if self.stage.is_none() {
-            return (0, 0);
-        }
         let read = fraction(self.loaded, self.to_load, HALF);
         if self.pairs == 0 && self.compared == 0 {
             return (read, HALF * 2);
@@ -1037,6 +1057,17 @@ pub struct App {
     /// A row the cursor keys moved to that the list may not be showing, and what
     /// the list was scrolled to and how tall it was on the last frame.
     scroll_to: Option<usize>,
+    /// The picture filling the window, put there by a click on the preview. A
+    /// click anywhere or the escape key puts it back.
+    filling_the_window: Option<i64>,
+    /// What the file the preview is showing says about itself, and the reading
+    /// of it, which happens off this thread.
+    metadata: crate::metadata::Metadata,
+    /// Set when the cursor keys move the preview, and cleared by the set holding
+    /// it scrolling sideways far enough to show it. A set wider than the window
+    /// is most of a review, and walking off the end of one used to move the
+    /// selection to a picture that was not on screen.
+    show_selected: bool,
     list_offset: f32,
     list_viewport: f32,
     /// A folder that already has an index is brought up to date on sight, which
@@ -1131,6 +1162,9 @@ impl App {
             selected: None,
             showing: None,
             scroll_to: None,
+            filling_the_window: None,
+            metadata: crate::metadata::Metadata::default(),
+            show_selected: false,
             list_offset: 0.0,
             list_viewport: 0.0,
             // A folder with an index is brought up to date on sight. One without
@@ -1245,6 +1279,8 @@ impl eframe::App for App {
                 View::Cleanup => self.cleanup_view(ui),
             });
 
+        self.filling_the_window(ctx);
+
         if self.running.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -1284,7 +1320,19 @@ impl App {
         let waiting: Vec<Update> = run.updates.try_iter().collect();
         for update in waiting {
             match update {
-                Update::Reached(step) => self.light(step.into()),
+                Update::Reached(step) => {
+                    // The pass says which stage it is in. The bars follow that
+                    // rather than guessing from numbers that came from a stage
+                    // that is over.
+                    match step {
+                        scan::Step::StartedReadingNewFiles => self.scan.reading = Stage::Running,
+                        scan::Step::FinishedReadingNewFiles => self.scan.reading = Stage::Over,
+                        scan::Step::StartedIndexingNewFiles => self.scan.writing = Stage::Running,
+                        scan::Step::FinishedIndexingNewFiles => self.scan.writing = Stage::Over,
+                        _ => {}
+                    }
+                    self.light(step.into());
+                }
                 Update::Images(images) => self.images = Some(images),
                 Update::Settings { recurse, disposal, move_dir, multi_select } => {
                     // An index built over the subfolders has to be scanned that
@@ -1303,12 +1351,10 @@ impl App {
                     }
                 }
                 Update::Walking { found, of } => {
+                    // The listing has a line of its own above the bars. It is not
+                    // the reading and does not move the reading's bar: nothing
+                    // has been read while the folder is still being listed.
                     self.scan.listing = Some(found);
-                    // The read bar is how much of the folder has been looked at,
-                    // and listing it is looking at every file in it. This is the
-                    // longest stretch of a pass over a folder that has not
-                    // changed, and the bar stood still for all of it.
-                    self.scan.done = found;
                     if let Some(total) = of {
                         self.scan.total = total;
                     }
@@ -1325,19 +1371,19 @@ impl App {
                     self.search = SearchState::default();
                 }
                 Update::Start { total } => {
-                    // The listing is over, so its line comes off the screen. The
-                    // read bar is not emptied: the listing has been over every
-                    // file in the folder, and a file that has been looked at does
-                    // not stop having been looked at because the next stage
-                    // started. Emptying it here is what made the whole listing
-                    // look like nothing had happened.
+                    // The listing is over, so its line comes off the screen and
+                    // the reading has a total to be measured against. Nothing has
+                    // been read yet, and the bar says so until the first file is.
                     self.scan.total = total;
-                    self.scan.done = self.scan.done.max(total);
+                    self.scan.done = 0;
                     self.scan.listing = None;
                     self.scan.indexed = 0;
                     self.scan.to_index = 0;
                 }
                 Update::Progress { done, per_sec, unchanged, removed, ignored } => {
+                    // These come off the reading, so the reading is under way
+                    // whether or not its step arrived first.
+                    self.scan.reading = self.scan.reading.begun();
                     self.scan.done = done;
                     self.scan.per_sec = per_sec;
                     self.scan.unchanged = unchanged;
@@ -1345,6 +1391,14 @@ impl App {
                     self.scan.ignored = ignored;
                 }
                 Update::Indexed { done, total, read, unchanged, ignored } => {
+                    // Reading is over when everything in the folder has been read
+                    // or was already in the index, which for a folder that has
+                    // not changed is true before a single file is opened. The
+                    // same for the writing.
+                    self.scan.reading =
+                        if read >= total { Stage::Over } else { self.scan.reading.begun() };
+                    self.scan.writing =
+                        if done >= total { Stage::Over } else { self.scan.writing.begun() };
                     self.scan.indexed = done;
                     self.scan.to_index = total;
                     // The counters under the bars come from the read side, and
@@ -1355,6 +1409,16 @@ impl App {
                 }
                 Update::Failed { path, message } => self.scan.failures.push((path, message)),
                 Update::Done { indexed, removed, failed, elapsed_ms } => {
+                    // The pass is over. Everything in the folder that was going
+                    // to be read has been read and everything that was going to
+                    // be indexed is in the index, including a folder where that
+                    // was nothing at all: an index that already holds every file
+                    // in the folder is a folder fully read and fully indexed, and
+                    // no work has to run to make that true.
+                    if self.scan.total > 0 {
+                        self.scan.reading = Stage::Over;
+                        self.scan.writing = Stage::Over;
+                    }
                     self.scan.finished = Some(format!(
                         "indexed {indexed}, removed {removed}, failed {failed}, in {:.1}s",
                         elapsed_ms as f64 / 1000.0
@@ -1816,24 +1880,35 @@ impl App {
                 ui.add_space(6.0);
             }
             let width = ui.available_width();
-            // Nothing to do is done, so an empty total is a full bar.
-            // Nothing counted yet is nothing done. A pass that finds nothing at
-            // all ends with both totals at zero and both bars empty, which is
-            // what happened: nothing.
-            let bar = |ui: &mut egui::Ui, label: &str, count: u64, out_of: u64| {
-                let fraction = if out_of == 0 { 0.0 } else { count as f32 / out_of as f32 };
+            // A bar is a fraction only while the stage it measures is the one
+            // running. Before that there is nothing to divide and it is empty;
+            // after it, everything that stage was going to do is done and it is
+            // full. A stage that never ran leaves its bar empty, which is what
+            // happened: nothing.
+            let bar = |ui: &mut egui::Ui, label: &str, stage: Stage, count: u64, out_of: u64| {
+                let fraction = match stage {
+                    Stage::Waiting => 0.0,
+                    Stage::Running if out_of == 0 => 0.0,
+                    Stage::Running => count as f32 / out_of as f32,
+                    Stage::Over => 1.0,
+                };
                 progress_bar(ui, label, fraction, width);
             };
-            bar(ui, "read", self.scan.done, self.scan.total);
+            bar(ui, "read", self.scan.reading, self.scan.done, self.scan.total);
             ui.add_space(4.0);
-            bar(ui, "indexed", self.scan.indexed, self.scan.to_index);
+            bar(ui, "indexed", self.scan.writing, self.scan.indexed, self.scan.to_index);
             ui.add_space(4.0);
             // The search's own bar, under the pass's two and driven by nothing
             // they touch. It is two stages of very different lengths, so it runs
             // over both: reading the index fills the first part of it, comparing
             // the pairs that reading produced fills the rest.
             let (duplicates, of) = self.search.progress();
-            bar(ui, "duplicates", duplicates, of);
+            let searching = match (self.search.done, self.search.stage.is_some()) {
+                (true, _) => Stage::Over,
+                (false, true) => Stage::Running,
+                (false, false) => Stage::Waiting,
+            };
+            bar(ui, "duplicates", searching, duplicates, of);
             ui.add_space(6.0);
             // How many files the folder holds. The listing is what produces that
             // number, so before it is over the count it has reached so far is
@@ -2283,6 +2358,7 @@ impl App {
         };
         self.selected = Some(self.sets[visible[set]].members[member].file_id);
         self.scroll_to = Some(set);
+        self.show_selected = true;
     }
 
     /// Mark or unmark the picture the preview is showing, which is what the space
@@ -2458,7 +2534,10 @@ impl App {
                 ui.add(unwrapped(egui::RichText::new(&member.rel_path).weak()));
                 ui.add_space(4.0);
 
-                let room = ui.available_size();
+                // The picture takes the top of the pane and what the file says
+                // about itself takes the rest, so there is always a picture and
+                // always somewhere for the words to go.
+                let room = egui::vec2(ui.available_width(), ui.available_height() * 0.62);
                 let wanted =
                     self.thumbs.get(member.file_id, thumbs::LARGE_EDGE, root, &member.rel_path);
                 if wanted.is_some() {
@@ -2471,18 +2550,226 @@ impl App {
                     self.thumbs.get(held.file_id, thumbs::LARGE_EDGE, root, &held.rel_path)
                 });
 
-                ui.centered_and_justified(|ui| match drawing {
-                    Some(texture) => {
-                        ui.add(
-                            egui::Image::new(&texture).max_size(room).maintain_aspect_ratio(true),
-                        );
-                    }
-                    None => {
-                        ui.label(egui::RichText::new("reading...").weak());
-                    }
+                ui.allocate_ui(room, |ui| {
+                    ui.centered_and_justified(|ui| match drawing {
+                        Some(texture) => {
+                            let shown = ui.add(
+                                egui::Image::new(&texture)
+                                    .max_size(room)
+                                    .maintain_aspect_ratio(true)
+                                    .sense(egui::Sense::click()),
+                            );
+                            // A hand over it, because a picture that does
+                            // something when it is clicked has to look like one.
+                            if shown.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if shown.clicked() {
+                                self.filling_the_window = Some(member.file_id);
+                            }
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("reading...").weak());
+                        }
+                    });
                 });
+                ui.add_space(6.0);
+                self.written_beside_it(ui, &member, root);
             });
         self.preview_width = Some(pane.response.rect.width());
+    }
+
+    /// Everything the file says about itself, under the picture: what the camera
+    /// was set to, when and where it was taken, and whatever anybody wrote into
+    /// it since.
+    ///
+    /// The file is read on a thread of its own, because a raw file is tens of
+    /// megabytes and often on another machine, and the window carries on drawing
+    /// while it arrives.
+    fn written_beside_it(
+        &mut self,
+        ui: &mut egui::Ui,
+        member: &imgdedupe_core::matching::Member,
+        root: &std::path::Path,
+    ) {
+        let path = root.join(&member.rel_path);
+        let groups = self.metadata.get(member.file_id, path, ui.ctx());
+        if groups.is_empty() {
+            let waiting = self.metadata.reading();
+            ui.label(
+                egui::RichText::new(if waiting {
+                    "reading..."
+                } else {
+                    "this file says nothing about itself"
+                })
+                .weak(),
+            );
+            return;
+        }
+
+        let lines: Vec<(Option<String>, String, String)> = groups
+            .iter()
+            .flat_map(|group| {
+                std::iter::once((Some(group.name.clone()), String::new(), String::new())).chain(
+                    group
+                        .entries
+                        .iter()
+                        .map(|(name, value)| (None, name.clone(), value.clone())),
+                )
+            })
+            .collect();
+
+        let line = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+        let names = ui.available_width() * 0.38;
+        // What is left of the pane, and no more. Without a height of its own the
+        // list takes whatever it asks for, runs off the bottom of the window, and
+        // the part of it below the edge cannot be reached by anything.
+        let room = (ui.max_rect().bottom() - ui.cursor().top() - SCROLL_BAR).max(line * 3.0);
+        let bar = egui::Id::new(("what it says", member.file_id));
+        // The whole pane, not only the part the list covers: a scroll wheel
+        // turned over the picture is a scroll wheel turned over this pane, and
+        // the list is the only thing in it that can move.
+        let where_it_is = ui.max_rect();
+        let (scroll_wheel, pointer) =
+            ui.input(|input| (input.smooth_scroll_delta, input.pointer.latest_pos()));
+        let (_, offset, viewport) = scrolled(
+            ui,
+            bar,
+            true,
+            line * 3.0,
+            egui::ScrollArea::vertical()
+                .id_salt(("metadata", member.file_id))
+                .max_height(room)
+                .auto_shrink([false, false]),
+            |area, ui| {
+                area.show_rows(ui, line, lines.len(), |ui, rows| {
+                    for (heading, name, value) in &lines[rows] {
+                        match heading {
+                            Some(heading) => {
+                                // A band the width of the pane, so a heading is
+                                // where one part ends and the next begins rather
+                                // than another line of text among the lines.
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), line),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(
+                                    rect,
+                                    2.0,
+                                    ui.visuals().widgets.inactive.weak_bg_fill,
+                                );
+                                let ink = ui.visuals().strong_text_color();
+                                let words = ui.painter().layout_no_wrap(
+                                    heading.clone(),
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                    ink,
+                                );
+                                let down = (rect.height() - words.size().y) / 2.0;
+                                ui.painter().galley(
+                                    rect.left_top() + egui::vec2(6.0, down),
+                                    words,
+                                    ink,
+                                );
+                            }
+                            None => {
+                                ui.horizontal(|ui| {
+                                    let room = ui.available_width();
+                                    clipped_line_in(
+                                        ui,
+                                        egui::RichText::new(name).weak(),
+                                        names,
+                                    );
+                                    clipped_line_in(
+                                        ui,
+                                        egui::RichText::new(value),
+                                        room - names,
+                                    );
+                                });
+                            }
+                        }
+                    }
+                })
+            },
+        );
+
+        // The scroll wheel, applied here rather than left to the toolkit. Inside
+        // a panel it does not reach this list on its own, and a list nothing can
+        // scroll is a list nobody can read past the first dozen lines of.
+        let over = pointer.is_some_and(|at| where_it_is.contains(at));
+        if over && scroll_wheel.y != 0.0 {
+            let content = lines.len() as f32 * line;
+            let wanted = (offset - scroll_wheel.y).clamp(0.0, (content - viewport).max(0.0));
+            if wanted != offset {
+                ui.data_mut(|data| data.insert_temp(bar, wanted));
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    /// The picture, filling the window, over everything else.
+    ///
+    /// Asked for at the size of the window rather than at the size of the pane
+    /// it came from, so it is the picture and not a blown up thumbnail of it. A
+    /// click anywhere on it, or the escape key, puts it away.
+    fn filling_the_window(&mut self, ctx: &egui::Context) {
+        let Some(file_id) = self.filling_the_window else {
+            return;
+        };
+        let Some(root) = self.folder.clone() else {
+            self.filling_the_window = None;
+            return;
+        };
+        let Some(member) = self
+            .sets
+            .iter()
+            .flat_map(|set| set.members.iter())
+            .find(|member| member.file_id == file_id)
+            .cloned()
+        else {
+            self.filling_the_window = None;
+            return;
+        };
+
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.filling_the_window = None;
+            return;
+        }
+
+        let screen = ctx.screen_rect();
+        let edge = (screen.width().max(screen.height()) * ctx.pixels_per_point()) as u32;
+        let picture = self.thumbs.get(file_id, edge, &root, &member.rel_path);
+
+        egui::Area::new(egui::Id::new("filling the window"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                ui.set_min_size(screen.size());
+                // Everything behind it is covered, so what is on screen is the
+                // picture and nothing else.
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha(240));
+                let taken = ui.allocate_rect(screen, egui::Sense::click());
+                match picture {
+                    Some(texture) => {
+                        let size = texture.size_vec2();
+                        let room = screen.size() * 0.98;
+                        let scale = (room.x / size.x).min(room.y / size.y).min(1.0);
+                        let shown = egui::Rect::from_center_size(screen.center(), size * scale);
+                        egui::Image::new(&texture).paint_at(ui, shown);
+                    }
+                    None => {
+                        ui.painter().text(
+                            screen.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "reading...",
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                }
+                if taken.clicked() {
+                    self.filling_the_window = None;
+                }
+            });
     }
 
     fn set_row(&mut self, ui: &mut egui::Ui, index: usize, root: &std::path::Path) {
@@ -2504,9 +2791,11 @@ impl App {
                 // One tile's width is what a click on the strip's scroll bar
                 // moves by, and the first tile's is as good a step as any.
                 let step = members.first().map_or(TILE.x, tile_width);
-                scrolled(
+                let bar = egui::Id::new(("set bar", set_id));
+                let gap = ui.spacing().item_spacing.x;
+                let (_, offset, viewport) = scrolled(
                     ui,
-                    egui::Id::new(("set bar", set_id)),
+                    bar,
                     false,
                     step,
                     egui::ScrollArea::horizontal().id_salt(("set", set_id)),
@@ -2521,6 +2810,20 @@ impl App {
                         })
                     },
                 );
+
+                // The cursor keys move the preview along the strip, and the strip
+                // follows: as far as it takes to bring the picture on screen and
+                // no further, so the set does not jump about under a selection
+                // that was already in view.
+                let holds_it =
+                    members.iter().any(|member| Some(member.file_id) == self.selected);
+                if self.show_selected && holds_it {
+                    if let Some(wanted) = self.strip_offset(&members, gap, offset, viewport) {
+                        ui.data_mut(|data| data.insert_temp(bar, wanted));
+                        ui.ctx().request_repaint();
+                    }
+                    self.show_selected = false;
+                }
 
                 // Over the strip rather than above it. A row of its own to hold
                 // one button is a row of the list nobody can see pictures in.
@@ -2549,6 +2852,39 @@ impl App {
                 }
             });
         });
+    }
+
+    /// How far along a set's strip has to be for the picture the preview is
+    /// showing to be on it, or `None` if it is on it already.
+    ///
+    /// As little movement as the job takes: a picture off the left brings the
+    /// strip back to its left edge, one off the right brings it just far enough
+    /// to end at the right edge, and one already on screen moves nothing. The
+    /// strip is a row of tiles with a gap between them, so where a tile starts is
+    /// what the tiles before it took.
+    fn strip_offset(
+        &self,
+        members: &[imgdedupe_core::matching::Member],
+        gap: f32,
+        offset: f32,
+        viewport: f32,
+    ) -> Option<f32> {
+        let selected = self.selected?;
+        let mut start = 0.0;
+        for member in members {
+            let width = tile_width(member);
+            if member.file_id == selected {
+                if start < offset {
+                    return Some(start);
+                }
+                if start + width > offset + viewport {
+                    return Some(start + width - viewport);
+                }
+                return None;
+            }
+            start += width + gap;
+        }
+        None
     }
 
     /// One image in a set: the picture, whether it is the one being kept, and the
@@ -4724,6 +5060,71 @@ mod tests {
         }
     }
 
+    /// A set wider than the window, walked along with the cursor keys. The strip
+    /// follows the selection: the picture the preview is showing is on screen,
+    /// whichever end of the set it is at.
+    #[test]
+    fn walking_along_a_long_set_brings_the_selected_picture_into_view() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.view = View::Review;
+        app.sets = vec![DuplicateSet {
+            set_id: 7,
+            members: (0..24).map(|index| member(index, "a.jpg", 500)).collect(),
+        }];
+        app.selected = Some(0);
+        let root = PathBuf::from(".");
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let bar = egui::Id::new(("set bar", 7));
+
+        // What the strip is asked to do on the frame after a key press. It is
+        // taken up by the scrolling itself on the frame after that, so it is read
+        // straight away or not at all.
+        let frame = |app: &mut App| {
+            let _ = ctx.run(
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                },
+            );
+            ctx.data(|data| data.get_temp::<f32>(bar))
+        };
+
+        frame(&mut app);
+        // Walked along the set a picture at a time, the way the right cursor key
+        // walks it.
+        let mut asked: Vec<Option<f32>> = Vec::new();
+        for _ in 0..23 {
+            app.walk(&[0], Direction::Forward);
+            asked.push(frame(&mut app));
+        }
+        assert_eq!(app.selected, Some(23), "the walk did not reach the end of the set");
+
+        assert!(
+            asked[..2].iter().all(Option::is_none),
+            "the strip moved for pictures that were already on it: {:?}",
+            &asked[..2]
+        );
+        let moved: Vec<f32> = asked.iter().flatten().copied().collect();
+        assert!(!moved.is_empty(), "the strip never moved for a picture off the end of it");
+        assert!(
+            moved.windows(2).all(|pair| pair[1] > pair[0]),
+            "the strip did not follow the selection along: {moved:?}"
+        );
+
+        // And back to the near end, one picture at a time.
+        for _ in 0..23 {
+            app.walk(&[0], Direction::Back);
+            frame(&mut app);
+        }
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(
+            frame(&mut app),
+            None,
+            "the first picture was on screen and the strip was asked to move anyway"
+        );
+    }
+
     /// Keep none sits at the foot of the tiles, level with the last line under
     /// the pictures, rather than floating somewhere above it.
     #[test]
@@ -4904,6 +5305,156 @@ mod tests {
             counts.left() > box_label.right() && counts.right() < button.left(),
             "the counts run into the checkbox or the button: {counts:?}"
         );
+    }
+
+    /// What the file says about itself is under the picture in the preview: the
+    /// name of each thing on the left and what it says on the right. It is read
+    /// off the file on another thread, so it arrives a frame or two after the
+    /// picture is clicked rather than with it.
+    #[test]
+    fn the_preview_shows_what_the_file_says_about_itself() {
+        let found = folder_with_a_duplicate();
+        // A comment written into one of them, the way a PNG carries text: the
+        // name, a zero, and the words.
+        let first = std::fs::read_dir(found.path())
+            .expect("folder")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .expect("a picture");
+        let mut bytes = std::fs::read(&first).expect("read");
+        let mut chunk = b"tEXtNotes\0taken in a garden".to_vec();
+        let length = (chunk.len() - 4) as u32;
+        let sum = png_check(&chunk);
+        let mut piece = length.to_be_bytes().to_vec();
+        piece.append(&mut chunk);
+        piece.extend_from_slice(&sum.to_be_bytes());
+        let end = bytes.len() - 12;
+        bytes.splice(end..end, piece);
+        std::fs::write(&first, &bytes).expect("write");
+
+        let mut app = reviewing(found.path());
+        app.selected = app.sets[0]
+            .members
+            .iter()
+            .find(|member| first.ends_with(&member.rel_path))
+            .map(|member| member.file_id);
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 700.0));
+        let waited = std::time::Instant::now();
+        loop {
+            let shapes = ctx
+                .run(
+                    egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
+                    },
+                )
+                .shapes;
+            let painted = texts(&shapes);
+            let said = |wanted: &str| painted.iter().any(|(text, _)| text == wanted);
+            if said("Notes") && said("taken in a garden") {
+                break;
+            }
+            assert!(
+                waited.elapsed().as_secs() < 20,
+                "the preview never showed what the file says: {:?}",
+                painted.iter().map(|(text, _)| text.as_str()).collect::<Vec<&str>>()
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A click on the preview fills the window with the picture, and the escape
+    /// key puts it back. The picture is asked for at the size of the window
+    /// rather than at the size of the pane it came from.
+    #[test]
+    fn a_click_on_the_preview_fills_the_window_and_escape_puts_it_back() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let first = app.sets[0].members[0].file_id;
+        app.selected = Some(first);
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 700.0));
+        let mut clock = 0.0;
+        let mut frame = |app: &mut App, events: Vec<egui::Event>| {
+            clock += 0.1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(clock),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    // What the workers have read becomes a texture on the frame
+                    // that draws it, which is the window's own job.
+                    app.thumbs.collect(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
+                    app.filling_the_window(ctx);
+                },
+            );
+        };
+
+        // The picture in the pane, once it has been read.
+        let waited = std::time::Instant::now();
+        while app.showing.is_none() {
+            frame(&mut app, Vec::new());
+            assert!(waited.elapsed().as_secs() < 20, "the preview never arrived");
+            std::thread::yield_now();
+        }
+        assert_eq!(app.filling_the_window, None, "it started out filling the window");
+
+        // A click in the middle of the pane, which is where the picture is.
+        let at = egui::pos2(screen.right() - 230.0, 220.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(at)]);
+        frame(
+            &mut app,
+            vec![
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        assert_eq!(
+            app.filling_the_window,
+            Some(first),
+            "a click on the preview did not fill the window with it"
+        );
+
+        frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        );
+        assert_eq!(app.filling_the_window, None, "escape did not put the picture back");
+    }
+
+    /// The check every PNG chunk carries, for the fixture above.
+    fn png_check(bytes: &[u8]) -> u32 {
+        let mut value = 0xFFFF_FFFFu32;
+        for byte in bytes {
+            value ^= *byte as u32;
+            for _ in 0..8 {
+                value = if value & 1 != 0 { 0xEDB8_8320 ^ (value >> 1) } else { value >> 1 };
+            }
+        }
+        value ^ 0xFFFF_FFFF
     }
 
     /// The box is off to begin with, and ticking it is a fact about the folder:
@@ -5626,8 +6177,48 @@ mod tests {
         assert_eq!(app.scan.done, app.scan.total, "the pass did not finish");
         assert_eq!(
             fills(&mut app).len(),
-            2,
-            "the read and indexed bars are not both filled once the pass is done"
+            3,
+            "the read, indexed and duplicates bars are not all filled once the pass is done"
+        );
+    }
+
+    /// A folder whose index already holds every file in it is fully read and
+    /// fully indexed, and both bars say so. Nothing has to run for that to be
+    /// true, and a bar left empty because no work happened is a lie about a
+    /// folder that is entirely done.
+    #[test]
+    fn a_pass_with_nothing_left_to_do_fills_both_bars_anyway() {
+        let folder = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(folder.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+
+        // Nothing has changed in the folder, so this pass reads nothing.
+        app.start_scan();
+        settle(&mut app);
+        assert!(app.scan.unchanged > 0, "the second pass read the folder again");
+        assert_eq!(app.scan.reading, Stage::Over, "the read bar is not full");
+        assert_eq!(app.scan.writing, Stage::Over, "the indexed bar is not full");
+    }
+
+    /// The listing is not the reading. A pass that is still working out what is
+    /// in the folder has read nothing, and the bar for reading says nothing.
+    #[test]
+    fn listing_the_folder_does_not_move_the_read_bar() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.scan.listing = Some(4000);
+        app.scan.done = 0;
+        app.scan.total = 0;
+        assert_eq!(app.scan.reading, Stage::Waiting, "the reading had not begun");
+
+        // What the pass says when the listing is over: a total to measure the
+        // reading against, and nothing read yet.
+        app.scan.total = 4000;
+        assert_eq!(
+            app.scan.reading,
+            Stage::Waiting,
+            "a total to read is not the same as having read any of it"
         );
     }
 
