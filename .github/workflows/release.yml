@@ -1,8 +1,8 @@
 name: Release
 
-# A tag makes a release: the three platforms build at the same time and their
-# executables go up as one set. Anything else that pushes builds without
-# releasing, so a break is found when it lands rather than at a tag.
+# The three platforms build at the same time and their executables go out as one
+# release: a tag makes a release of its own, and a push to main replaces the one
+# called latest. A pull request builds all three and releases nothing.
 on:
   push:
     tags:
@@ -23,15 +23,15 @@ jobs:
         include:
           - os: windows-latest
             name: windows
-            built: dist/windows/imgdedupe.exe
+            built: imgdedupe.exe
             asset: imgdedupe-windows.exe
           - os: macos-latest
             name: macos
-            built: dist/macos/imgdedupe
+            built: imgdedupe
             asset: imgdedupe-macos
           - os: ubuntu-latest
             name: linux
-            built: dist/*/imgdedupe
+            built: imgdedupe
             asset: imgdedupe-linux
     runs-on: ${{ matrix.os }}
     steps:
@@ -65,13 +65,13 @@ jobs:
         shell: bash
         run: bash build.sh
 
-      # The build names its folder after the platform, and on Linux after the
-      # distribution, so what it wrote is looked up rather than assumed.
+      # The build leaves it at the root under one name on every platform, so
+      # the name that says which platform it came from is put on here.
       - name: Name it for the platform it was built on
         shell: bash
         run: |
           mkdir -p out
-          cp ${{ matrix.built }} "out/${{ matrix.asset }}"
+          cp "${{ matrix.built }}" "out/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -80,9 +80,10 @@ jobs:
           if-no-files-found: error
 
   release:
-    # Only a tag is a release. The rest of the builds are there to say whether
-    # the three platforms still build.
-    if: startsWith(github.ref, 'refs/tags/')
+    # A tag makes a release of its own. A push to main replaces the one called
+    # latest, so the newest build of all three platforms is always downloadable
+    # without waiting for somebody to tag something.
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -96,11 +97,27 @@ jobs:
       - name: Put the three of them out as one release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+            title="$tag"
+          else
+            tag="latest"
+            title="Latest build of main"
+          fi
+
+          # Made once and replaced afterwards, so the three assets of a release
+          # are always from one build rather than from whichever job last
+          # finished.
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$REPO" --target "$GITHUB_SHA" --title "$title"
+          else
+            gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "$title" --generate-notes
+          fi
+
+          gh release upload "$tag" --repo "$REPO" --clobber \
             built/imgdedupe-windows.exe \
             built/imgdedupe-macos \
             built/imgdedupe-linux

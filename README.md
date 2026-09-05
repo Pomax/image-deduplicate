@@ -79,13 +79,13 @@ Requires [Rust](https://rustup.rs).
 
 - `build.bat` on Windows, `build.sh` elsewhere
 
-Output goes to `dist/<platform>/`, with a copy in the repository root for immediate use. On Linux the platform is the distribution's own name, out of `ID` in `/etc/os-release`, because a binary built on one distribution is not a binary for all of them. Release builds use fat LTO, one codegen unit, stripped symbols, `panic = "abort"`, and `opt-level = "z"` for the toolkit crates.
+The executable is left in the repository root and is not committed. Built ones come from the releases. Release builds use fat LTO, one codegen unit, stripped symbols, `panic = "abort"`, and `opt-level = "z"` for the toolkit crates.
 
 On Windows and Linux the result is compressed with UPX if installed. UPX-style binary compression is disallowed by MacOS and so not used on that platform.
 
 ## Releases
 
-`.github/workflows/release.yml` builds all three platforms on GitHub's own runners, each with the build script above, and uses no third-party actions. Pushing a `v*` tag puts the three executables into one release as `imgdedupe-windows.exe`, `imgdedupe-macos` and `imgdedupe-linux`. A push to main or a pull request runs the same three builds without releasing.
+`.github/workflows/release.yml` builds all three platforms on GitHub's own runners, each with the build script above, and uses no third-party actions. The three executables go out together as `imgdedupe-windows.exe`, `imgdedupe-macos` and `imgdedupe-linux`: a `v*` tag makes a release of its own, and a push to main replaces the one called `latest`, so the newest build of all three is always downloadable. A pull request builds all three and releases nothing.
 
 ## Tests
 

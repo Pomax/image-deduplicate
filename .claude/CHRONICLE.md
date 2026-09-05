@@ -467,9 +467,9 @@ The tally in the run log says how many were asked for, how many arrived, how lon
 
 `build.bat` on Windows, `build.sh` elsewhere. Never `cargo build` and the moves by hand.
 
-The script builds the release, moves the binary to `dist/<os>/`, packs it with upx when upx is on the path, and copies it to the repository root. `<os>` is `windows`, `macos` or `linux`, from `uname`. macOS never packs: upx dropped Mach-O support, and a packed binary cannot be signed.
+The script builds the release, moves the binary to the repository root, and packs it with upx when upx is on the path. macOS never packs: upx dropped Mach-O support, and a packed binary cannot be signed.
 
-The root copy is git-ignored; `dist/` is not.
+The binary is not committed. Built ones come from the releases the workflow makes, three platforms at a time: a `v*` tag makes its own, and a push to main replaces the one called `latest`. There was a `dist/<os>/` folder before that workflow existed, and it is gone.
 
 Tests are `cargo test --workspace`. Every test is named for what it proves and appears in `tests.md`; when a test changes, that document changes with it. A check that is worth making once is worth making on every run, so nothing is verified by a throwaway command.
 
@@ -585,7 +585,7 @@ The subset was cut with `pyftsubset` from fonttools, which is not a dependency o
 Nothing below has been tried. It is where to start, not what will happen.
 
 - `./build.sh` and read what the compiler says. The Windows specific code is in `folder_picker.rs`, which has a `cfg(windows)` COM implementation and an `rfd` path for everything else that has never been compiled here.
-- The output goes to `dist/macos/imgdedupe` and is copied to the repository root. It is a plain executable. No bundle, and none is to be created.
+- The output is `imgdedupe` in the repository root. It is a plain executable. No bundle, and none is to be created.
 - The script does not pack on macOS and must not start.
 - `eframe` is built with the `glow` backend and without default features. The `wayland` and `x11` features in the workspace manifest are Linux ones and do nothing there.
 - `trash`, used for the recycle bin destination, has its own macOS implementation. Worth a real test on a real file before trusting it.
@@ -687,7 +687,7 @@ Not decoration. Getting this wrong wastes their time on top of whatever else wen
 - Maker notes are read past rather than into, so the lens and shutter count Canon and Nikon keep in there are not shown.
 - The metadata pane reads the whole file on every click, cached for one file at a time.
 - The window has no icon.
-- The root copy of the binary is git-ignored, so a checkout has `dist/` only until someone runs the build.
+- A checkout has no executable in it at all: the built one is ignored, and the released ones come from the workflow.
 
 ## Where things were on the machine this was written on
 
@@ -704,7 +704,7 @@ Everything described above is in the tree. The Windows build is packed to about 
 
 The suite is 300-odd tests and does not pass: 18 fail, 14 in the core and 4 in the window, all of them in scan, db and the app's own scan handling, and all of them from work committed before this session. They were checked by restoring the pre-session files and running them again, so they are not from anything described above.
 
-macOS and Ubuntu builds arrived from elsewhere while this was being written, and merging them is where `dist/macos`, `dist/ubuntu`, `mesa.rs` and the winit Wayland decoration feature came from. `build.sh` now names its output folder after the distribution rather than calling every Linux the same thing, and `mesa.rs` sets `EGL_LOG_LEVEL` and, where there is no render node under `/dev/dri`, `LIBGL_ALWAYS_SOFTWARE`, so Mesa stops printing driver probes at the console.
+macOS and Ubuntu builds arrived from elsewhere while this was being written, and merging them is where `mesa.rs` and the winit Wayland decoration feature came from. `mesa.rs` sets `EGL_LOG_LEVEL` and, where there is no render node under `/dev/dri`, `LIBGL_ALWAYS_SOFTWARE`, so Mesa stops printing driver probes at the console.
 
 None of this session's own work has been compiled on either. It is not platform-specific: no `cfg(windows)`, no platform APIs, no path assumptions. Two things are worth expecting. The scroll wheel over the metadata list is applied by hand, because egui was not delivering it to that pane on Windows; if it does deliver it elsewhere, that list will scroll twice as fast there. And the Linux job in the workflow installs the X11, Wayland, xkbcommon and GL headers that eframe's glow backend is believed to need, which is a guess until a build proves it.
 
