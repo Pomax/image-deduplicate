@@ -24,15 +24,15 @@ jobs:
           - os: windows-latest
             name: windows
             built: imgdedupe.exe
-            asset: imgdedupe-windows.exe
+            asset: imgdedupe-windows.zip
           - os: macos-latest
             name: macos
             built: imgdedupe
-            asset: imgdedupe-macos
+            asset: imgdedupe-macos.zip
           - os: ubuntu-latest
             name: linux
             built: imgdedupe
-            asset: imgdedupe-linux
+            asset: imgdedupe-linux.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -65,13 +65,23 @@ jobs:
         shell: bash
         run: bash build.sh
 
-      # The build leaves it at the root under one name on every platform, so
-      # the name that says which platform it came from is put on here.
-      - name: Name it for the platform it was built on
+      # The executable keeps the name the build gave it on every platform. What
+      # says where it came from is the zip around it, which is also what keeps
+      # the executable bit through the download on macOS and Linux. The Windows
+      # runner has 7-Zip and no zip, the other two have zip.
+      - name: Zip it under the platform it was built on
+        if: matrix.name == 'windows'
+        shell: cmd
+        run: |
+          mkdir out
+          7z a "out\${{ matrix.asset }}" "${{ matrix.built }}"
+
+      - name: Zip it under the platform it was built on
+        if: matrix.name != 'windows'
         shell: bash
         run: |
           mkdir -p out
-          cp "${{ matrix.built }}" "out/${{ matrix.asset }}"
+          zip -j "out/${{ matrix.asset }}" "${{ matrix.built }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -118,6 +128,6 @@ jobs:
           fi
 
           gh release upload "$tag" --repo "$REPO" --clobber \
-            built/imgdedupe-windows.exe \
-            built/imgdedupe-macos \
-            built/imgdedupe-linux
+            built/imgdedupe-windows.zip \
+            built/imgdedupe-macos.zip \
+            built/imgdedupe-linux.zip

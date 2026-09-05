@@ -85,7 +85,7 @@ On Windows and Linux the result is compressed with UPX if installed. UPX-style b
 
 ## Releases
 
-`.github/workflows/release.yml` builds all three platforms on GitHub's own runners, each with the build script above, and uses no third-party actions. The three executables go out together as `imgdedupe-windows.exe`, `imgdedupe-macos` and `imgdedupe-linux`: a `v*` tag makes a release of its own, and a push to main replaces the one called `latest`, so the newest build of all three is always downloadable. A pull request builds all three and releases nothing.
+`.github/workflows/release.yml` builds all three platforms on GitHub's own runners, each with the build script above, and uses no third-party actions. The three go out together as `imgdedupe-windows.zip`, `imgdedupe-macos.zip` and `imgdedupe-linux.zip`, each holding the executable under its own name, `imgdedupe.exe` on Windows and `imgdedupe` everywhere else: a `v*` tag makes a release of its own, and a push to main replaces the one called `latest`, so the newest build of all three is always downloadable. A pull request builds all three and releases nothing.
 
 ## Tests
 
