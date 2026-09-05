@@ -25,6 +25,12 @@ imgdedupe-core = { path = "../imgdedupe-core", default-features = false, feature
 rfd.workspace = true
 serde_json.workspace = true
 
+# A Wayland compositor that draws no title bar leaves it to the client, and
+# without this winit falls back to a frame whose buttons are plain rectangles.
+# eframe reaches the feature only through winit's defaults, which are off here.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",

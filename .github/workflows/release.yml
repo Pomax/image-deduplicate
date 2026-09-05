@@ -31,7 +31,7 @@ jobs:
             asset: imgdedupe-macos
           - os: ubuntu-latest
             name: linux
-            built: dist/linux/imgdedupe
+            built: dist/*/imgdedupe
             asset: imgdedupe-linux
     runs-on: ${{ matrix.os }}
     steps:
@@ -65,11 +65,13 @@ jobs:
         shell: bash
         run: bash build.sh
 
+      # The build names its folder after the platform, and on Linux after the
+      # distribution, so what it wrote is looked up rather than assumed.
       - name: Name it for the platform it was built on
         shell: bash
         run: |
           mkdir -p out
-          cp "${{ matrix.built }}" "out/${{ matrix.asset }}"
+          cp ${{ matrix.built }} "out/${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -683,7 +683,7 @@ Not decoration. Getting this wrong wastes their time on top of whatever else wen
 - The `-wal` and `-shm` files are handled on the way out, but a process killed outright still leaves them. Nothing cleans them up on the next run.
 - The review list is virtualised; the cleanup list uses row virtualisation too, but `build_plan` still rebuilds the whole plan every frame.
 - There is no way to rename or reorder the previous folders list, and no cap on its length.
-- Nothing has ever been built for Linux or macOS; the release workflow is written but has never run.
+- The release workflow is written and has never run.
 - Maker notes are read past rather than into, so the lens and shutter count Canon and Nikon keep in there are not shown.
 - The metadata pane reads the whole file on every click, cached for one file at a time.
 - The window has no icon.
@@ -704,6 +704,8 @@ Everything described above is in the tree. The Windows build is packed to about 
 
 The suite is 300-odd tests and does not pass: 18 fail, 14 in the core and 4 in the window, all of them in scan, db and the app's own scan handling, and all of them from work committed before this session. They were checked by restoring the pre-session files and running them again, so they are not from anything described above.
 
-Nothing has been compiled for macOS or Linux. None of the work in this session is platform-specific: no `cfg(windows)`, no platform APIs, no path assumptions. What is untested is everything else about those platforms, and two things are worth expecting. The scroll wheel over the metadata list is applied by hand, because egui was not delivering it to that pane on Windows; if it does deliver it elsewhere, that list will scroll twice as fast there. And the Linux workflow installs the X11, Wayland, xkbcommon and GL headers that eframe's glow backend is believed to need, which is a guess until a build proves it.
+macOS and Ubuntu builds arrived from elsewhere while this was being written, and merging them is where `dist/macos`, `dist/ubuntu`, `mesa.rs` and the winit Wayland decoration feature came from. `build.sh` now names its output folder after the distribution rather than calling every Linux the same thing, and `mesa.rs` sets `EGL_LOG_LEVEL` and, where there is no render node under `/dev/dri`, `LIBGL_ALWAYS_SOFTWARE`, so Mesa stops printing driver probes at the console.
+
+None of this session's own work has been compiled on either. It is not platform-specific: no `cfg(windows)`, no platform APIs, no path assumptions. Two things are worth expecting. The scroll wheel over the metadata list is applied by hand, because egui was not delivering it to that pane on Windows; if it does deliver it elsewhere, that list will scroll twice as fast there. And the Linux job in the workflow installs the X11, Wayland, xkbcommon and GL headers that eframe's glow backend is believed to need, which is a guess until a build proves it.
 
 `.github/workflows/release.yml` exists to answer that: three platforms, GitHub's own actions only, one release per `v*` tag. It has never run.

@@ -79,7 +79,7 @@ Requires [Rust](https://rustup.rs).
 
 - `build.bat` on Windows, `build.sh` elsewhere
 
-Output goes to `dist/<platform>/`, with a copy in the repository root for immediate use. Release builds use fat LTO, one codegen unit, stripped symbols, `panic = "abort"`, and `opt-level = "z"` for the toolkit crates.
+Output goes to `dist/<platform>/`, with a copy in the repository root for immediate use. On Linux the platform is the distribution's own name, out of `ID` in `/etc/os-release`, because a binary built on one distribution is not a binary for all of them. Release builds use fat LTO, one codegen unit, stripped symbols, `panic = "abort"`, and `opt-level = "z"` for the toolkit crates.
 
 On Windows and Linux the result is compressed with UPX if installed. UPX-style binary compression is disallowed by MacOS and so not used on that platform.
 

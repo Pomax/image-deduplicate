@@ -14,6 +14,8 @@ use crate::indexer::{self, Run, Update};
 use crate::thumbs::{self, Thumbnails};
 
 pub fn launch() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    crate::mesa::quieten();
     let result = start_window();
     #[cfg(feature = "logging")]
     if let Err(err) = &result {
