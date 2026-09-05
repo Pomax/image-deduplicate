@@ -131,3 +131,15 @@ jobs:
             built/imgdedupe-windows.zip \
             built/imgdedupe-macos.zip \
             built/imgdedupe-linux.zip
+
+          # Uploading replaces an asset of the same name and leaves every other
+          # one where it is, so a release that has been made before still holds
+          # what earlier runs called things. A release holds these three.
+          gh release view "$tag" --repo "$REPO" --json assets \
+            --jq '.assets[].name' |
+          while read -r asset; do
+            case "$asset" in
+              imgdedupe-windows.zip|imgdedupe-macos.zip|imgdedupe-linux.zip) ;;
+              *) gh release delete-asset "$tag" "$asset" --repo "$REPO" --yes ;;
+            esac
+          done
