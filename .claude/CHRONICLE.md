@@ -730,7 +730,7 @@ Not decoration. Getting this wrong wastes their time on top of whatever else wen
 - The release workflow is written and has never run.
 - Maker notes are read past rather than into, so the lens and shutter count Canon and Nikon keep in there are not shown.
 - The metadata pane reads the whole file on every click, cached for one file at a time.
-- The window has no icon.
+- The window has an icon, drawn in `icon.rs` rather than kept as a file. The executable itself has none: that is a resource compiled into the binary and needs a build script, which nobody has asked for.
 - A checkout has no executable in it at all: the built one is ignored, and the released ones come from the workflow.
 
 ## Where things were on the machine this was written on

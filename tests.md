@@ -1413,6 +1413,20 @@ something about a database.
 
 The index lives in the folder it describes.
 
+## crates/imgdedupe/src/icon.rs
+
+### the_icon_holds_the_pixels_it_says_it_does
+
+The icon is the size it tells the window it is, and holds every row of it. One
+that says one size and holds another is not shown at all: the window quietly
+keeps whatever it had.
+
+### the_icon_is_one_picture_over_another
+
+Reads the pixels: the corners are clear, the card is behind everything, the
+picture in front holds its sky, its sun and its hill, and what shows of the one
+behind is an outline with the card inside it.
+
 ## crates/imgdedupe/src/indexer.rs
 
 ### a_pass_reports_what_it_did_and_then_says_it_is_over

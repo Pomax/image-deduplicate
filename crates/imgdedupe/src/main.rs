@@ -9,6 +9,7 @@ mod metadata;
 mod folder_picker;
 mod fonts;
 mod headless;
+mod icon;
 mod indexer;
 #[cfg(target_os = "linux")]
 mod mesa;
