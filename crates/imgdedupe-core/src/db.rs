@@ -27,6 +27,12 @@ pub const INDEX_FILENAME: &str = "imgdedupe.sqlite";
 /// like, and is empty for a picture with nothing corner-shaped in it: a flat
 /// sky, or one out of focus.
 ///
+/// `ignore` holds pairs of pictures that are not to be treated as copies of each
+/// other, lower id first. A set every pair of which is in there is a set the
+/// review shows and the cleanup steps over. The rows go when either file does,
+/// which is what the foreign keys are for: a pair that has lost a side is not a
+/// pair.
+///
 /// `phash_bands` was a table of 128 rows per picture that the search now works
 /// out as it loads, so any file still carrying one is relieved of it.
 ///
@@ -62,6 +68,12 @@ CREATE TABLE IF NOT EXISTS fingerprints (
     dct_hashes          BLOB    NOT NULL,
     ring_stats          BLOB    NOT NULL,
     corners             BLOB    NOT NULL DEFAULT x''
+);
+
+CREATE TABLE IF NOT EXISTS ignore (
+    lower  INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    higher INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    PRIMARY KEY (lower, higher)
 );
 
 DROP TABLE IF EXISTS phash_bands;
@@ -381,7 +393,55 @@ pub fn checkpoint(conn: &Connection) -> Result<()> {
 /// its way around that log. Folding the log back in and taking the database out
 /// of WAL mode is what removes both; deleting them by hand throws away whatever
 /// the log still holds.
+/// The settings a pass writes for itself, which are the truth about the index it
+/// has just built and are not the window's to keep.
+///
+/// `recurse` is how far this pass actually reached; `schema_version` is what
+/// wrote it. Everything else in `meta` is somebody's answer about the folder.
+const THE_PASS_OWNS: [&str; 2] = ["recurse", "schema_version"];
+
+/// Take back everything the window wrote while the pass was running.
+///
+/// The index is read into memory at the start of a pass and the whole of it is
+/// written over the file at the end. Everything the window decides — which sets
+/// are not sets of copies, which ways of matching this folder wants, where a
+/// cleanup sends what it removes — goes straight into the file, because it has to
+/// survive the window being shut. Without this, the pass puts back a copy of the
+/// index from before any of it was written and every one of those answers is
+/// lost, which is what made the checkboxes and the ignored sets come back empty
+/// on the next run.
+///
+/// The file is the authority for all of it: the pass owns the pictures and the
+/// two settings above, and the window owns the rest. A pair whose picture the
+/// pass has just dropped is dropped with it, which is what `OR IGNORE` does with
+/// a pair that has nothing to point at.
+fn keep_what_the_window_wrote(conn: &Connection, path: &Path) {
+    let Ok(file) = open_read_only(path) else {
+        return;
+    };
+    let kept = THE_PASS_OWNS.map(|key| format!("'{key}'")).join(", ");
+    let held: Vec<(String, String)> = file
+        .prepare(&format!("SELECT key, value FROM meta WHERE key NOT IN ({kept})"))
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    let marked = ignored(&file).unwrap_or_default();
+    drop(file);
+
+    if conn.execute(&format!("DELETE FROM meta WHERE key NOT IN ({kept})"), []).is_ok() {
+        for (key, value) in &held {
+            let _ = set_meta(conn, key, value);
+        }
+    }
+    if conn.execute("DELETE FROM ignore", []).is_ok() {
+        let _ = ignore(conn, &marked);
+    }
+}
+
 pub fn close(conn: Connection, path: &Path) -> Result<()> {
+    keep_what_the_window_wrote(&conn, path);
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     // The byte count is only there to be logged, but the write itself is not.
@@ -416,10 +476,20 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
 
 /// Open the index for writing what the review left behind, without touching
 /// anything a scan owns.
+///
+/// The schema is applied here as well as where a pass opens the index. Every
+/// statement in it creates something only if it is not already there, and it is
+/// the only thing that brings an index written by an older build up to date. An
+/// index that has not been scanned since a table was added does not have that
+/// table: a pass works on a copy in memory and only writes it back when it
+/// changed something, so a folder where nothing has moved never gets one. Without
+/// this, every write the review makes to such an index fails on a table that is
+/// not there.
 pub fn open_for_notes(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("opening index at {} to write to", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.execute_batch(SCHEMA).context("applying the schema")?;
     Ok(conn)
 }
 
@@ -544,6 +614,108 @@ pub fn delete_paths(tx: &Transaction<'_>, paths: &[String]) -> Result<usize> {
         removed += statement.execute(params![path])?;
     }
     Ok(removed)
+}
+
+/// One pair of pictures that are not copies of each other, lower id first, which
+/// is how they are stored and how they are asked for.
+pub fn pair(one: i64, other: i64) -> (i64, i64) {
+    (one.min(other), one.max(other))
+}
+
+/// Write down that these pairs are not copies of each other. Saying it twice is
+/// saying it once: the pair is the key.
+pub fn ignore(conn: &Connection, pairs: &[(i64, i64)]) -> Result<()> {
+    let mut statement =
+        conn.prepare_cached("INSERT OR IGNORE INTO ignore (lower, higher) VALUES (?1, ?2)")?;
+    for (one, other) in pairs {
+        let (lower, higher) = pair(*one, *other);
+        statement.execute(params![lower, higher])?;
+    }
+    Ok(())
+}
+
+/// Take those pairs back: they are copies of each other after all. A pair that
+/// was never written down is nothing to take back.
+pub fn unignore(conn: &Connection, pairs: &[(i64, i64)]) -> Result<()> {
+    let mut statement =
+        conn.prepare_cached("DELETE FROM ignore WHERE lower = ?1 AND higher = ?2")?;
+    for (one, other) in pairs {
+        let (lower, higher) = pair(*one, *other);
+        statement.execute(params![lower, higher])?;
+    }
+    Ok(())
+}
+
+/// Every pair that has been ignored.
+///
+/// An index written before there was such a thing has no table to read, which is
+/// not a failure: it is a folder where nothing has been ignored.
+pub fn ignored(conn: &Connection) -> Result<Vec<(i64, i64)>> {
+    let table = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ignore'");
+    let known = match table {
+        Ok(mut statement) => statement.exists([])?,
+        Err(_) => false,
+    };
+    if !known {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare("SELECT lower, higher FROM ignore")?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+#[cfg(test)]
+mod ignoring {
+    use super::*;
+
+    /// A pair is written down once whichever way round it is given, and comes
+    /// back the same way. Saying it twice says it once.
+    #[test]
+    fn a_pair_is_the_same_pair_either_way_round() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        let conn = open(&path).expect("open");
+        conn.execute_batch(
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_ns, last_scanned_at)
+             VALUES (7, 'a.jpg', 1, 1, 1), (9, 'b.jpg', 1, 1, 1), (11, 'c.jpg', 1, 1, 1)",
+        )
+        .expect("files");
+
+        ignore(&conn, &[(9, 7), (7, 9), (11, 7)]).expect("ignore");
+        let mut held = ignored(&conn).expect("read");
+        held.sort();
+        assert_eq!(held, vec![(7, 9), (7, 11)]);
+    }
+
+    /// A file that is gone takes its pairs with it: a pair with one side left is
+    /// not a pair.
+    #[test]
+    fn a_pair_goes_when_either_of_its_pictures_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        let conn = open(&path).expect("open");
+        conn.execute_batch(
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_ns, last_scanned_at)
+             VALUES (1, 'a.jpg', 1, 1, 1), (2, 'b.jpg', 1, 1, 1)",
+        )
+        .expect("files");
+        ignore(&conn, &[(1, 2)]).expect("ignore");
+        assert_eq!(ignored(&conn).expect("read").len(), 1);
+
+        conn.execute_batch("DELETE FROM files WHERE id = 2").expect("delete");
+        assert!(ignored(&conn).expect("read").is_empty(), "the pair outlived its picture");
+    }
+
+    /// An index written before there was such a table has nothing ignored,
+    /// which is an answer rather than a failure.
+    #[test]
+    fn an_index_without_the_table_has_nothing_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        let conn = open(&path).expect("open");
+        conn.execute_batch("DROP TABLE ignore").expect("drop");
+        assert!(ignored(&conn).expect("read").is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -685,11 +857,15 @@ mod tests {
         {
             let conn = open(&path).expect("create");
             set_meta(&conn, "schema_version", "99").expect("bump");
+            close(conn, &path).expect("write it out");
         }
         let err = open(&path).expect_err("should refuse");
         assert!(err.to_string().contains("schema version 99"), "{err}");
     }
 
+    /// An index with `count` rows in it, on disk. The index is worked on in
+    /// memory and becomes a file when it is closed, so anything that reads the
+    /// file has to close it first.
     fn fill(path: &Path, count: usize) {
         let mut conn = open(path).expect("create");
         let tx = conn.transaction().expect("begin");
@@ -702,6 +878,7 @@ mod tests {
             .expect("insert");
         }
         tx.commit().expect("commit");
+        close(conn, path).expect("write it out");
     }
 
     fn count_files(path: &Path) -> i64 {
@@ -729,6 +906,7 @@ mod tests {
                 (0..3000).map(|index| format!("a-fairly-long-path-name/{index}.jpeg")).collect();
             assert_eq!(delete_paths(&tx, &paths).expect("delete"), 3000);
             tx.commit().expect("commit");
+            close(conn, &path).expect("write it out");
         }
         compact(&path).expect("compact");
 
@@ -765,37 +943,113 @@ mod tests {
         assert_eq!(count_files(&path), 100);
     }
 
-    /// The rows written since the last checkpoint are in the log beside the
-    /// index, not in the index. Compacting has to carry them over, and must not
-    /// leave the old log where it would be applied to the file that replaces it.
+    /// An index is worked on in memory and reaches its file when it is closed.
+    /// Nothing a pass writes is on disk before that, and everything it wrote is
+    /// on disk after it, whether the file was there to begin with or not.
     #[test]
-    fn compacting_keeps_the_rows_that_are_still_only_in_the_write_ahead_log() {
+    fn what_is_written_reaches_the_file_when_the_index_is_closed_and_not_before() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        fill(&path, 20);
+        assert_eq!(count_files(&path), 20, "the fixture wrote no index");
+
+        let conn = open(&path).expect("open");
+        conn.execute(
+            "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+             VALUES ('written-late.jpeg', 1, 1, 1)",
+            [],
+        )
+        .expect("insert");
+        assert_eq!(count_files(&path), 20, "the row reached the file before it was closed");
+
+        close(conn, &path).expect("close");
+        assert_eq!(count_files(&path), 21, "the row written last was lost");
+    }
+
+    /// A pass reads the index into memory and writes the whole of it back over
+    /// the file. A set marked as not a set of copies goes straight into the file,
+    /// so a pass that started before the button was pressed must not put back a
+    /// copy of the index that never had it.
+    #[test]
+    fn writing_the_index_out_keeps_the_pairs_marked_while_it_was_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        {
+            let mut conn = open(&path).expect("create");
+            let tx = conn.transaction().expect("tx");
+            for name in ["a.jpg", "b.jpg"] {
+                upsert(&tx, &record(name, 1), 1).expect("insert");
+            }
+            tx.commit().expect("commit");
+            close(conn, &path).expect("write it out");
+        }
+
+        // A pass, holding the index in memory from before any of this.
+        let held = open(&path).expect("open");
+
+        // The window, marking a set while that pass runs.
+        let window = open_for_notes(&path).expect("open");
+        ignore(&window, &[pair(1, 2)]).expect("ignore");
+        drop(window);
+
+        // The pass finishes and writes its copy out.
+        close(held, &path).expect("close");
+
+        let file = open_read_only(&path).expect("reopen");
+        assert_eq!(
+            ignored(&file).expect("read"),
+            vec![pair(1, 2)],
+            "the pass wrote over what the window had marked"
+        );
+    }
+
+    /// And taking a pair back while a pass runs sticks, too: the file is what
+    /// says which pairs there are, not the copy the pass has been holding.
+    #[test]
+    fn writing_the_index_out_keeps_the_pairs_taken_back_while_it_was_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        {
+            let mut conn = open(&path).expect("create");
+            let tx = conn.transaction().expect("tx");
+            for name in ["a.jpg", "b.jpg"] {
+                upsert(&tx, &record(name, 1), 1).expect("insert");
+            }
+            ignore(&tx, &[pair(1, 2)]).expect("ignore");
+            tx.commit().expect("commit");
+            close(conn, &path).expect("write it out");
+        }
+
+        let held = open(&path).expect("open");
+        assert_eq!(ignored(&held).expect("read"), vec![pair(1, 2)], "the pass read no pairs");
+
+        let window = open_for_notes(&path).expect("open");
+        unignore(&window, &[pair(1, 2)]).expect("unignore");
+        drop(window);
+
+        close(held, &path).expect("close");
+
+        let file = open_read_only(&path).expect("reopen");
+        assert!(ignored(&file).expect("read").is_empty(), "the pair the window took back came back");
+    }
+
+    /// Compacting is over a file, and a file is what an index that has been
+    /// closed is. What was in it stays in it.
+    #[test]
+    fn compacting_keeps_every_row_the_index_was_closed_with() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
         fill(&path, 20);
 
-        {
-            let conn = open(&path).expect("open");
-            conn.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
-                 VALUES ('written-late.jpeg', 1, 1, 1)",
-                [],
-            )
-            .expect("insert");
-            let log = log_beside(&path);
-            assert!(log.exists(), "the fixture never wrote a log");
-            assert!(std::fs::metadata(&log).expect("stat").len() > 0);
-        }
-
         compact(&path).expect("compact");
 
-        assert!(!log_beside(&path).exists(), "the old log was left beside the new index");
-        assert_eq!(count_files(&path), 21, "the rows in the log were lost");
+        assert!(!log_beside(&path).exists(), "a write-ahead log was left beside the index");
+        assert_eq!(count_files(&path), 20, "compacting lost rows");
     }
 
-    /// An index that has been closed is one file. The write-ahead log and the
-    /// shared-memory file beside it are what a database in WAL mode keeps while
-    /// it is open, and both go when it is closed.
+    /// An index that has been closed is one file. A write-ahead log and the
+    /// shared-memory file beside it are what an older build left while it held
+    /// the index open, and closing an index clears both.
     #[test]
     fn closing_an_index_leaves_one_file_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -805,7 +1059,10 @@ mod tests {
         let tx = conn.transaction().expect("tx");
         upsert(&tx, &record("a.jpg", 1), 1).expect("insert");
         tx.commit().expect("commit");
-        assert!(log_beside(&path).exists(), "WAL mode wrote no log to close");
+        assert!(!path.exists(), "the index was written before it was closed");
+        // As an older build would have left them.
+        std::fs::write(log_beside(&path), b"stale log").expect("fixture");
+        std::fs::write(index_beside(&path), b"stale shared memory").expect("fixture");
 
         close(conn, &path).expect("close");
         assert!(path.is_file());

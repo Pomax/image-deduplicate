@@ -25,6 +25,10 @@ pub struct Thresholds {
     /// Look for one picture inside another: the corners. This is what finds a
     /// crop, and it is most of what a search spends its time on.
     pub corners: bool,
+    /// Only compare pictures that are in the same folder. A folder scanned with
+    /// its subfolders is then searched one folder at a time, and two copies of a
+    /// picture filed in two places are left where they are.
+    pub within_a_folder: bool,
 }
 
 /// The largest distance the band lookup is guaranteed to find.
@@ -94,6 +98,7 @@ impl Thresholds {
             ignore_colour: false,
             whole_frame: true,
             corners: true,
+            within_a_folder: false,
         }
     }
 
@@ -435,6 +440,8 @@ fn pairs_by_corner(
     of: &[u32],
     stopped: &(dyn Fn() -> bool + Sync),
     report: &(dyn Fn(Progress) + Sync),
+    looked: &AtomicU64,
+    to_look: u64,
 ) -> Vec<(u32, u32)> {
     // An entry is a picture and one of its corners in one number, which stops
     // being true at a folder of thirty three million pictures. Nothing else
@@ -455,15 +462,13 @@ fn pairs_by_corner(
         1 << bits,
         most_in_a_bucket
     );
-    let looked = AtomicU64::new(0);
-    report(Progress::Shortlisting { done: 0, total: of.len() as u64 });
     of.par_iter()
         .flat_map_iter(|id| {
             let mut agreeing: std::collections::HashMap<u32, u64> =
                 std::collections::HashMap::new();
             let done = looked.fetch_add(1, Ordering::Relaxed) + 1;
-            if done % SHORTLIST_REPORT_EVERY == 0 || done == of.len() as u64 {
-                report(Progress::Shortlisting { done, total: of.len() as u64 });
+            if done % SHORTLIST_REPORT_EVERY == 0 || done == to_look {
+                report(Progress::Shortlisting { done, total: to_look });
             }
             if !stopped() {
                 let asking = images[*id as usize].corners.iter().take(QUICK_CORNERS);
@@ -517,17 +522,49 @@ struct Identity {
     ring: Vec<u32>,
     width: u32,
     height: u32,
+    /// The folder it is in, when a search only matches inside one. Two copies of
+    /// a picture in two folders are then two pictures, not one standing for the
+    /// other: folded together they would come back as one set spanning both.
+    folder: Option<String>,
 }
 
 impl Identity {
-    fn of(image: &Image) -> Identity {
+    fn of(image: &Image, within_a_folder: bool) -> Identity {
         Identity {
             variants: image.variants,
             ring: image.ring.iter().map(|value| value.to_bits()).collect(),
             width: image.width,
             height: image.height,
+            folder: within_a_folder.then(|| folder_of(&image.rel_path).to_string()),
         }
     }
+}
+
+/// The folder a file is in, as the index writes paths: separated by forward
+/// slashes, and relative to the folder that was scanned. Everything up to the
+/// last of them, which is nothing at all for a file in the folder itself.
+fn folder_of(rel_path: &str) -> &str {
+    match rel_path.rfind('/') {
+        Some(at) => &rel_path[..at],
+        None => "",
+    }
+}
+
+/// The searches to run: one per folder when a search is held to folders, and
+/// one holding everything when it is not.
+///
+/// In folder order, so a run reads the same way twice and a log of one can be
+/// compared with a log of another.
+fn by_folder(images: &[Image], of: Vec<u32>, within_a_folder: bool) -> Vec<Vec<u32>> {
+    if !within_a_folder {
+        return vec![of];
+    }
+    let mut folders: std::collections::BTreeMap<&str, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for id in of {
+        folders.entry(folder_of(&images[id as usize].rel_path)).or_default().push(id);
+    }
+    folders.into_values().collect()
 }
 
 /// Group the images that are indistinguishable to the comparison.
@@ -540,15 +577,15 @@ impl Identity {
 /// This is what keeps a folder holding many copies of one picture cheap. Those
 /// copies all land in the same band bucket, and comparing a bucket is comparing
 /// everything in it to everything else in it.
-fn fold_identical(images: &[Image]) -> Vec<Vec<u32>> {
+fn fold_identical(images: &[Image], within_a_folder: bool) -> Vec<Vec<u32>> {
     let mut known: std::collections::HashMap<Identity, usize> =
         std::collections::HashMap::with_capacity(images.len());
     let mut groups: Vec<Vec<u32>> = Vec::with_capacity(images.len());
     for (position, image) in images.iter().enumerate() {
-        match known.get(&Identity::of(image)) {
+        match known.get(&Identity::of(image, within_a_folder)) {
             Some(group) => groups[*group].push(position as u32),
             None => {
-                known.insert(Identity::of(image), groups.len());
+                known.insert(Identity::of(image, within_a_folder), groups.len());
                 groups.push(vec![position as u32]);
             }
         }
@@ -559,6 +596,11 @@ fn fold_identical(images: &[Image]) -> Vec<Vec<u32>> {
 /// Whether a candidate pair really is the same picture. `a` is the one with the
 /// lower file id, which is the side that contributes all eight of its variants.
 fn is_match(a: &Image, b: &Image, thresholds: Thresholds) -> bool {
+    // A search that only matches inside a folder compares nothing across two of
+    // them, however alike the two pictures are.
+    if thresholds.within_a_folder && folder_of(&a.rel_path) != folder_of(&b.rel_path) {
+        return false;
+    }
     (thresholds.whole_frame && whole_frame_match(a, b, thresholds))
         || (thresholds.corners && same_picture_inside(a, b))
 }
@@ -737,6 +779,7 @@ mod search_reports {
     /// whatever the pass had last put there for the whole of the search. Reading
     /// the index is most of that on a folder that is not on this machine.
     #[test]
+    #[ignore = "searches the real index at IMGDEDUPE_TEST_FOLDER"]
     fn a_search_reports_while_it_runs() {
         let Some(folder) = std::env::var_os("IMGDEDUPE_TEST_FOLDER").map(std::path::PathBuf::from)
         else {
@@ -826,7 +869,7 @@ pub fn find_sets_in(
         return Ok(None);
     }
 
-    let families = fold_identical(&images);
+    let families = fold_identical(images, thresholds.within_a_folder);
     let one_of_each: Vec<u32> = families.iter().map(|family| family[0]).collect();
     crate::log_line!(
         "search folding: {} images are {} different pictures",
@@ -834,32 +877,47 @@ pub fn find_sets_in(
         one_of_each.len()
     );
 
+    // A search held to folders is not one search with pairs thrown away at the
+    // end of it: it is a search of each folder, with its own index of hashes and
+    // its own index of corners, holding what that folder holds and nothing else.
+    // Smaller structures, and pictures in another folder are never candidates in
+    // the first place.
+    let searches = by_folder(images, one_of_each, thresholds.within_a_folder);
+    crate::log_line!("search: {} folder(s) to look through", searches.len());
+
+    let mut candidates: Vec<(u32, u32)> = Vec::new();
     // Each way of matching draws up its own shortlist, and a way that is turned
     // off draws up none: there is nothing to be gained by shortlisting pairs for
     // a test that is not going to be made.
-    let by_band: Vec<Vec<(u32, u32)>> = (0..fingerprint::BANDS)
-        .into_par_iter()
-        .map(|band| {
-            if stopped() || !thresholds.whole_frame {
-                return Vec::new();
-            }
-            pairs_in_band(&images, &one_of_each, band)
-        })
-        .collect();
+    for of in &searches {
+        let by_band: Vec<Vec<(u32, u32)>> = (0..fingerprint::BANDS)
+            .into_par_iter()
+            .map(|band| {
+                if stopped() || !thresholds.whole_frame {
+                    return Vec::new();
+                }
+                pairs_in_band(images, of, band)
+            })
+            .collect();
+        candidates.extend(by_band.concat());
+    }
     if stopped() {
         return Ok(None);
     }
-
-    let mut candidates: Vec<(u32, u32)> = by_band.concat();
     #[cfg(feature = "logging")]
     timing.step("banding", candidates.len(), "candidate pairs");
+
     // The second way in: pictures holding some of the same corners. The bands
     // above only ever put together pictures that fill the frame the same way.
-    let by_corner = if thresholds.corners {
-        pairs_by_corner(images, &one_of_each, &stopped, report)
-    } else {
-        Vec::new()
-    };
+    let looked = AtomicU64::new(0);
+    let to_look: u64 = searches.iter().map(|of| of.len() as u64).sum();
+    report(Progress::Shortlisting { done: 0, total: to_look });
+    let mut by_corner = Vec::new();
+    if thresholds.corners {
+        for of in &searches {
+            by_corner.extend(pairs_by_corner(images, of, &stopped, report, &looked, to_look));
+        }
+    }
     #[cfg(feature = "logging")]
     timing.step("corners", by_corner.len(), "candidate pairs");
     candidates.extend(by_corner);
@@ -1197,6 +1255,7 @@ mod tests {
                 ignore_colour: true,
                 whole_frame: true,
                 corners: true,
+                within_a_folder: false,
             },
         )
         .expect("find");
@@ -1218,6 +1277,7 @@ mod tests {
                 ignore_colour: false,
                 whole_frame: true,
                 corners: true,
+                within_a_folder: false,
             },
         )
         .expect("find");
@@ -1231,6 +1291,7 @@ mod tests {
                 ignore_colour: true,
                 whole_frame: true,
                 corners: true,
+                within_a_folder: false,
             },
         )
         .expect("find");
@@ -1421,7 +1482,7 @@ mod tests {
 
         let never = AtomicBool::new(false);
         let images = load_images(&conn, &never, &|_| {}).expect("load").expect("not cancelled");
-        let families = fold_identical(&images);
+        let families = fold_identical(&images, false);
         assert_eq!(families.len(), 2, "the copies were not folded together");
         assert_eq!(
             families.iter().map(|family| family.len()).max(),
@@ -1446,7 +1507,7 @@ mod tests {
 
         let never = AtomicBool::new(false);
         let images = load_images(&conn, &never, &|_| {}).expect("load").expect("not cancelled");
-        assert_eq!(fold_identical(&images).len(), 2, "two shapes were folded into one");
+        assert_eq!(fold_identical(&images, false).len(), 2, "two shapes were folded into one");
         assert!(find_sets(&conn, Thresholds::preset("balanced")).expect("search").is_empty());
     }
 
@@ -1476,6 +1537,7 @@ mod tests {
                 ignore_colour: true,
                 whole_frame: true,
                 corners: true,
+                within_a_folder: false,
             };
         let found = find_sets(&conn, thresholds).expect("search");
 

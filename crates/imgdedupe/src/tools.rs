@@ -306,7 +306,9 @@ mod tests {
             )
             .expect("insert");
         }
-        drop(conn);
+        // The index is worked on in memory, so closing it is what makes it a file
+        // for the cleanup to open.
+        db::close(conn, &db_path).expect("write it out");
 
         let dropped = forget(&db_path, &[String::from("small, odd.jpg")]).expect("forget");
         assert_eq!(dropped, 1);

@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
-cd "$(dirname "$0")"
+# The repository, which is where cargo has to be run from and where the built
+# executable belongs. This script lives in a directory of its own under it.
+cd "$(dirname "$0")/.."
 
 # With --test the binary understands --log and writes a run log. Without it none
 # of that code is compiled in: the flag, the file, and every line the program
@@ -17,11 +19,13 @@ if [ $# -gt 0 ]; then
     fi
 fi
 
-# The one at the root goes first, or the move that follows would be onto the same
-# file cargo hard linked it from, which is refused.
-rm -f imgdedupe
-
 cargo build --release --workspace $features
+
+# The one at the root goes, or the move that follows would be onto the same file
+# cargo hard linked it from, which is refused. A run that is going does not
+# notice: on these systems a program holds the file it was started from, not the
+# name, and the name is all that is being taken away.
+rm -f imgdedupe
 
 # Cargo hard links the binary to a second name under deps. Dropping that name
 # leaves the one at the root as the only one for it. Cargo links it again next

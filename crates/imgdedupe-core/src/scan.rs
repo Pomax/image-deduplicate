@@ -139,6 +139,20 @@ struct Candidate {
 /// Reports as it goes. On a folder the machine has to ask another machine about,
 /// listing it is one call per file and most of the pass, and it used to say
 /// nothing from the first file to the last.
+/// Whether a folder is one a pass over the subfolders does not go into.
+///
+/// A name beginning with a dot is a folder something else keeps its workings in:
+/// `.git`, `.thumbnails`, `.cache`. One beginning with an at sign is what network
+/// storage puts its own beside a share: `@eaDir`, `@Recycle`. What is in them
+/// belongs to the thing that made them, not to whoever is looking for their own
+/// pictures, and both are full of copies of pictures that are already elsewhere.
+///
+/// The folder the pass was pointed at is not tested: somebody who asks for
+/// `.private` means it.
+fn kept_out(name: &str) -> bool {
+    name.starts_with('.') || name.starts_with('@')
+}
+
 fn walk(
     options: &Options,
     cancel: &AtomicBool,
@@ -182,7 +196,7 @@ fn walk(
                 return Ok(out);
             }
             if entry.is_dir {
-                if options.recurse {
+                if options.recurse && !kept_out(&entry.name) {
                     queue.push(dir.join(&entry.name));
                 }
                 continue;
@@ -729,9 +743,13 @@ pub fn run(
             let count = done.fetch_add(1, Ordering::Relaxed) + 1;
             // On a timer, not on a count of files. Whichever thread crosses the
             // interval first takes the report and the others carry on reading.
+            // The first file is announced whenever it lands, so a pass says
+            // something about what it is reading before any interval has passed,
+            // however few files there are or however fast they come.
             let now = started.elapsed().as_millis() as u64;
             let last = reported.load(Ordering::Relaxed);
-            let due = now.saturating_sub(last) >= REPORT_AFTER.as_millis() as u64;
+            let due =
+                count == 1 || now.saturating_sub(last) >= REPORT_AFTER.as_millis() as u64;
             if due
                 && reported
                     .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
@@ -895,6 +913,43 @@ mod tests {
         assert_eq!(names, vec!["cropped.png", "whole.png"]);
     }
 
+    /// A folder with the same picture in two of its subfolders, searched one
+    /// folder at a time. Copies that sit together are still one set; copies in
+    /// two places are two pictures and are never put together, however
+    /// identical they are.
+    #[test]
+    fn matching_within_folders_never_puts_two_folders_together() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.dir.path().join("one")).expect("subfolder");
+        std::fs::create_dir_all(fx.dir.path().join("two")).expect("subfolder");
+        write_detailed(&fx.dir.path().join("one/picture.png"), 400, 300, 7);
+        write_detailed(&fx.dir.path().join("one/copy.png"), 400, 300, 7);
+        write_detailed(&fx.dir.path().join("two/picture.png"), 400, 300, 7);
+
+        let mut options = fx.options.clone();
+        options.recurse = true;
+        let mut conn = db::open(&options.db_path).expect("open");
+        let cancel = AtomicBool::new(false);
+        let (summary, _) = run(&mut conn, &options, &cancel, &|_| {}).expect("scan");
+        assert_eq!(summary.indexed, 3);
+
+        // The whole folder at once: all three are one set.
+        let together = crate::matching::find_sets(&conn, crate::matching::Thresholds::at(15.0))
+            .expect("search");
+        assert_eq!(together.len(), 1, "the three copies were not one set: {together:?}");
+        assert_eq!(together[0].members.len(), 3);
+
+        // One folder at a time: only the two that share a folder.
+        let mut thresholds = crate::matching::Thresholds::at(15.0);
+        thresholds.within_a_folder = true;
+        let apart = crate::matching::find_sets(&conn, thresholds).expect("search");
+        assert_eq!(apart.len(), 1, "the copies in one folder were lost: {apart:?}");
+        let mut names: Vec<&str> =
+            apart[0].members.iter().map(|member| member.rel_path.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["one/copy.png", "one/picture.png"]);
+    }
+
     /// The same folder searched with the corners switched off. Matching one
     /// picture inside another is what finds a crop and it is most of what a
     /// search costs, so it can be left out, and then the crop is not found.
@@ -1004,6 +1059,9 @@ mod tests {
         Fixture { dir, options }
     }
 
+    /// One pass, ending the way the application ends one: the index is worked on
+    /// in memory and written out as a file when the pass is over, so the pass
+    /// after this one finds what this one wrote.
     fn scan(fixture: &Fixture) -> (Summary, Vec<Event>) {
         let mut conn = db::open(&fixture.options.db_path).expect("open");
         let events = std::sync::Mutex::new(Vec::new());
@@ -1012,6 +1070,7 @@ mod tests {
             events.lock().unwrap().push(event);
         })
         .expect("scan");
+        db::close(conn, &fixture.options.db_path).expect("close");
         (summary, events.into_inner().unwrap())
     }
 
@@ -1039,7 +1098,14 @@ mod tests {
             .collect();
         assert!(reported.len() >= 2, "indexing was only reported once, at the end");
         let (done, total) = reported[0];
-        assert_eq!(done, REPORT_EVERY, "the first report said nothing had been indexed");
+        // Reports come every `REPORT_EVERY` files or every `REPORT_AFTER`,
+        // whichever falls first, so what the first one lands on is a count of the
+        // files read by then and not a fixed number. What it may not be is
+        // nothing, or the whole folder.
+        assert!(
+            done > 0 && done < pictures as u64,
+            "the first report said {done} of {pictures}, which is not a report from part way"
+        );
         // The folder holds one file that is not a picture, and the total only
         // loses it once a reader has looked at it.
         assert!(
@@ -1225,6 +1291,53 @@ mod tests {
         assert_eq!(summary.failed, 1);
         let reported = events.iter().any(|e| matches!(e, Event::Error { path, .. } if path == "bad.png"));
         assert!(reported, "the failure was not reported");
+    }
+
+    /// A pass over the subfolders goes into the folders somebody keeps their
+    /// pictures in, and not into the ones something else keeps its workings in.
+    /// A name beginning with a dot or an at sign is one of those.
+    #[test]
+    fn a_pass_over_the_subfolders_stays_out_of_dot_and_at_folders() {
+        let fx = fixture();
+        write_image(&fx.dir.path().join("top.png"), 32, 32, 0);
+        for folder in [".git", ".thumbnails", "@eaDir", "keep me"] {
+            std::fs::create_dir(fx.dir.path().join(folder)).expect("mkdir");
+            write_image(&fx.dir.path().join(folder).join("deep.png"), 32, 32, 5);
+        }
+        // And a folder inside one that is kept out is kept out with it.
+        std::fs::create_dir(fx.dir.path().join("@eaDir").join("under")).expect("mkdir");
+        write_image(&fx.dir.path().join("@eaDir").join("under").join("deeper.png"), 32, 32, 6);
+
+        let (summary, _) = scan(&fx);
+        assert_eq!(summary.indexed, 2, "the pass did not index the two it was meant to");
+
+        let conn = db::open(&fx.options.db_path).expect("open");
+        let mut paths: Vec<String> = conn
+            .prepare("SELECT rel_path FROM files")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        paths.sort();
+        assert_eq!(paths, vec!["keep me/deep.png".to_string(), "top.png".to_string()]);
+    }
+
+    /// The folder somebody points the window at is the folder they meant, whether
+    /// or not its name begins with a dot.
+    #[test]
+    fn the_folder_the_pass_was_pointed_at_is_scanned_whatever_it_is_called() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(".private");
+        std::fs::create_dir(&root).expect("mkdir");
+        write_image(&root.join("a.png"), 32, 32, 0);
+        let db_path = root.join(db::INDEX_FILENAME);
+        let options = Options { root: root.clone(), db_path: db_path.clone(), recurse: true };
+
+        let mut conn = db::open(&db_path).expect("open");
+        let cancel = AtomicBool::new(false);
+        let (summary, _) = run(&mut conn, &options, &cancel, &|_| {}).expect("scan");
+        assert_eq!(summary.indexed, 1, "the folder it was pointed at was skipped");
     }
 
     #[test]

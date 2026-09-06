@@ -57,6 +57,21 @@ The destination a cleanup starts on is the one that can be undone.
 
 ## crates/imgdedupe-core/src/db.rs
 
+### a_pair_is_the_same_pair_either_way_round
+
+A pair of pictures said not to be copies is written down lower id first, whichever
+way round it was given, and saying it twice says it once.
+
+### a_pair_goes_when_either_of_its_pictures_does
+
+Deleting one of the two files takes the pair with it: a pair with one side left
+is not a pair.
+
+### an_index_without_the_table_has_nothing_ignored
+
+An index written before there was such a table reads back as a folder where
+nothing has been ignored, rather than as a failure.
+
 ### a_file_id_is_reused_after_the_rows_above_it_are_deleted
 
 SQLite hands a deleted row's id to the next file inserted. This is why nothing
@@ -101,16 +116,33 @@ it was.
 
 A half-written copy from an earlier attempt is cleared rather than reused.
 
-### compacting_keeps_the_rows_that_are_still_only_in_the_write_ahead_log
+### what_is_written_reaches_the_file_when_the_index_is_closed_and_not_before
 
-The tail of the index lives in the log beside it, so the copy is not a copy of
-everything without it.
+An index is worked on in memory. A row inserted into an open index is not in the
+file beside it, and is in the file the moment the index is closed.
+
+### writing_the_index_out_keeps_the_pairs_marked_while_it_was_open
+
+A pass reads the index into memory and writes the whole of it back over the file,
+and a set marked as not a set of copies goes straight into the file. A pass that
+started before the button was pressed writes its copy out and the pair is still
+there.
+
+### writing_the_index_out_keeps_the_pairs_taken_back_while_it_was_open
+
+The same the other way round: a pair taken back while a pass was running stays
+taken back, rather than coming back from the copy the pass was holding.
+
+### compacting_keeps_every_row_the_index_was_closed_with
+
+Compacting is over a file, and a file is what a closed index is. Everything in it
+is still in it afterwards, with no log left beside it.
 
 ### closing_an_index_leaves_one_file_behind
 
-A closed index is one file. The write-ahead log and the shared-memory file that a
-database in WAL mode keeps while it is open both go when it is closed, and what
-was written is still there afterwards.
+A closed index is one file. A write-ahead log and a shared-memory file left beside
+it by an older build that held the index open are cleared when it is closed, and
+what was written is still there afterwards.
 
 ### a_fresh_index_records_its_schema_version
 
@@ -399,6 +431,9 @@ A cut-off file gives an answer rather than crashing the pass.
 
 ### a_search_reports_while_it_runs
 
+Ignored unless it is asked for by name: it searches the real index in the folder
+`IMGDEDUPE_TEST_FOLDER` names.
+
 A search says what it is doing while it does it: reading the index, then comparing
 pairs, then grouping. It used to say nothing at all until it had the answer, so
 the window sat on whatever the pass had last put there for the whole of it. It
@@ -684,14 +719,18 @@ A log line written before logging was turned on is dropped quietly.
 
 Indexing is reported as it happens rather than once at the end, and a second pass
 over a folder that is already indexed reports the whole folder as indexed. Both
-halves run a real pass over a folder of pictures.
+halves run a real pass over a folder of pictures. Reports come every two hundred
+files or every tenth of a second, whichever falls first, so the first one is
+checked for being part way through rather than for a particular count.
 
 ### what_was_left_alone_is_reported_from_the_first_tick
 
 A second pass over a folder with unchanged files, new files and a removed file.
 Every progress report the pass makes, from the first one, carries the full
 unchanged and removed counts, because they are known before any file is read.
-Nothing about them waits for the end.
+Nothing about them waits for the end. Reports come on a timer, and the first file
+read is announced whenever it lands rather than waiting for one, so a pass over a
+folder that finishes inside the interval still reports while it works.
 
 ### a_first_pass_indexes_every_image
 
@@ -720,6 +759,17 @@ broken.
 
 A broken picture is reported by name and the pass carries on.
 
+### a_pass_over_the_subfolders_stays_out_of_dot_and_at_folders
+
+A folder whose name begins with a dot or an at sign is something else's
+workings — `.git`, `.thumbnails`, `@eaDir` — and a pass over the subfolders does
+not go into one, nor into anything under it.
+
+### the_folder_the_pass_was_pointed_at_is_scanned_whatever_it_is_called
+
+The folder somebody points the window at is the folder they meant. A pass over
+`.private` reads what is in it.
+
 ### without_recurse_subfolders_are_not_walked
 
 A pass over the folder alone does not descend, and how far it reached is written
@@ -737,6 +787,12 @@ searches. The crop and the picture are one set and the third file is on its own.
 The whole-frame hash cannot do this: cropping stretches a different region over
 the same square and every number in it changes at once, while the corners the
 crop kept are still where they were.
+
+### matching_within_folders_never_puts_two_folders_together
+
+A folder with the same picture in two of its subfolders and a copy beside one of
+them. Searched whole, all three are one set; searched one folder at a time, only
+the two that share a folder are, and the third is left where it is.
 
 ### with_the_corners_switched_off_a_crop_is_not_found
 
@@ -999,7 +1055,9 @@ opened again from nothing.
 ### an_index_built_over_the_subfolders_opens_with_the_box_ticked
 
 A real pass with subfolders included writes that into the index, and opening the
-folder again ticks the box. A pass over the folder alone puts it back down.
+folder again ticks the box. A pass over the folder alone puts it back down: what
+the index says reaches the boxes when the folder is opened, and after that the
+boxes are whatever the person at the window set them to.
 
 ### an_index_that_has_never_been_cleaned_up_keeps_the_safe_default
 
@@ -1131,11 +1189,38 @@ the other with the cursor keys and back. The strip follows the selection: it doe
 not move while the picture is already on screen, it moves further along with
 every step past the edge, and it comes back with the walk.
 
-### keep_none_sits_level_with_the_last_line_under_the_pictures
+### the_review_list_keeps_to_its_own_side_of_the_window
 
-Draws a set from a really scanned folder and compares where the keep none button
-ends with the lowest line of text under the pictures. They finish level, so the
-button reads as the foot of the set rather than floating above it.
+Draws the whole review page with the preview pane beside the list. No set
+reaches into the pane, and everything the list draws is cut off at the list's
+own edge rather than painted over the pane.
+
+### an_ignored_set_is_drawn_at_half_its_opacity_and_its_buttons_are_not
+
+Draws a really scanned set before and after it is ignored and reads the colour
+the writing was drawn in. The file names under the pictures come out at half the
+alpha they had; the row of buttons under them comes out unchanged, because the
+buttons are how a set stops being ignored.
+
+### the_scroll_bar_beside_the_list_stays_where_it_is_when_the_list_moves
+
+Draws the review page, reads where the bar's track was painted, scrolls the list
+to the second set, and reads it again. The track is in the same place: it marks
+the room the list is drawn in, and only the handle inside it moves.
+
+### the_set_boxes_are_drawn_whole_and_evenly_spaced
+
+Draws the review page and reads the rectangles the set boxes were painted as,
+with the rectangle each was clipped to. No box has its top cut off by the edge of
+the list, one box stands `BETWEEN_BOXES` clear of the next, the gap from the
+window's edge to a box's left edge is the gap from its right edge to the scroll
+bar, and the pictures in a box start as far inside it as they end.
+
+### a_set_has_its_buttons_in_a_row_along_the_bottom
+
+Draws a set from a really scanned folder and reads where its three buttons
+landed: keep all, then keep none, then ignore, left to right with space between
+them, on one row, below the lowest line of text under the pictures.
 
 ### a_set_box_is_not_taller_than_the_tiles_in_it
 
@@ -1182,6 +1267,84 @@ A picture carrying a comment, clicked in the review. The name of the thing and
 what it says both appear under the picture, a frame or two after the click
 because the file is read off another thread.
 
+### an_ignored_set_is_shown_and_left_alone
+
+Ignoring a set on a really scanned folder: the set stays on the review page,
+nothing in it is going to be removed, the cleanup has nothing to do, what it was
+keeping is still written down and counts for nothing, and opening the folder
+again from nothing comes back with the set still ignored.
+
+### a_set_can_be_unignored_again
+
+Ignoring a set and then taking it back: the pairs go from the index, the set is
+being cleaned up again, and opening the folder from nothing comes back with it a
+set of copies.
+
+### what_the_real_folders_index_says_about_itself
+
+Ignored unless it is asked for by name: it reads the index of the folder the
+application is set to. Prints the tables in it and every setting the window keeps
+there, so what is actually in a real index can be seen rather than assumed.
+
+### the_real_folders_index_keeps_every_setting_the_window_writes
+
+Ignored unless it is asked for by name: it writes to the index of the folder the
+application is set to, and puts it back as it was found. A pass holds the index
+in memory, the window writes every setting it keeps into the file underneath it,
+and the pass writes out. All of them are still there afterwards, and how far the
+pass reached is still the pass's own.
+
+### the_real_folders_index_keeps_what_was_marked_when_it_is_written_out
+
+Ignored unless it is asked for by name: it writes to the index of the folder the
+application is set to, and puts it back as it was found. The same for a pair
+marked as not copies: marked while a pass holds the index, still marked after the
+pass writes out.
+
+### every_box_the_window_keeps_survives_the_real_folders_index
+
+Ignored unless it is asked for by name: it writes to the index of the folder the
+application is set to, and puts it back as it was found. Every box is set away
+from its default through the window's own writing, and read back through the
+window's own reading.
+
+### only_matching_within_folders_holds_on_the_real_folder
+
+Ignored unless it is asked for by name: it searches the index of the folder the
+application is set to, and writes nothing. With folders kept apart, no set is
+made out of two folders.
+
+### a_folder_the_window_opens_on_comes_up_with_its_ignored_sets_ignored
+
+A set ignored on a really scanned folder, then the window started again on that
+folder rather than told to open it. The pairs are read from the index before
+anything is drawn, so the set comes up ignored instead of coming back as a set of
+copies.
+
+### unignoring_a_set_gives_back_the_picture_it_was_keeping
+
+A set keeping one picture is ignored and taken back. While it is ignored nothing
+in it can be marked or unmarked and the cleanup passes over it; the moment it is
+a set again the mark is on the picture it was left on.
+
+### ignoring_the_set_the_preview_is_in_leaves_the_keys_somewhere_to_go
+
+Three sets with the preview on a picture in the middle one, which is then
+ignored. The preview stays where it is, and each of the four keys leaves the
+ignored set: left and up to the set before it, right and down to the set after
+it.
+
+### the_cursor_keys_step_over_ignored_sets
+
+Three sets with the middle one ignored. Forward off the end of the first lands in
+the third and back again returns to the first; a set at a time does the same.
+With nothing but ignored sets beyond, the keys move nothing at all.
+
+### a_set_is_only_ignored_when_every_pair_in_it_is
+
+A set of three with one pair ignored is still a set of copies. Only once all
+three pairs are ignored is the set left alone.
+
 ### the_index_keeps_whether_multi_selected_was_ticked
 
 Ticks allow multi-select on a scanned folder and opens that folder again. The box
@@ -1192,6 +1355,26 @@ ticked.
 
 Both ways of matching are on when a folder is opened. Switching the corner match
 off and opening the folder again comes back with it off and the other still on.
+
+### the_index_keeps_matching_within_folders_and_running_on_opening
+
+A folder scanned with its subfolders, then set to match within folders and to
+rescan on opening. Opening it again from nothing comes back with both, off the
+index.
+
+### a_box_that_depends_on_another_is_off_and_out_of_reach_without_it
+
+Matching within folders needs subfolders, and rescanning on opening needs an
+index to rescan. With what they depend on switched off, both come off, and
+clicking where they are drawn does not put them back on. Ticking the index box
+asks for a rescan on opening by itself, which is what that box is for.
+
+### opening_a_folder_reads_its_index_without_scanning_it
+
+A folder that has been scanned before is opened again with the rescan box off.
+No pass runs, and the index is still read into memory: the pictures are there,
+the lamp for it is lit, and Find duplicates finds the copies without a pass
+having read a single file.
 
 ### without_multi_selected_marking_a_picture_lets_the_last_one_go
 
@@ -1229,12 +1412,13 @@ the colour setting come back and the sensitivity does not: it starts on the
 default every run, because what counts as a duplicate is decided against the
 pictures on screen.
 
-### a_folder_with_an_index_is_scanned_on_opening_and_one_without_is_not
+### a_folder_with_an_index_is_asked_about_on_opening_and_one_without_is_not
 
 At startup the window opens the saved folder and looks in it for an index file.
-If there is one, the checkbox is ticked and a scan starts at once. If there is
-not, the checkbox is unticked and nothing happens until Scan is pressed. The
-settings file has no say in either.
+If there is one, the checkbox is ticked and the index is asked what it says about
+itself, which is what decides whether a pass starts. If there is not, the
+checkbox is unticked and nothing is asked or started. The settings file has no
+say in either.
 
 ### the_checkbox_follows_the_folder_that_is_opened
 
@@ -1257,6 +1441,19 @@ rounding has something to round, which puts an eighteen point bubble on a bar
 that has made no progress. After the pass has really run, all three bars are
 filled.
 
+### the_times_beside_the_steps_are_measured_from_the_scan_button
+
+A window that has been open for an hour is told to scan. Every step reports
+milliseconds, not an hour: the clock the steps are timed against starts when the
+run does, and reading a folder's index on opening starts it as well.
+
+### the_steps_a_pass_had_nothing_to_do_are_marked_as_passed_over
+
+The four steps for reading and indexing new files happen on the first pass over
+a folder. On a second pass over the same folder there is nothing new to read or
+index, and those four end as passed over rather than as still to happen, which
+is what the empty circle beside them means.
+
 ### a_pass_with_nothing_left_to_do_fills_both_bars_anyway
 
 Scans a folder twice. The second pass reads nothing, because the index already
@@ -1277,10 +1474,12 @@ The listing is not the reading. While the folder is still being listed nothing
 has been read, and a total to read is not the same as having read any of it, so
 the bar for reading stays where it is: empty.
 
-### opening_a_folder_only_scans_one_that_has_been_scanned_before
+### opening_a_folder_scans_it_only_when_its_index_asks_for_that
 
-A folder the application has scanned is brought up to date the moment it is
-opened. One it has not waits for the button.
+A folder that has been scanned before is not scanned again on sight: opening it
+reads what its index says, and only an index asking to run on opening starts a
+pass. Ticked, opening the folder is enough; opening a folder with no index ticks
+nothing and starts nothing.
 
 ### a_different_folder_starts_on_the_default_setting
 

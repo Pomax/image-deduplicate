@@ -185,7 +185,7 @@ const SCREEN_WORKERS: usize = 24;
 const BACKGROUND_WORKERS: usize = 4;
 
 /// A file at one size. The grid and the pane beside it want different sizes of
-/// the same picture, and they are different pictures as far as the texture is
+/// the same picture, and those are different pictures as far as the texture is
 /// concerned.
 type Key = (i64, u32);
 
@@ -356,11 +356,8 @@ impl Thumbnails {
         let image = self.ready.remove(&key)?;
         let (file_id, edge) = key;
         let at = std::time::Instant::now();
-        let handle = painter.load_texture(
-            format!("preview{edge}-{file_id}"),
-            image,
-            TextureOptions::default(),
-        );
+        let handle =
+            painter.load_texture(format!("preview{edge}-{file_id}"), image, TextureOptions::default());
         self.tally.uploading += at.elapsed().as_secs_f64();
         self.textures.insert(key, handle.clone());
         Some(handle)

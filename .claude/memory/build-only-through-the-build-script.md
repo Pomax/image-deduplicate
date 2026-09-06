@@ -8,11 +8,14 @@ metadata:
   modified: 2026-09-01T02:47:14.378Z
 ---
 
-In `image-dedupe`, building is `build.bat` (or `build.sh` off Windows). Never run
-`cargo build --release --workspace` and the two `mv` calls by hand.
+In `image-dedupe`, building is `scripts\build.bat` (or `scripts/build.sh` off
+Windows). Never run `cargo build --release --workspace` and the two `mv` calls by
+hand.
 
 **Why:** those commands were being retyped every time. A build that lives only in
 a chat history is not a build anyone else can run, and the steps drift.
 
-**How to apply:** run `build.bat` from the repository root. If the build needs to
+**How to apply:** run `scripts\build.bat`, from wherever you are: it works on the
+repository it is in rather than on the directory you are standing in. If the
+build needs to
 change, change the script. Related: [[never-run-a-test-you-do-not-save]].

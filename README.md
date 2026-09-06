@@ -4,35 +4,47 @@ A cross-platform desktop program that indexes a folder of images, finds duplicat
 
 ## Supported image formats:
 
+Supported basic formats:
+
 - JPEG
 - PNG
 - GIF
 - WebP
 - TIFF
 - HEIC
-- Canon CR2 and CR3
+
+Supported RAW formats:
+
+- Canon CR2/CR3
 - Nikon NEF
 - Sony ARW
 - Panasonic RW2
 
-Raw files are indexed from the JPEG preview the camera writes inside them: the
-sensor data itself needs the manufacturer's own demosaic, and the preview is the
-same picture. The size recorded is the raw's own, not the preview's. Files are
-identified by their contents; extensions are not consulted.
+Raw files are indexed from the JPEG preview the camera writes inside them: the sensor data itself needs the manufacturer's own demosaic, and the preview is the same picture. The size recorded is the raw's own, not the preview's. Files are identified by their contents; extensions are not consulted.
 
 ## The three steps
 
 Each step has its own "page" in the UI.
 
-**Scan.** Walks the folder (subfolders optional), decodes and fingerprints every file that is new or has changed, and writes the results to `imgdedupe.sqlite` in that folder. Files whose size and modification time match the index are skipped.
+**Scan.** Walks the folder (subfolders optional), decodes and fingerprints every file that is new or has changed, and writes the results to `imgdedupe.sqlite` in that folder. Files whose size and modification time match the index are skipped. Subfolders whose name begins with a dot or an at sign are not walked: `.git`, `.thumbnails`, `@eaDir` and the like belong to whatever made them. The folder the scan is pointed at is always read, whatever it is called.
+
+"Only match within folders" makes a folder scanned with its subfolders into a search of each folder on its own: its own index of hashes, its own index of corners, holding what that folder holds. Two copies of a picture filed in two places are then two pictures and are never put together. It is off to begin with, and cannot be ticked without subfolders, since there is only one folder then. "Automatically rescan when opening this index" runs a pass over the files the moment the folder is opened, without waiting for the Scan button; it cannot be ticked without an index to rescan, and ticking the index box ticks it, since a folder worth keeping an index for is one worth bringing up to date on sight. Both are kept in the folder's index.
+
+Opening a folder that has an index always reads that index into memory, whether or not it rescans: the pictures are then known and Find duplicates costs the comparing and nothing else. What the box decides is only whether the files themselves are looked at again.
 
 What counts as a duplicate is set here: how far apart two pictures may be, whether colour is ignored, and which of the two ways of matching to use. "Match whole pictures" is the hash and the colour signature, which finds resizes, recompressions and rotations for almost nothing; "match partials" is the corners, which is what finds a crop and what most of a search's time goes on. Both are on to begin with, and both are kept in the folder's index, so a folder searched one way is searched that way again when it is opened.
 
 Three bars report a run: read, indexed, and the duplicates scan, which is itself in three parts of roughly equal length, reading the index, drawing up the shortlist, and comparing what it produced.
 
+Under them is every step a run goes through, in the order it goes through them, with the folder that was opened at the top. Green with the milliseconds since the run began — the press of Scan, or the reading of the index that opening a folder starts — means it happened, red means it has not happened yet, and an empty grey circle means there was nothing in it to do: a pass over a folder where nothing has changed reads no files and indexes none.
+
 Pictures are shown the way up the file says they go: cameras record what the sensor read plus an orientation, and both the tiles and the preview apply it. The dimensions recorded are the picture's, so a portrait photograph reads 4040x6064 rather than the other way round.
 
-**Review.** Shows each duplicate set as a row of thumbnails with one marked as the keeper. Click to preview, double click or space to mark and unmark, arrow keys to move, "keep all" and "keep none" per set. With "allow multi-select" ticked, marking a picture adds to what the set keeps rather than replacing it; unticked, the mark moves. Either way a marked picture can be unmarked, which can leave a set keeping nothing. The choice is kept in the folder's index.
+**Review.** Shows each duplicate set as a row of thumbnails with one marked as the keeper. Click to preview, double click or space to mark and unmark, arrow keys to move, and a row of buttons along the bottom of each set: "keep all", "keep none", "ignore". With "allow multi-select" ticked, marking a picture adds to what the set keeps rather than replacing it; unticked, the mark moves. Either way a marked picture can be unmarked, which can leave a set keeping nothing. The choice is kept in the folder's index.
+
+"Ignore" says the pictures in a set are not copies of one another. Every pair in the set is written to the `ignore` table in the folder's index, and a later search still finds the set and still shows it, so it can be seen and changed back; but a set every pair of which is ignored keeps nothing, drops nothing, and is stepped over by the cleanup entirely. A review holding nothing but ignored sets has nothing for a cleanup to do, so that step cannot be reached. Ignoring one pair of a larger set changes nothing: the rest of them are still copies.
+
+An ignored set is drawn as one: everything above the buttons — the pictures and every line of writing under them — at half its opacity, no keeper's border and no ring round the one the preview is on, "keep all" and "keep none" out of reach because they mean nothing, and the third button reading "unignore". Pressing that takes the pairs out of the index and the set is a set again, drawn and worked with as it was, keeping the picture it was keeping when it was ignored. The cursor keys step over ignored sets: on to the next set that is one, and nowhere at all when there is none. Ignoring the set the preview is in leaves the preview where it is, so left and up go to the set before it and right and down to the set after it.
 
 Cursor keys keep the picture they select on screen, scrolling the strip as far as it takes and no further. Clicking the preview fills the window with the picture at the window's own size; another click or the escape key puts it back.
 
@@ -80,7 +92,7 @@ Thumbnails use two worker pools: up to 24 threads serving what is currently on s
 
 ## The index
 
-`imgdedupe.sqlite` in the scanned folder: tables for files (path, size, mtime), images (dimensions, format, channels), fingerprints (packed hashes, ring stats, corners), and a meta table holding the schema version, last scan time, cleanup destination and recursion flag. About 13 KB per picture, most of it the corners. An index written by an earlier build gains the columns it lacks when opened, and its files are read again when the fingerprint version has moved on. WAL mode, checkpointed and switched back to DELETE on close, so no `-wal` or `-shm` files are left behind.
+`imgdedupe.sqlite` in the scanned folder: tables for files (path, size, mtime), images (dimensions, format, channels), fingerprints (packed hashes, ring stats, corners), ignore (pairs of pictures said not to be copies of each other), and a meta table holding the schema version, last scan time, cleanup destination, recursion flag and the review's own settings. About 13 KB per picture, most of it the corners. An index written by an earlier build gains the columns it lacks when opened, and its files are read again when the fingerprint version has moved on. WAL mode, checkpointed and switched back to DELETE on close, so no `-wal` or `-shm` files are left behind.
 
 The "Save an index database for this folder" checkbox controls whether that file is kept. Unticking it deletes the index immediately; a cleanup on an unticked folder deletes it when finished. The checkbox state comes from whether the folder contains an index.
 
@@ -88,7 +100,7 @@ The "Save an index database for this folder" checkbox controls whether that file
 
 Requires [Rust](https://rustup.rs).
 
-- `build.bat` on Windows, `build.sh` elsewhere
+- `scripts\build.bat` on Windows, `scripts/build.sh` elsewhere. Either can be run from anywhere: they work on the repository they are in, not on the directory you are standing in.
 
 The executable is left in the repository root and is not committed. Built ones come from the releases. Release builds use fat LTO, one codegen unit, stripped symbols, `panic = "abort"`, and `opt-level = "z"` for the toolkit crates.
 
@@ -100,9 +112,9 @@ On Windows and Linux the result is compressed with UPX if installed. UPX-style b
 
 ## Tests
 
-Run `test.bat` (on Windows) or `./test.sh` (Everywhere else). Arguments are passed to Cargo, so a single test can be run by name. [tests.md](./tests.md) documents every test.
+Run `scripts\test.bat` (on Windows) or `scripts/test.sh` (Everywhere else). Arguments are passed to Cargo, so a single test can be run by name. [tests.md](./tests.md) documents every test.
 
-You run a special logging-enabled build by using `build.bat --test` or `./build.sh --test` as argument to the build script, which yields a binary that lets you run it with the `--log` flag. This will cause it to log a ton of information to a log file in order to assist in debugging.
+You run a special logging-enabled build by using `scripts\build.bat --test` or `scripts/build.sh --test` as argument to the build script, which yields a binary that lets you run it with the `--log` flag. This will cause it to log a ton of information to a log file in order to assist in debugging.
 
 ## Questions and comments
 

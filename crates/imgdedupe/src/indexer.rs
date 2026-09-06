@@ -21,14 +21,7 @@ pub enum Update {
     /// than on the thread that draws, which used to open the index across the
     /// network for three small values and hold the window for as long as that
     /// took.
-    Settings {
-        recurse: Option<bool>,
-        disposal: Option<String>,
-        move_dir: Option<String>,
-        multi_select: Option<bool>,
-        match_whole_frame: Option<bool>,
-        match_corners: Option<bool>,
-    },
+    Settings(crate::notes::Notes),
     /// The folder is being listed, and this is how many files that has found so
     /// far. There is no total yet: the listing is what produces it.
     Walking { found: u64, of: Option<u64> },
@@ -107,7 +100,6 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
             }
         };
 
-        let mut options = options;
         say(scan::Step::StartedOpeningTheIndexForWriting);
         #[cfg(feature = "logging")]
         let opening = std::time::Instant::now();
@@ -122,20 +114,14 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
             // the same file a second time. `recurse` decides which files the pass
             // is about to look at, so it is read before the walk starts.
             say(scan::Step::StartedReadingTheIndexSettings);
-            let meta = |key: &str| db::get_meta(&conn, key).ok().flatten();
-            let recurse = meta("recurse").map(|value| value == "1");
-            if let Some(recurse) = recurse {
-                options.recurse = recurse;
-            }
+            let notes = crate::notes::read(&conn);
+            // Read and handed over, not applied: how far this pass reaches is
+            // what the window was set to when the Scan button was pressed. A
+            // folder that reaches into its subfolders says so when it is opened,
+            // which is what puts the box up; taking the box down again and
+            // scanning is somebody saying they mean the folder itself.
             if let Ok(sender) = send.lock() {
-                let _ = sender.send(Update::Settings {
-                    recurse,
-                    disposal: meta("disposal"),
-                    move_dir: meta("move_dir"),
-                    multi_select: meta("multi_select").map(|value| value == "1"),
-                    match_whole_frame: meta("match_whole_frame").map(|value| value == "1"),
-                    match_corners: meta("match_corners").map(|value| value == "1"),
-                });
+                let _ = sender.send(Update::Settings(notes));
             }
             say(scan::Step::FinishedReadingTheIndexSettings);
             let report = |event: Event| {

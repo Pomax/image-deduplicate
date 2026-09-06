@@ -3,3 +3,5 @@ dist
 *.log
 /imgdedupe
 /imgdedupe.exe
+/imgdedupe-new
+/imgdedupe-new.exe

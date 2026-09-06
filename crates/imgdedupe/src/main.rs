@@ -13,6 +13,7 @@ mod icon;
 mod indexer;
 #[cfg(target_os = "linux")]
 mod mesa;
+mod notes;
 mod settings;
 mod thumbs;
 #[cfg(debug_assertions)]

@@ -86,6 +86,42 @@ enum Found {
     Failed(String),
 }
 
+/// What the thread that opens a folder's index sends back.
+///
+/// A folder that has been scanned before is a folder whose pictures are already
+/// known, so opening it reads them into memory whether or not a pass is going to
+/// run: the search then costs the comparing and nothing else, and pressing Find
+/// duplicates does not first sit through a file being read over a network.
+enum Opened {
+    /// What the folder was set to the last time it was open.
+    Notes(crate::notes::Notes),
+    /// How far the reading has got.
+    Reading(matching::Progress),
+    /// The pairs somebody said are not copies of each other, read off the same
+    /// connection as the pictures. They are part of what a folder's index says
+    /// about it, so they arrive with it and are held in memory from then on.
+    Ignored(Vec<(i64, i64)>),
+    /// The pictures, as the search wants them.
+    Index(std::sync::Arc<Vec<matching::Image>>),
+    Failed(String),
+}
+
+/// Every pair of pictures in a set, lower file id first, which is how a pair is
+/// written down and how it is looked up.
+fn pairs_of(set: &DuplicateSet) -> impl Iterator<Item = (i64, i64)> + '_ {
+    set.members.iter().enumerate().flat_map(|(at, one)| {
+        set.members[at + 1..].iter().map(|other| db::pair(one.file_id, other.file_id))
+    })
+}
+
+/// How one of the steps on the scan page went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Went {
+    Happened,
+    Waiting,
+    Skipped,
+}
+
 /// Which way a cursor key moves the preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -353,7 +389,10 @@ fn scrolled<R>(
     let room = ui.available_rect_before_wrap();
     let (content_rect, strip) = if down {
         (
-            room.with_max_x(room.right() - SCROLL_BAR),
+            // A gap before the bar as well as the bar itself, so what is in the
+            // list stops as far from it as the list stops from the window's edge
+            // rather than running up against it.
+            room.with_max_x(room.right() - SCROLL_BAR - PAGE_MARGIN),
             egui::Rect::from_min_max(egui::pos2(room.right() - SCROLL_BAR, room.top()), room.max),
         )
     } else {
@@ -374,8 +413,49 @@ fn scrolled<R>(
     }
 
     let output = ui
-        .allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| show(area, ui))
+        .allocate_new_ui(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+            // Nothing inside is drawn outside: a list is a window onto its
+            // rows, and a row that came out wider than the room it was given
+            // paints over whatever is beside the list rather than being cut off
+            // at its edge. Cut at the bar rather than at the content, because a
+            // line drawn round something is drawn half on either side of its
+            // edge, and a clip along that edge takes half the line with it.
+            // The whole of the room the list was given, up to the bar: a box in
+            // it is drawn with a line round it, and a line sits half on either
+            // side of the edge it marks, so a clip along the content itself
+            // takes the top off the first box and the bottom off the last.
+            let cut = if down {
+                egui::Rect::from_min_max(
+                    egui::pos2(room.left(), room.top()),
+                    egui::pos2(strip.left(), room.bottom()),
+                )
+            } else {
+                egui::Rect::from_min_max(
+                    egui::pos2(room.left(), room.top()),
+                    egui::pos2(room.right(), strip.top()),
+                )
+            };
+            ui.set_clip_rect(cut.intersect(ui.clip_rect()));
+            show(area, ui)
+        })
         .inner;
+
+    // Alongside what it scrolls, and nailed to it. The bar marks the room the
+    // list is drawn in, which is the same rectangle from one frame to the next:
+    // it does not move because the list moved under it. That rectangle is the
+    // one the area was given, not the one the rows happen to be at, which is
+    // exactly what scrolling changes.
+    let strip = if down {
+        egui::Rect::from_min_max(
+            egui::pos2(strip.left(), content_rect.top()),
+            egui::pos2(strip.right(), content_rect.bottom()),
+        )
+    } else {
+        egui::Rect::from_min_max(
+            egui::pos2(content_rect.left(), strip.top()),
+            egui::pos2(content_rect.right(), strip.bottom()),
+        )
+    };
 
     let axis = usize::from(down);
     let content = output.content_size[axis];
@@ -530,11 +610,6 @@ const SECTION_GAP: f32 = 14.0;
 /// arithmetic below is about outer widths.
 const FRAME_EXTRA: f32 = 14.0;
 
-/// What the same frame costs a set row from top to bottom: its margin, its
-/// border, and what the row it sits in adds around it. Measured, and pinned by
-/// `a_set_row_takes_exactly_the_height_the_list_places_it_at`, which fails when
-/// a row comes out any other height than the list places it at.
-const ROW_FRAME_EXTRA: f32 = 18.0;
 
 
 /// The largest a picture in a set may be drawn. What the strip of them is tall
@@ -564,33 +639,29 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
     fitted(member.width, member.height).x.max(1.0) + TILE_BORDER + TILE_RING * 2.0
 }
 
-/// The buttons that decide a whole set at once, drawn over the right of its
-/// strip: keep all of it at the top, none of it at the bottom.
-/// How tall they are is what the style makes a button, so the width is all
-/// there is to say here.
-const KEEP_BUTTON_WIDTH: f32 = 90.0;
+/// Room round the buttons along the bottom of a set. None: the band is the
+/// buttons, and the space between them is the space the row lays them out with.
+const BUTTON_ROW_GAP: f32 = 0.0;
 
-/// One of them, drawn in `at` and ending at its right edge.
+/// The band those buttons sit on.
+const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
+
+/// What the page keeps at its edges, and what a list keeps between what is in it
+/// and the scroll bar down its right: the same, so a box in a list stops as far
+/// from the bar as the list stops from the edge of the window.
 ///
-/// Its words are kept on one line: wrapped onto two it is twice as tall as the
-/// space it was given, and a button taller than its place pushes the box it sits
-/// in open under it. A word longer than the space then makes the button wider
-/// instead, so it is laid out from the right and grows leftwards, where there is
-/// nothing but the pictures it sits over.
-fn put_at_the_right(
-    ui: &mut egui::Ui,
-    at: egui::Rect,
-    label: &str,
-    edge: egui::Stroke,
-) -> egui::Response {
-    let button = egui::Button::new(label).stroke(edge).wrap_mode(egui::TextWrapMode::Extend);
-    ui.allocate_new_ui(
-        egui::UiBuilder::new()
-            .max_rect(at)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        |ui| ui.add(button),
-    )
-    .inner
+/// The review keeps this itself rather than through the panel it is drawn in, so
+/// the panels in it can run the width of the window and draw their lines across
+/// all of it.
+const PAGE_MARGIN: f32 = 16.0;
+
+/// What one of the buttons under a set does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SetAction {
+    KeepAll,
+    KeepNone,
+    Ignore,
+    Unignore,
 }
 
 /// Kept clear at the right of the folder row for the button that lists the
@@ -659,10 +730,36 @@ fn duplicate_count(sets: &[DuplicateSet]) -> usize {
 /// a row is built to exactly it, so a row can never be a few points out and shift
 /// the content under a scroll that is already running.
 fn set_row_height(ui: &egui::Ui) -> f32 {
-    // The strip, the scroll bar under it, and the frame drawn round both. Not
-    // the space between one row and the next: the list adds that itself, and
-    // counting it here puts it inside the box instead of between the boxes.
-    tile_strip_height(ui) + SCROLL_BAR + ROW_FRAME_EXTRA
+    // The room kept above the pictures, the strip, the scroll bar under it, the
+    // row of buttons under that, the line drawn round the lot, and the space to
+    // the next box. The list places the rows it is not drawing by this number,
+    // so the space between boxes has to be part of it.
+    BOX_PADDING
+        + tile_strip_height(ui)
+        + SCROLL_BAR
+        + button_row_height(ui)
+        + 2.0 * BOX_EDGE
+        + BETWEEN_BOXES
+}
+
+/// Kept between one set and the next.
+const BETWEEN_BOXES: f32 = 12.0;
+
+/// The line the box is drawn with, on each side.
+const BOX_EDGE: f32 = 1.0;
+
+/// What a box keeps between its edge and the pictures in it. The band of
+/// buttons keeps none: it is the bottom of the box.
+const BOX_PADDING: f32 = 6.0;
+
+/// The row of buttons along the bottom of a set, with the space above it.
+fn button_row_height(ui: &egui::Ui) -> f32 {
+    // What the buttons themselves come out as, with the same small space above
+    // and below them. They are drawn with the presets' padding, not the style's
+    // own, and a band built to the style's is half as tall again as it needs.
+    2.0 * BUTTON_ROW_GAP
+        + ui.text_style_height(&egui::TextStyle::Button)
+        + 2.0 * PRESET_PADDING.y
 }
 
 /// What one tile in a set takes from top to bottom, which is what the strip of
@@ -990,12 +1087,17 @@ enum Lamp {
 
 /// In the order a pass goes through them, which is also the order they read in.
 ///
+/// The index is opened for writing first and its settings are read off that same
+/// connection, so the two about opening come before the two about the settings.
+///
 /// One thing sits out of its running order: on a folder where nothing has
 /// changed, the conversion happens as soon as the counting says there is nothing
 /// to index, so those two lamps turn before the four about reading and indexing,
-/// which then turn immediately and together because there is no work in them.
+/// which are skipped rather than run.
 const LAMPS: [(Lamp, &str); 19] = [
     (Lamp::CheckedForIndexFile, "Checked for sqlite file in this folder"),
+    (Lamp::StartedOpeningTheIndexForWriting, "Started opening the index for writing"),
+    (Lamp::FinishedOpeningTheIndexForWriting, "Finished opening the index for writing"),
     (
         Lamp::StartedReadingTheIndexSettings,
         "Started reading the index's own settings",
@@ -1004,8 +1106,6 @@ const LAMPS: [(Lamp, &str); 19] = [
         Lamp::FinishedReadingTheIndexSettings,
         "Finished reading the index's own settings",
     ),
-    (Lamp::StartedOpeningTheIndexForWriting, "Started opening the index for writing"),
-    (Lamp::FinishedOpeningTheIndexForWriting, "Finished opening the index for writing"),
     (Lamp::StartedLookingForTheTotal, "Started looking for total number of files"),
     (Lamp::FoundTheTotal, "Found total number of files"),
     (Lamp::ListedTheFolder, "Retrieved full file list in the folder"),
@@ -1101,6 +1201,25 @@ pub struct App {
     /// that way again when it is opened.
     match_whole_frame: bool,
     match_corners: bool,
+    /// Whether a folder scanned with its subfolders is searched one folder at a
+    /// time. Off to begin with, and kept in the folder's own index.
+    within_a_folder: bool,
+    /// Pairs of pictures said not to be copies of each other, as the folder's
+    /// index holds them. A set every pair of which is in here is left alone.
+    ignored: std::collections::HashSet<(i64, i64)>,
+    /// Whether opening this folder starts a pass by itself. Off to begin with,
+    /// and kept in the index, which is also the thing it depends on: a folder
+    /// with no index has nothing to run on opening.
+    auto_rescan: bool,
+    /// The index being read, on a thread of its own. The folder can be on
+    /// another machine, and this is a file opened across the network before
+    /// anything has been drawn.
+    asking: Option<std::sync::mpsc::Receiver<Opened>>,
+    /// Whether this folder's index has already said what it was set to. It says
+    /// so once, when the folder is opened; a pass over the folder says it again,
+    /// and by then the boxes are whoever pressed Scan's business, not the
+    /// index's.
+    noted: bool,
     /// How far apart two pictures may be and still count as the same one, as a
     /// share of the hash. The presets set this; the slider overrides them.
     sensitivity: f64,
@@ -1195,9 +1314,6 @@ pub struct App {
     /// the Scan button, and its clock starts there. Every run after that, whether
     /// it follows a cancel or not, starts its own.
     started: std::time::Instant,
-    /// Whether the run about to start is the one the window opened with, whose
-    /// clock is already running.
-    opened_with_a_scan: bool,
 }
 
 impl Default for App {
@@ -1229,6 +1345,11 @@ impl App {
             ignore_colour: saved.ignore_colour,
             match_whole_frame: true,
             match_corners: true,
+            within_a_folder: false,
+            ignored: std::collections::HashSet::new(),
+            auto_rescan: false,
+            asking: None,
+            noted: false,
             // What counts as a duplicate is a decision about the pictures in
             // front of the person making it, so every run starts on the default
             // rather than on whatever the last one was left at.
@@ -1257,8 +1378,10 @@ impl App {
             show_selected: false,
             list_offset: 0.0,
             list_viewport: 0.0,
-            // A folder with an index is brought up to date on sight. One without
-            // is shown and waits for the Scan button.
+            // The folder the window opened on is asked what it says about
+            // itself once the window is up, which is what decides whether it is
+            // also scanned. Nothing here can do that: it would be a file opened
+            // across the network before a single frame had been drawn.
             scan_on_open: has_index,
             window: saved.window,
             preview_width: saved.preview_width,
@@ -1275,7 +1398,6 @@ impl App {
             search: SearchState::default(),
             images: None,
             started: std::time::Instant::now(),
-            opened_with_a_scan: has_index,
             scan_content: vec![0.0; 3],
             scan_row: 0.0,
         }
@@ -1293,14 +1415,8 @@ impl eframe::App for App {
                 crate::fonts::cover(ctx, &folder.display().to_string());
             }
         }
-        if self.scan_on_open {
-            self.scan_on_open = false;
-            // What the index says about itself is read by the pass, on the pass's
-            // own thread. Reading it here opened the index across the network for
-            // three small values and held the window for as long as that took,
-            // before anything had been drawn.
-            self.start_scan();
-        }
+        self.open_what_was_left_open();
+        self.hear_the_index(ctx);
         self.take_dropped_folder(ctx);
         self.pump_indexer(ctx);
         self.pump_search(ctx);
@@ -1311,10 +1427,14 @@ impl eframe::App for App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let ready = self.have_sets();
+                // A review holding nothing but sets somebody has said are not
+                // copies has nothing for a cleanup to do, so there is nowhere
+                // for that tab to go.
+                let anything_to_clean = self.sets.iter().any(|set| !self.is_ignored(set));
                 let tabs = [
                     (View::Scan, "1  Scan", true),
                     (View::Review, "2  Review", ready),
-                    (View::Cleanup, "3  Clean up", ready),
+                    (View::Cleanup, "3  Clean up", ready && anything_to_clean),
                 ];
                 for (view, label, enabled) in tabs {
                     let selected = self.view == view;
@@ -1326,14 +1446,6 @@ impl eframe::App for App {
                         self.view = view;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(folder) = &self.folder {
-                        clipped_line(
-                            ui,
-                            egui::RichText::new(folder.display().to_string()).weak(),
-                        );
-                    }
-                });
             });
             ui.add_space(6.0);
         });
@@ -1358,7 +1470,11 @@ impl eframe::App for App {
         // full height and then pushed down, so the last of it falls off the
         // bottom edge instead of ending there.
         let margin = match self.view {
-            View::Cleanup => egui::Margin::ZERO,
+            // The review's own toolbar is a panel across the page, and a panel
+            // inside a margin draws its line inside that margin, which is a rule
+            // that stops short of the one above it. The page keeps no margin
+            // here and the parts of the review keep their own.
+            View::Cleanup | View::Review => egui::Margin::ZERO,
             _ => egui::Margin::symmetric(16.0, 12.0),
         };
         egui::CentralPanel::default()
@@ -1424,33 +1540,14 @@ impl App {
                     self.light(step.into());
                 }
                 Update::Images(images) => self.images = Some(images),
-                Update::Settings {
-                    recurse,
-                    disposal,
-                    move_dir,
-                    multi_select,
-                    match_whole_frame,
-                    match_corners,
-                } => {
-                    // An index built over the subfolders has to be scanned that
-                    // way again, or the next pass drops every row under them.
-                    if let Some(setting) = recurse {
-                        self.recurse = setting;
-                    }
-                    if let Some(choice) = disposal.as_deref().and_then(Destination::from_name) {
-                        self.destination = choice;
-                    }
-                    if let Some(folder) = move_dir {
-                        self.move_dir = folder;
-                    }
-                    if let Some(setting) = multi_select {
-                        self.multi_select = setting;
-                    }
-                    if let Some(setting) = match_whole_frame {
-                        self.match_whole_frame = setting;
-                    }
-                    if let Some(setting) = match_corners {
-                        self.match_corners = setting;
+                // A pass reads the index's settings off the connection it just
+                // opened, and they are worth having for a folder that has not
+                // been asked yet. A folder that has been asked already answered:
+                // what the boxes say now is what the person at the window set
+                // them to, and a pass does not put them back.
+                Update::Settings(notes) => {
+                    if !self.noted {
+                        self.take_notes(notes);
                     }
                 }
                 Update::Walking { found, of } => {
@@ -1592,25 +1689,76 @@ impl App {
         const GREEN: egui::Color32 = egui::Color32::from_rgb(58, 160, 78);
         const DOT: f32 = 5.0;
 
+        const GREY: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
+
         ui.add_space(SECTION_GAP);
+        let dot = |ui: &mut egui::Ui, state: Went| {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(DOT * 3.0, ui.spacing().interact_size.y),
+                egui::Sense::hover(),
+            );
+            match state {
+                Went::Happened => ui.painter().circle_filled(rect.center(), DOT, GREEN),
+                Went::Waiting => ui.painter().circle_filled(rect.center(), DOT, RED),
+                // Nothing to do rather than not done yet: an empty ring, so a
+                // pass that had no new files to read does not read as a pass
+                // that failed to read them.
+                Went::Skipped => ui.painter().circle_stroke(
+                    rect.center(),
+                    DOT,
+                    egui::Stroke::new(1.5_f32, GREY),
+                ),
+            }
+        };
+
+        // The folder this is all about, before the things done to it. No time
+        // against it: opening a folder is choosing one, not work that took a
+        // while.
+        ui.horizontal(|ui| {
+            dot(ui, if self.folder.is_some() { Went::Happened } else { Went::Waiting });
+            match &self.folder {
+                Some(folder) => {
+                    clipped_line(ui, egui::RichText::new(format!("Loaded {}", folder.display())))
+                }
+                None => {
+                    ui.label(egui::RichText::new("No folder open").weak());
+                }
+            }
+        });
+
         for (lamp, label) in LAMPS {
             let at = self.lit.get(&lamp).copied();
             ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(DOT * 3.0, ui.spacing().interact_size.y),
-                    egui::Sense::hover(),
-                );
-                ui.painter().circle_filled(
-                    rect.center(),
-                    DOT,
-                    if at.is_some() { GREEN } else { RED },
-                );
+                dot(ui, self.how_it_went(lamp));
                 match at {
                     Some(at) => ui.label(format!("{label}  {at} ms")),
                     None => ui.label(egui::RichText::new(label).weak()),
                 };
             });
         }
+    }
+
+    /// Whether a step happened, is still to happen, or was passed over.
+    ///
+    /// A pass over a folder where nothing has changed reads no files and indexes
+    /// none, so the four steps for that never happen. They were not missed: there
+    /// was nothing in them to do, and once the pass is past indexing that is
+    /// what an unlit one of them means.
+    fn how_it_went(&self, lamp: Lamp) -> Went {
+        if self.lit.contains_key(&lamp) {
+            return Went::Happened;
+        }
+        let of_the_files = matches!(
+            lamp,
+            Lamp::StartedReadingNewFiles
+                | Lamp::FinishedReadingNewFiles
+                | Lamp::StartedIndexingNewFiles
+                | Lamp::FinishedIndexingNewFiles
+        );
+        if of_the_files && self.scan.writing == Stage::Over {
+            return Went::Skipped;
+        }
+        Went::Waiting
     }
 
     fn folder_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
@@ -1658,11 +1806,29 @@ impl App {
                 !busy,
                 egui::Checkbox::new(&mut self.recurse, "Include subfolders"),
             );
+            // Between the two, because it is about what the subfolders above it
+            // mean: with it on, each of them is searched on its own and a
+            // picture filed in two of them is two pictures. With no subfolders
+            // there is only one folder, so it says nothing and cannot be ticked.
+            let apart = ui.add_enabled(
+                !busy && self.recurse,
+                egui::Checkbox::new(&mut self.within_a_folder, "Only match within folders"),
+            );
             let remember = ui.add_enabled(
                 !busy,
                 egui::Checkbox::new(
                     &mut self.keep_index,
                     "Save an index database for this folder",
+                ),
+            );
+            // Under the index box and about it: what runs on opening is the
+            // pass that brings the index up to date, so with no index kept there
+            // is nothing to run and nothing to tick.
+            let on_opening = ui.add_enabled(
+                !busy && self.keep_index,
+                egui::Checkbox::new(
+                    &mut self.auto_rescan,
+                    "Automatically rescan when opening this index",
                 ),
             );
             if remember.changed() && !self.keep_index {
@@ -1684,7 +1850,24 @@ impl App {
                 self.showing = None;
                 self.scan = ScanState::default();
             }
-            if subfolders.changed() || remember.changed() {
+            // A folder worth keeping an index for is a folder worth bringing up
+            // to date on sight, so saying yes to the one says yes to the other.
+            // It can be turned off again; what it cannot be is on without an
+            // index to rescan.
+            if remember.changed() && self.keep_index {
+                self.auto_rescan = true;
+            }
+            // A box that has just lost what it depends on comes off, and is
+            // written out that way rather than left ticked in the index for the
+            // next run to read back.
+            let depended_on = subfolders.changed() || remember.changed();
+            if depended_on {
+                self.settle_the_boxes();
+            }
+            if apart.changed() || on_opening.changed() || depended_on {
+                self.remember_ways_of_matching();
+            }
+            if subfolders.changed() || remember.changed() || apart.changed() {
                 self.remember();
             }
         })
@@ -1811,9 +1994,14 @@ impl App {
             self.sensitivity = matching::DEFAULT_SENSITIVITY;
             self.ignore_colour = false;
             self.recurse = false;
-            // Both ways of matching, until this folder's index says otherwise.
+            // Both ways of matching, until this folder's index says otherwise,
+            // and the whole folder at once rather than one folder at a time.
             self.match_whole_frame = true;
             self.match_corners = true;
+            self.within_a_folder = false;
+            // Whether opening a folder runs a pass is that folder's own answer,
+            // and a folder that has not been asked yet has not said yes.
+            self.auto_rescan = false;
             // A folder that has an index arrives with the box already ticked.
             self.keep_index = has_index;
             self.destination = Destination::Trash;
@@ -1829,11 +2017,170 @@ impl App {
         self.scan = ScanState::default();
         self.error = None;
         self.thumbs.forget();
-        // A folder with an index is brought up to date on sight. One without is
-        // a folder nothing is known about, and it waits for the Scan button.
+        // What this folder's index says about itself, including whether opening
+        // it is meant to start a pass and which of its sets are not sets of
+        // copies. Asked off the thread that draws, and answered in a later frame.
+        self.noted = false;
         self.remember();
-        if has_index {
-            self.start_scan();
+        self.ask_the_index();
+    }
+
+    /// The folder the window opened on, asked about itself once, on the first
+    /// frame. That folder is never chosen: it is set from what was saved before
+    /// anything is drawn, so this is the only place it is ever asked.
+    ///
+    /// What its index says about itself, including whether opening it starts a
+    /// pass, is read on a thread of its own: reading it here opened the index
+    /// across the network and held the window for as long as that took, before
+    /// anything had been drawn.
+    fn open_what_was_left_open(&mut self) {
+        if !self.scan_on_open {
+            return;
+        }
+        self.scan_on_open = false;
+        self.ask_the_index();
+    }
+
+    /// Ask the folder's index what it says about itself, on a thread of its
+    /// own. A folder with no index says nothing, and the window keeps the
+    /// answers a folder gives until another folder gives its own.
+    fn ask_the_index(&mut self) {
+        self.asking = None;
+        // Whatever the last folder said is not true of this one. What this one
+        // says arrives with its index.
+        self.ignored.clear();
+        let Some(db_path) = self.db_path.clone() else {
+            return;
+        };
+        if !db_path.is_file() {
+            return;
+        }
+        // Reading the index is the first thing done to a folder, so the clock
+        // the lamps are timed against starts with it, the way it starts again
+        // at the press of the Scan button.
+        self.started = std::time::Instant::now();
+        self.lit.clear();
+        self.lit.insert(Lamp::CheckedForIndexFile, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        self.asking = Some(receive);
+        std::thread::spawn(move || {
+            if let Ok(notes) = crate::notes::of_folder(&db_path) {
+                let _ = send.send(Opened::Notes(notes));
+            }
+            // And the index itself. Having it in memory is what a folder that
+            // has been scanned before is for: the pictures can be searched
+            // without reading anything again, whether or not a pass runs.
+            let read = imgdedupe_core::db::open_snapshot(&db_path).and_then(|conn| {
+                let never = std::sync::atomic::AtomicBool::new(false);
+                let report = |progress| {
+                    let _ = send.send(Opened::Reading(progress));
+                };
+                // Off the same connection as the pictures: the pairs are part of
+                // what the index holds about this folder, and after this they
+                // are in memory and nothing asks the index about them again.
+                let _ = send.send(Opened::Ignored(imgdedupe_core::db::ignored(&conn)?));
+                let images = matching::load_images(&conn, &never, &report)?;
+                let _ = conn.close();
+                Ok(images)
+            });
+            match read {
+                Ok(Some(images)) => {
+                    let _ = send.send(Opened::Index(std::sync::Arc::new(images)));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = send.send(Opened::Failed(format!("{err:#}")));
+                }
+            }
+        });
+    }
+
+    /// Take what the index says as it arrives: what the folder was set to, then
+    /// the pictures themselves. A pass is started on top of that only when the
+    /// folder asked to be rescanned on opening.
+    fn hear_the_index(&mut self, ctx: &egui::Context) {
+        let Some(asking) = &self.asking else {
+            return;
+        };
+        let mut arrived = Vec::new();
+        let mut over = false;
+        loop {
+            match asking.try_recv() {
+                Ok(said) => arrived.push(said),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    over = true;
+                    break;
+                }
+            }
+        }
+        if arrived.is_empty() && !over {
+            return;
+        }
+        for said in arrived {
+            match said {
+                Opened::Notes(notes) => {
+                    self.take_notes(notes);
+                    // A folder that asks to be brought up to date on sight is
+                    // started here rather than when its pictures arrive: the
+                    // pass reads the index itself, and there is nothing to be
+                    // gained by waiting for a second copy of it.
+                    if self.auto_rescan && !self.busy() {
+                        self.start_scan();
+                    }
+                }
+                Opened::Reading(progress) => self.note_search_progress(progress),
+                Opened::Ignored(pairs) => self.ignored.extend(pairs),
+                Opened::Index(images) => {
+                    self.light(Lamp::LoadedIndexIntoMemory);
+                    // A pass that started in the meantime is reading the same
+                    // folder and will hand over its own, newer copy.
+                    if self.running.is_none() {
+                        self.images = Some(images);
+                    }
+                    self.search = SearchState::default();
+                }
+                Opened::Failed(err) => self.error = Some(err),
+            }
+        }
+        if over {
+            self.asking = None;
+        }
+        ctx.request_repaint();
+    }
+
+    /// What a search says while it runs, and what the reading of an index says
+    /// on the way to one. The same bar draws both: reading an index on opening
+    /// a folder is the same work a search would otherwise have done itself.
+    fn note_search_progress(&mut self, progress: matching::Progress) {
+        match progress {
+            matching::Progress::Loading { done, total } => {
+                self.light(Lamp::StartedBuildingTheMemoryIndex);
+                self.search.stage = Some("reading the index");
+                self.search.reads_the_index = true;
+                self.search.loaded = done;
+                self.search.to_load = total;
+            }
+            matching::Progress::Loaded { images } => {
+                self.light(Lamp::FinishedBuildingTheMemoryIndex);
+                self.search.stage = Some("comparing");
+                self.search.loaded = images;
+                self.search.to_load = self.search.to_load.max(images);
+            }
+            matching::Progress::Shortlisting { done, total } => {
+                self.search.stage = Some("shortlisting");
+                self.search.shortlisted = done;
+                self.search.to_shortlist = total;
+            }
+            matching::Progress::Comparing { done, total } => {
+                self.search.stage = Some("comparing");
+                self.search.compared = done;
+                self.search.pairs = total;
+            }
+            matching::Progress::Grouping => {
+                self.search.stage = Some("grouping");
+                self.search.compared = self.search.pairs;
+            }
         }
     }
 
@@ -2019,9 +2366,9 @@ impl App {
                 };
                 progress_bar(ui, label, fraction, width);
             };
-            bar(ui, "read", self.scan.reading, self.scan.done, self.scan.total);
+            bar(ui, "Scanning for files", self.scan.reading, self.scan.done, self.scan.total);
             ui.add_space(4.0);
-            bar(ui, "indexed", self.scan.writing, self.scan.indexed, self.scan.to_index);
+            bar(ui, "Indexing files", self.scan.writing, self.scan.indexed, self.scan.to_index);
             ui.add_space(4.0);
             // The search's own bar, under the pass's two and driven by nothing
             // they touch. It is two stages of very different lengths, so it runs
@@ -2033,7 +2380,7 @@ impl App {
                 (false, true) => Stage::Running,
                 (false, false) => Stage::Waiting,
             };
-            bar(ui, "duplicates scan", searching, duplicates, of);
+            bar(ui, "Finding duplicates", searching, duplicates, of);
             ui.add_space(6.0);
             // How many files the folder holds. The listing is what produces that
             // number, so before it is over the count it has reached so far is
@@ -2094,15 +2441,10 @@ impl App {
         let (Some(folder), Some(db_path)) = (self.folder.clone(), self.db_path.clone()) else {
             return;
         };
-        // The clock the lamps are timed against. The run that a window with an
-        // index opens with has been running since the application started, and
-        // the window's own setup is part of what the person waited for. Every
-        // other run starts its clock here, including one that follows a cancel.
-        if self.opened_with_a_scan {
-            self.opened_with_a_scan = false;
-        } else {
-            self.started = std::time::Instant::now();
-        }
+        // The clock the lamps are timed against starts here, at the press of the
+        // button: what the numbers beside them answer is how long this run has
+        // been going, not how long the window has been open.
+        self.started = std::time::Instant::now();
         self.lit.clear();
 
         self.scan = ScanState::default();
@@ -2171,14 +2513,17 @@ impl App {
         thresholds.ignore_colour = self.ignore_colour;
         thresholds.whole_frame = self.match_whole_frame;
         thresholds.corners = self.match_corners;
+        thresholds.within_a_folder = self.within_a_folder;
         runlog::log_line!(
-            "matching {} at {:.1}% ({} bits), ignore_colour {}, whole frame {}, corners {}",
+            "matching {} at {:.1}% ({} bits), ignore_colour {}, whole frame {}, corners {}, \
+             within a folder {}",
             db_path.display(),
             self.sensitivity,
             thresholds.max_bits,
             thresholds.ignore_colour,
             thresholds.whole_frame,
-            thresholds.corners
+            thresholds.corners,
+            thresholds.within_a_folder
         );
 
         // What the last pass ended with says nothing about this one.
@@ -2214,35 +2559,7 @@ impl App {
         let mut done = false;
         for found in waiting {
             match found {
-                Found::Progress(progress) => match progress {
-                    matching::Progress::Loading { done, total } => {
-                        self.light(Lamp::StartedBuildingTheMemoryIndex);
-                        self.search.stage = Some("reading the index");
-                        self.search.reads_the_index = true;
-                        self.search.loaded = done;
-                        self.search.to_load = total;
-                    }
-                    matching::Progress::Loaded { images } => {
-                        self.light(Lamp::FinishedBuildingTheMemoryIndex);
-                        self.search.stage = Some("comparing");
-                        self.search.loaded = images;
-                        self.search.to_load = self.search.to_load.max(images);
-                    }
-                    matching::Progress::Shortlisting { done, total } => {
-                        self.search.stage = Some("shortlisting");
-                        self.search.shortlisted = done;
-                        self.search.to_shortlist = total;
-                    }
-                    matching::Progress::Comparing { done, total } => {
-                        self.search.stage = Some("comparing");
-                        self.search.compared = done;
-                        self.search.pairs = total;
-                    }
-                    matching::Progress::Grouping => {
-                        self.search.stage = Some("grouping");
-                        self.search.compared = self.search.pairs;
-                    }
-                },
+                Found::Progress(progress) => self.note_search_progress(progress),
                 Found::Sets(sets) => {
                     self.light(Lamp::FinishedFindingDuplicates);
                     self.search.stage = Some("finished");
@@ -2352,8 +2669,11 @@ impl App {
             // right edge. They are laid out over the same rectangle, each with
             // the layout that puts it where it belongs, so the counts sit in the
             // centre of the row rather than in the centre of what is left of it.
+            // The panel runs the width of the window, so its own line does too.
+            // What is in it keeps the page's margin.
             let row = egui::vec2(ui.available_width(), TOOLBAR_HEIGHT);
             let (rect, _) = ui.allocate_exact_size(row, egui::Sense::hover());
+            let rect = rect.shrink2(egui::vec2(PAGE_MARGIN, 0.0));
 
             let mut left = ui.new_child(
                 egui::UiBuilder::new()
@@ -2425,21 +2745,40 @@ impl App {
             }
         }
 
-        let (_, offset, viewport) = scrolled(
-            ui,
-            egui::Id::new("review list"),
-            true,
-            row_height + spacing,
-            list,
-            |list, ui| {
-                list.show_rows(ui, row_height, visible.len(), |ui, range| {
-                    for position in range {
-                        let index = visible[position];
-                        self.set_row(ui, index, &root);
-                    }
-                })
-            },
+        // The page's margin down the left of the list and a gap above the first
+        // set, kept here rather than by the panel, so the panels above can run
+        // the width of the window and draw their lines across all of it. Put
+        // into the rectangle the list is drawn in, because that is the one thing
+        // that decides where the list starts.
+        let room = ui.available_rect_before_wrap();
+        let room = egui::Rect::from_min_max(
+            egui::pos2(room.left() + PAGE_MARGIN, room.top() + SECTION_GAP),
+            room.max,
         );
+        // What a row comes out as, worked out here where the list's own room is
+        // known: inside a scroll area nothing is told where the area ends.
+        let row_width = (room.width() - SCROLL_BAR - PAGE_MARGIN).max(0.0);
+
+        let (_, offset, viewport) = ui
+            .allocate_new_ui(egui::UiBuilder::new().max_rect(room), |ui| {
+                let list_id = egui::Id::new("review list");
+                scrolled(
+                    ui,
+                    list_id,
+                    true,
+                    row_height + spacing,
+                    list,
+                    |list, ui| {
+                        list.show_rows(ui, row_height, visible.len(), |ui, range| {
+                            for position in range {
+                                let index = visible[position];
+                                self.set_row(ui, index, &root, row_width);
+                            }
+                        })
+                    },
+                )
+            })
+            .inner;
         self.list_offset = offset;
         self.list_viewport = viewport;
     }
@@ -2460,6 +2799,113 @@ impl App {
         }
     }
 
+    /// Whether every picture in a set has been said not to be a copy of every
+    /// other picture in it. A set like that is shown, so it can be seen and
+    /// changed back, and nothing else in the program acts on it.
+    ///
+    /// Every pair, not some: a set where two of five have been separated is
+    /// still a set of copies, and the three that are copies still are.
+    fn is_ignored(&self, set: &DuplicateSet) -> bool {
+        if set.members.len() < 2 {
+            return false;
+        }
+        pairs_of(set).all(|pair| self.ignored.contains(&pair))
+    }
+
+    /// Say that none of the pictures in this set are copies of each other, and
+    /// write that down in the folder's index so the next search knows it too.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn ignore_set(&mut self, set_id: i64) {
+        let Some(set) = self.sets.iter().find(|set| set.set_id == set_id) else {
+            return;
+        };
+        let pairs: Vec<(i64, i64)> = pairs_of(set).collect();
+        self.ignored.extend(pairs.iter().copied());
+        // What the set kept stays with it, and so does where the preview was.
+        // Neither is acted on while it is ignored: nothing goes from a set that
+        // is not a set of copies, and no ring is drawn round a picture in one.
+        // Both are what taking it back gives back — the mark is where it was —
+        // and the preview is where the cursor keys walk from: left and up out of
+        // a set that has just been ignored go to the set before it, right and
+        // down to the set after it, which they cannot do from nowhere.
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        let result =
+            db::open_for_notes(db_path).and_then(|conn| db::ignore(&conn, &pairs));
+        if let Err(err) = result {
+            runlog::log_line!("the ignored pairs could not be written: {err:#}");
+        }
+    }
+
+    /// Take it back: the pictures in this set are copies of each other after
+    /// all. What was written down goes, and the set is a set again.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn unignore_set(&mut self, set_id: i64) {
+        let Some(set) = self.sets.iter().find(|set| set.set_id == set_id) else {
+            return;
+        };
+        let pairs: Vec<(i64, i64)> = pairs_of(set).collect();
+        for pair in &pairs {
+            self.ignored.remove(pair);
+        }
+        let Some(db_path) = &self.db_path else {
+            return;
+        };
+        let result = db::open_for_notes(db_path).and_then(|conn| db::unignore(&conn, &pairs));
+        if let Err(err) = result {
+            runlog::log_line!("the ignored pairs could not be taken back: {err:#}");
+        }
+    }
+
+    /// Take what a folder's index says about itself. Every one of these belongs
+    /// to the folder rather than to the program, and a folder that has never
+    /// said leaves what is on screen alone.
+    fn take_notes(&mut self, notes: crate::notes::Notes) {
+        self.noted = true;
+        // An index built over the subfolders has to be scanned that way again,
+        // or the next pass drops every row under them.
+        if let Some(setting) = notes.recurse {
+            self.recurse = setting;
+        }
+        if let Some(choice) = notes.disposal.as_deref().and_then(Destination::from_name) {
+            self.destination = choice;
+        }
+        if let Some(folder) = notes.move_dir {
+            self.move_dir = folder;
+        }
+        if let Some(setting) = notes.multi_select {
+            self.multi_select = setting;
+        }
+        if let Some(setting) = notes.match_whole_frame {
+            self.match_whole_frame = setting;
+        }
+        if let Some(setting) = notes.match_corners {
+            self.match_corners = setting;
+        }
+        if let Some(setting) = notes.within_a_folder {
+            self.within_a_folder = setting;
+        }
+        if let Some(setting) = notes.auto_rescan {
+            self.auto_rescan = setting;
+        }
+        // Neither box means anything without the one above it, and a box that
+        // means nothing is not left ticked.
+        self.settle_the_boxes();
+    }
+
+    /// The boxes that depend on another box. Ticked, they say something; with
+    /// what they depend on switched off they say nothing, so they come off and
+    /// cannot be put back on until it returns.
+    fn settle_the_boxes(&mut self) {
+        if !self.recurse {
+            self.within_a_folder = false;
+        }
+        if !self.keep_index {
+            self.auto_rescan = false;
+        }
+    }
+
     /// Which ways of matching this folder is searched with. A fact about the
     /// folder: a folder where crops matter is searched for crops every time it
     /// is opened, and one where they do not is not made to wait for them.
@@ -2468,10 +2914,12 @@ impl App {
         let Some(db_path) = &self.db_path else {
             return;
         };
-        let mark = |on: bool| if on { "1" } else { "0" };
+        use crate::notes::{mark, MATCH_CORNERS, MATCH_WHOLE_FRAME, AUTO_RESCAN, WITHIN_A_FOLDER};
         let result = db::open_for_notes(db_path).and_then(|conn| {
-            db::set_meta(&conn, "match_whole_frame", mark(self.match_whole_frame))?;
-            db::set_meta(&conn, "match_corners", mark(self.match_corners))
+            db::set_meta(&conn, MATCH_WHOLE_FRAME, mark(self.match_whole_frame))?;
+            db::set_meta(&conn, MATCH_CORNERS, mark(self.match_corners))?;
+            db::set_meta(&conn, WITHIN_A_FOLDER, mark(self.within_a_folder))?;
+            db::set_meta(&conn, AUTO_RESCAN, mark(self.auto_rescan))
         });
         if let Err(err) = result {
             runlog::log_line!("the ways of matching could not be written: {err:#}");
@@ -2506,9 +2954,26 @@ impl App {
         let Some(at) = self.position(visible) else {
             return;
         };
-        let Some((set, member)) = step(&counts, at, direction) else {
+        let Some(mut landed) = step(&counts, at, direction) else {
             return;
         };
+        // A set nobody calls a set of copies is not somewhere to be: the keys
+        // step over it to the next set that is one, and stop where they are when
+        // there is none.
+        let ignored: Vec<bool> =
+            visible.iter().map(|index| self.is_ignored(&self.sets[*index])).collect();
+        while ignored.get(landed.0).copied().unwrap_or(false) {
+            let from = match direction {
+                Direction::Forward => (landed.0, counts[landed.0].saturating_sub(1)),
+                Direction::Back => (landed.0, 0),
+                Direction::NextSet | Direction::PreviousSet => landed,
+            };
+            let Some(next) = step(&counts, from, direction) else {
+                return;
+            };
+            landed = next;
+        }
+        let (set, member) = landed;
         self.selected = Some(self.sets[visible[set]].members[member].file_id);
         self.scroll_to = Some(set);
         self.show_selected = true;
@@ -2529,6 +2994,12 @@ impl App {
         else {
             return;
         };
+        // A set nobody calls a set of copies keeps nothing and loses nothing, so
+        // there is no mark in it to move. What it kept before it was ignored is
+        // left exactly as it was, for the day somebody takes it back.
+        if self.is_ignored(set) {
+            return;
+        }
         let set_id = set.set_id;
         let members: Vec<i64> = set.members.iter().map(|member| member.file_id).collect();
 
@@ -2566,6 +3037,10 @@ impl App {
         let mut count = 0usize;
         let mut bytes = 0i64;
         for set in &self.sets {
+            // Nothing goes from a set that is not a set of copies.
+            if self.is_ignored(set) {
+                continue;
+            }
             let keeping = self.keep.get(&set.set_id);
             for member in &set.members {
                 if !keeps(keeping, member.file_id) {
@@ -2925,7 +3400,10 @@ impl App {
             });
     }
 
-    fn set_row(&mut self, ui: &mut egui::Ui, index: usize, root: &std::path::Path) {
+    /// `width` is what the box around the set comes out as. The list works it
+    /// out from its own room, because what is inside a scroll area is not told
+    /// where the area ends.
+    fn set_row(&mut self, ui: &mut egui::Ui, index: usize, root: &std::path::Path, width: f32) {
         let set_id = self.sets[index].set_id;
         let members = self.sets[index].members.clone();
         let keeping = self.keep.get(&set_id).cloned();
@@ -2937,48 +3415,89 @@ impl App {
         // The width is the room less what the frame drawn round the row adds to
         // it, and less the margin the window keeps at its edges, so the box ends
         // as far from the list's scroll bar as it begins from the window's edge.
-        let margin = (ui.max_rect().left() - ui.ctx().screen_rect().left()).max(0.0);
-        let size = egui::vec2((ui.available_width() - margin).max(0.0), set_row_height(ui));
-        ui.allocate_ui(size, |ui| {
-        // The row takes the same height whatever its box does, because the list
-        // places the rows it is not drawing by that number. A set whose strip
-        // needs no scroll bar has a shorter box and the space goes under it.
+        let size = egui::vec2(width.max(0.0), set_row_height(ui));
+        let ignored = self.is_ignored(&self.sets[index]);
+        // The row is the box and the space kept under it. The box is the top of
+        // the row; the space below it is what separates one set from the next.
+        let room = egui::Rect::from_min_size(ui.next_widget_position(), size);
+        // The line round the box is drawn half on either side of the rectangle
+        // it is given, so that rectangle is set in by the width of the line: the
+        // box then ends exactly at the row's edges, and the gap from the window
+        // to its left edge is the gap from its right edge to the scroll bar.
+        let inside = egui::Rect::from_min_max(
+            room.min,
+            egui::pos2(room.right(), room.bottom() - BETWEEN_BOXES),
+        )
+        .shrink(BOX_EDGE);
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(room), |ui| {
         ui.set_min_size(size);
-        ui.set_width(size.x);
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inside), |ui| {
         egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::ZERO)
             .show(ui, |ui| {
-                // The strip keeps room under it for its own scroll bar, and only
-                // when it has one. A set that fits across the window does not
-                // scroll and does not get a bar, and room kept for a bar nobody
-                // draws is a band of empty space under the file names.
                 let gap = ui.spacing().item_spacing.x;
-                let across: f32 = members.iter().map(tile_width).sum::<f32>()
-                    + gap * (members.len().saturating_sub(1)) as f32;
-                let scrolls = across > ui.max_rect().width() + 0.5;
-                ui.set_height(tile_strip_height(ui) + if scrolls { SCROLL_BAR } else { 0.0 });
-                let inside = ui.max_rect();
+                // The room for the strip's own scroll bar is kept whether or not
+                // this set has one, so every box is the height the list places
+                // its rows at and one box follows the next with the same space
+                // between them.
+                ui.set_height(inside.height());
+                // The strip and the buttons are both drawn into rectangles of
+                // their own, which claim no width for the box around them. Left
+                // at that the box ends up as wide as the row of buttons.
+                ui.set_min_width(inside.width());
+
+                // The strip has the top of the box, down to where the buttons
+                // begin, and keeps its own room inside the box's edge, since the
+                // box itself keeps none. Given the whole box it would put its
+                // own scroll bar under the buttons, at the very bottom.
+                let strip = egui::Rect::from_min_size(
+                    inside.min + egui::vec2(BOX_PADDING, BOX_PADDING),
+                    egui::vec2(
+                        inside.width() - 2.0 * BOX_PADDING,
+                        tile_strip_height(ui) + SCROLL_BAR,
+                    ),
+                );
 
                 // One tile's width is what a click on the strip's scroll bar
                 // moves by, and the first tile's is as good a step as any.
                 let step = members.first().map_or(TILE.x, tile_width);
                 let bar = egui::Id::new(("set bar", set_id));
-                let (_, offset, viewport) = scrolled(
-                    ui,
-                    bar,
-                    false,
-                    step,
-                    egui::ScrollArea::horizontal().id_salt(("set", set_id)),
-                    |area, ui| {
-                        area.show(ui, |ui| {
-                            ui.horizontal_top(|ui| {
-                                for member in &members {
-                                    let width = tile_width(member);
-                                    self.member_tile(ui, member, keeping.as_ref(), root, width);
-                                }
-                            });
-                        })
-                    },
-                );
+                let (_, offset, viewport) = ui
+                    .allocate_new_ui(egui::UiBuilder::new().max_rect(strip), |ui| {
+                        // A set nobody calls a set of copies is half there:
+                        // everything above the buttons, the pictures and every
+                        // line of writing under them, at half its opacity. The
+                        // buttons are how it stops being ignored, so they are
+                        // not faded with the rest of it.
+                        if ignored {
+                            ui.set_opacity(0.5);
+                        }
+                        scrolled(
+                            ui,
+                            bar,
+                            false,
+                            step,
+                            egui::ScrollArea::horizontal().id_salt(("set", set_id)),
+                            |area, ui| {
+                                area.show(ui, |ui| {
+                                    ui.horizontal_top(|ui| {
+                                        for member in &members {
+                                            let width = tile_width(member);
+                                            self.member_tile(
+                                                ui,
+                                                member,
+                                                keeping.as_ref(),
+                                                root,
+                                                width,
+                                                ignored,
+                                            );
+                                        }
+                                    });
+                                })
+                            },
+                        )
+                    })
+                    .inner;
 
                 // The cursor keys move the preview along the strip, and the strip
                 // follows: as far as it takes to bring the picture on screen and
@@ -2994,43 +3513,66 @@ impl App {
                     self.show_selected = false;
                 }
 
-                // Over the strip rather than above it. A row of its own to hold
-                // one button is a row of the list nobody can see pictures in.
-                let edge =
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x33, 0x33, 0x33));
-                // As tall as the style draws a button. Given any less, the
-                // button overflows what it was given and drags the box down
-                // with it, which is empty space under the last line of every
-                // set in the list.
-                let button = egui::vec2(
-                    KEEP_BUTTON_WIDTH,
-                    ui.spacing().interact_size.y + 2.0 * ui.spacing().button_padding.y,
+                // What the whole set can be told to do, in a row along the
+                // bottom of it: everything, nothing, or that it is not a set of
+                // copies at all. Under the pictures rather than over them,
+                // because the pictures are what a set is.
+                // A band of its own under the pictures, so the row reads as the
+                // foot of the set rather than as three buttons adrift in it. It
+                // is the bottom of the box, corner to corner: the box keeps no
+                // margin, so there is nothing between the two.
+                let band = egui::Rect::from_min_max(
+                    egui::pos2(inside.left(), inside.bottom() - button_row_height(ui)),
+                    inside.max,
                 );
-                let at = egui::Rect::from_min_size(
-                    egui::pos2(inside.right() - button.x, inside.top()),
-                    button,
-                );
-                if put_at_the_right(ui, at, "keep all", edge).clicked() {
-                    self.keep.insert(set_id, Keep::All);
-                }
+                ui.painter().rect_filled(band, 0.0, BUTTON_ROW_BACKGROUND);
 
-                // Ending level with the last line of text under the pictures,
-                // which is where the strip itself ends, and above the strip's
-                // own scroll bar, which has an arrow in the corner this would
-                // otherwise cover. Measured from the strip rather than from the
-                // frame, so it stays level whatever the frame is given.
-                let at = egui::Rect::from_min_size(
-                    egui::pos2(
-                        inside.right() - button.x,
-                        inside.top() + tile_strip_height(ui) - button.y,
-                    ),
-                    button,
+                let mut pressed = None;
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new()
+                        .max_rect(band)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        // The presets under the slider are a row of buttons the
+                        // size of their own words, spaced by the style, with the
+                        // one that is on drawn as pressed. These are the same,
+                        // because they are the same kind of thing.
+                        ui.spacing_mut().button_padding = PRESET_PADDING;
+                        for (label, what) in [
+                            ("keep all", SetAction::KeepAll),
+                            ("keep none", SetAction::KeepNone),
+                            // The third one undoes itself: a set that has been
+                            // ignored is one press away from being a set again.
+                            (
+                                if ignored { "unignore" } else { "ignore" },
+                                if ignored { SetAction::Unignore } else { SetAction::Ignore },
+                            ),
+                        ] {
+                            // An ignored set keeps nothing, so the two about
+                            // keeping mean nothing until it is a set again.
+                            let usable = !ignored || what == SetAction::Unignore;
+                            let button =
+                                egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
+                            if ui.add_enabled(usable, button).clicked() {
+                                pressed = Some(what);
+                            }
+                        }
+                    },
                 );
-                if put_at_the_right(ui, at, "keep none", edge).clicked() {
+                match pressed {
+                    Some(SetAction::KeepAll) => {
+                        self.keep.insert(set_id, Keep::All);
+                    }
                     // Nothing marked is nothing kept, so the whole set goes.
-                    self.keep.remove(&set_id);
+                    Some(SetAction::KeepNone) => {
+                        self.keep.remove(&set_id);
+                    }
+                    Some(SetAction::Ignore) => self.ignore_set(set_id),
+                    Some(SetAction::Unignore) => self.unignore_set(set_id),
+                    None => {}
                 }
             });
+        });
         });
     }
 
@@ -3076,9 +3618,13 @@ impl App {
         keeping: Option<&Keep>,
         root: &std::path::Path,
         width: f32,
+        ignored: bool,
     ) {
-        let kept = keeps(keeping, member.file_id);
-        let showing = self.selected == Some(member.file_id);
+        // A set nobody calls a set of copies keeps nothing and shows nothing as
+        // kept: no border and no ring. Half showing is the strip's business and
+        // is done to the whole of it at once.
+        let kept = !ignored && keeps(keeping, member.file_id);
+        let showing = !ignored && self.selected == Some(member.file_id);
         let keep_colour = egui::Color32::from_rgb(90, 180, 110);
 
         let tall = tile_strip_height(ui);
@@ -3107,12 +3653,23 @@ impl App {
                     .outer_margin(egui::Margin::symmetric(TILE_RING, 0.0));
 
                 let framed = frame.show(ui, |ui| {
-                    let picture = if on_screen {
-                        self.thumbs.get(member.file_id, thumbs::THUMB_EDGE, root, &member.rel_path)
-                    } else {
-                        None
-                    };
+                    // The same picture whether or not the set is ignored. There
+                    // is one of each, read once: a second copy of every picture
+                    // would be a second read and a second wait, and ignoring a
+                    // set has to show the moment it is clicked.
+                    let picture = on_screen
+                        .then(|| {
+                            self.thumbs.get(
+                                member.file_id,
+                                thumbs::THUMB_EDGE,
+                                root,
+                                &member.rel_path,
+                            )
+                        })
+                        .flatten();
                     match picture {
+                        // Half showing when the set is ignored, but not by this:
+                        // the whole strip is drawn at half its opacity.
                         Some(texture) => ui.add(
                             egui::Image::new(&texture)
                                 .fit_to_exact_size(TILE)
@@ -3392,6 +3949,11 @@ impl App {
     fn build_plan(&self) -> Plan {
         let mut sets: Vec<Vec<imgdedupe_core::matching::Member>> = Vec::new();
         for set in &self.sets {
+            // A set nobody calls a set of copies is a set nothing happens to:
+            // not kept, not removed, not counted.
+            if self.is_ignored(set) {
+                continue;
+            }
             let keeping = self.keep.get(&set.set_id);
             let members = set
                 .members
@@ -3921,7 +4483,6 @@ mod tests {
         settle(&mut app);
         app.load_sets();
         settle(&mut app);
-        app.cancel_work();
         app.scan.finished = Some(String::from("cancelled"));
 
         app.load_sets();
@@ -4384,7 +4945,7 @@ mod tests {
                 for index in 0..app.sets.len() {
                     let placed = set_row_height(ui);
                     let before = ui.next_widget_position().y;
-                    app.set_row(ui, index, &root);
+                    app.set_row(ui, index, &root, ui.available_width());
                     let spacing = ui.spacing().item_spacing.y;
                     taken.push((ui.next_widget_position().y - before - spacing, placed));
                 }
@@ -5037,7 +5598,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
                 },
             )
             .shapes;
@@ -5083,6 +5644,7 @@ mod tests {
 
         let ctx = window();
         let mut taken = 0.0;
+        let mut buttons = 0.0;
         let output = ctx.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -5093,8 +5655,9 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    buttons = button_row_height(ui);
                     let before = ui.next_widget_position().y;
-                    app.set_row(ui, 0, &root);
+                    app.set_row(ui, 0, &root, ui.available_width());
                     taken = ui.next_widget_position().y - before;
                 });
             },
@@ -5119,12 +5682,12 @@ mod tests {
         }
         assert!(bottom > 0.0, "the row painted no text at all");
 
-        // What is under the last line: the strip's scroll bar, the padding the
-        // frame draws inside its own edge, and the space to the next row.
-        // Nothing else.
+        // What is under the last line: the strip's scroll bar, the row of
+        // buttons, the padding the frame draws inside its own edge, and the
+        // space to the next row. Nothing else.
         let spare = taken - bottom;
         assert!(
-            spare < SCROLL_BAR + ROW_FRAME_EXTRA,
+            spare < SCROLL_BAR + buttons + BOX_PADDING + 2.0 * BOX_EDGE + 8.0,
             "the box is {spare} points taller than the tiles in it"
         );
     }
@@ -5173,7 +5736,7 @@ mod tests {
                 });
             }
             ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
         };
 
@@ -5233,7 +5796,7 @@ mod tests {
                 input.events.push(egui::Event::PointerMoved(pos));
             }
             ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
             .shapes
         };
@@ -5298,7 +5861,7 @@ mod tests {
             let _ = ctx.run(
                 egui::RawInput { screen_rect: Some(screen), ..Default::default() },
                 |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
                 },
             );
             ctx.data(|data| data.get_temp::<f32>(bar))
@@ -5339,8 +5902,61 @@ mod tests {
         );
     }
 
-    /// Keep none sits at the foot of the tiles, level with the last line under
-    /// the pictures, rather than floating somewhere above it.
+    /// The three buttons sit in a row along the bottom of a set, in order and
+    /// with space between them, under the pictures rather than over them. The
+    /// first two decide what the set keeps and the third says it is not a set of
+    /// copies at all.
+    #[test]
+    fn a_set_has_its_buttons_in_a_row_along_the_bottom() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let drawn = ctx
+            .run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            })
+            .shapes;
+
+        let painted = texts(&drawn);
+        let where_it_is = |label: &str| {
+            painted
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("no {label} button was drawn"))
+        };
+        let all = where_it_is("keep all");
+        let none = where_it_is("keep none");
+        let ignore = where_it_is("ignore");
+
+        // In that order, left to right, with room between them.
+        assert!(all.right() < none.left(), "keep none is not right of keep all");
+        assert!(none.right() < ignore.left(), "ignore is not right of keep none");
+        assert!(none.left() - all.right() > 4.0, "the buttons are not spaced apart");
+        // The same space after each of them, however long its word is.
+        let first = none.left() - all.right();
+        let second = ignore.left() - none.right();
+        assert!(
+            (first - second).abs() < 2.0,
+            "the gaps between the buttons are {first} and {second}"
+        );
+        assert!(
+            (all.center().y - ignore.center().y).abs() < 2.0,
+            "the buttons are not on one row"
+        );
+
+        // Under the pictures: below the lowest line of text in the tiles.
+        let lowest = painted
+            .iter()
+            .filter(|(text, _)| !["keep all", "keep none", "ignore"].contains(&text.as_str()))
+            .map(|(_, rect)| rect.bottom())
+            .fold(0.0_f32, f32::max);
+        assert!(all.top() >= lowest, "the buttons are over the pictures rather than under them");
+    }
+
     /// A set row is as tall as what it holds, and as wide as the room it is
     /// given without running under the list's scroll bar. The box around a set
     /// is drawn by a frame that adds its own margin, so a row built to the whole
@@ -5355,17 +5971,27 @@ mod tests {
         let screen =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
         let mut bar_at = 0.0_f32;
+        let mut list_at = 0.0_f32;
+        let mut buttons = 0.0_f32;
         let output = ctx.run(
             egui::RawInput { screen_rect: Some(screen), ..Default::default() },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    // As the list gives it: the width less the scroll bar it
-                    // paints down the right.
-                    let room = ui.available_rect_before_wrap();
-                    let inside = room.with_max_x(room.right() - SCROLL_BAR);
-                    bar_at = inside.right();
+                    buttons = button_row_height(ui);
+                    // As the list gives it: the page's margin down the left, and
+                    // the width less the scroll bar it paints down the right and
+                    // the gap kept before that bar.
+                    let whole = ui.available_rect_before_wrap();
+                    let room = egui::Rect::from_min_max(
+                        egui::pos2(whole.left() + PAGE_MARGIN, whole.top()),
+                        whole.max,
+                    );
+                    let inside = room.with_max_x(room.right() - SCROLL_BAR - PAGE_MARGIN);
+                    list_at = whole.left();
+                    bar_at = room.right() - SCROLL_BAR;
+                    let wide = inside.width();
                     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inside), |ui| {
-                        app.set_row(ui, 0, &root)
+                        app.set_row(ui, 0, &root, wide)
                     });
                 });
             },
@@ -5379,64 +6005,20 @@ mod tests {
             .map(|(_, rect)| rect.bottom())
             .fold(0.0_f32, f32::max);
 
-        // The gap under the last line is the strip's own scroll bar and the
-        // margin the frame draws with, and nothing else.
+        // The gap under the last line is the strip's own scroll bar, the row of
+        // buttons, and the margin the frame draws with, and nothing else.
         let under = outline.bottom() - last;
         assert!(
-            under < SCROLL_BAR + 14.0,
+            under < SCROLL_BAR + buttons + 14.0,
             "the box goes {under} past the last line under the pictures"
         );
-        // The left of the box sits a margin in from the window, and its right
-        // leaves the same margin before the list's scroll bar.
-        let left = outline.left() - screen.left();
+        // The left of the box sits a margin in from where the list begins, and
+        // its right leaves the same margin before the list's scroll bar.
+        let left = outline.left() - list_at;
         let right = bar_at - outline.right();
         assert!(
-            (left - right).abs() < 2.0,
+            (left - right).abs() < 3.0,
             "the box is {left} from the left edge and {right} from the scroll bar"
-        );
-    }
-
-    #[test]
-    fn keep_none_sits_level_with_the_last_line_under_the_pictures() {
-        let found = folder_with_a_duplicate();
-        let mut app = reviewing(found.path());
-        let root = found.path().to_path_buf();
-
-        let ctx = window();
-        let shapes = ctx
-            .run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::pos2(0.0, 0.0),
-                        egui::vec2(900.0, 500.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
-                },
-            )
-            .shapes;
-
-        let painted = texts(&shapes);
-        let button = painted
-            .iter()
-            .find(|(text, _)| text == "keep none")
-            .map(|(_, rect)| *rect)
-            .expect("no keep none button was drawn");
-        let last = painted
-            .iter()
-            .filter(|(text, _)| text != "keep none")
-            .map(|(_, rect)| rect.bottom())
-            .fold(0.0_f32, f32::max);
-
-        // The button's words, not the button: they sit in the middle of it, so
-        // they end half its padding above where it does, and where it ends is
-        // level with the last line.
-        assert!(
-            (button.bottom() - last).abs() < 12.0,
-            "keep none ends at {} and the last line under the pictures at {last}",
-            button.bottom()
         );
     }
 
@@ -5480,7 +6062,7 @@ mod tests {
                 }
             }
             ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
             .shapes
         };
@@ -5794,6 +6376,99 @@ mod tests {
         assert!(app.match_whole_frame, "clicking one box switched the other off");
     }
 
+    /// Click where the index box is drawn, and say whether it went on.
+    fn ticks_the_index_box(app: &mut App, ctx: &egui::Context, screen: egui::Rect) -> bool {
+        let drawn = ctx
+            .run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.folder_section(ui, 700.0);
+                });
+            })
+            .shapes;
+        let Some(label) = label_rect(&drawn, "Save an index database for this folder") else {
+            return false;
+        };
+        let at = egui::pos2(label.left() - 8.0, label.center().y);
+        for pressed in [true, false] {
+            let mut input =
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            input.events.push(egui::Event::PointerMoved(at));
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.folder_section(ui, 700.0);
+                });
+            });
+        }
+        app.keep_index
+    }
+
+    /// Two of the boxes are about the box above them, and mean nothing without
+    /// it. Both are off and out of reach while what they depend on is off, and
+    /// keeping an index asks for a rescan on opening by itself.
+    #[test]
+    fn a_box_that_depends_on_another_is_off_and_out_of_reach_without_it() {
+        let ctx = window();
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let draw = |app: &mut App| {
+            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.folder_section(ui, 700.0);
+                });
+            })
+            .shapes
+        };
+
+        // Both are ticked, and both lose what they depend on.
+        app.recurse = true;
+        app.within_a_folder = true;
+        app.keep_index = true;
+        app.auto_rescan = true;
+        app.recurse = false;
+        app.keep_index = false;
+        app.settle_the_boxes();
+        assert!(!app.within_a_folder, "matching within folders survived the subfolders going");
+        assert!(!app.auto_rescan, "running on opening survived the index going");
+
+        // And with what they depend on off, they are drawn but cannot be
+        // reached: clicking where they are changes nothing.
+        let drawn = draw(&mut app);
+        let apart = label_rect(&drawn, "Only match within folders").expect("no box for that");
+        let opening =
+            label_rect(&drawn, "Automatically rescan when opening this index").expect("no box");
+        for box_at in [apart, opening] {
+            let at = egui::pos2(box_at.left() - 8.0, box_at.center().y);
+            let mut input =
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            input.events.push(egui::Event::PointerMoved(at));
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.folder_section(ui, 700.0);
+                });
+            });
+        }
+        assert!(!app.within_a_folder, "a box nobody can reach was ticked");
+        assert!(!app.auto_rescan, "a box nobody can reach was ticked");
+
+        // And saying yes to keeping an index says yes to rescanning on opening,
+        // which is what the box under it is for.
+        assert!(ticks_the_index_box(&mut app, &ctx, screen), "the index box was not ticked");
+        assert!(app.auto_rescan, "ticking the index box did not ask for a rescan");
+    }
+
     /// Both ways of matching are on to begin with, and switching one off is a
     /// fact about the folder: the index keeps it and opening that folder again
     /// comes back with it.
@@ -5810,6 +6485,1059 @@ mod tests {
         let again = reviewing(found.path());
         assert!(again.match_whole_frame, "whole pictures came back switched off");
         assert!(!again.match_corners, "the folder was opened again still matching crops");
+    }
+
+    /// The whole review page: the list keeps to its own side of the window,
+    /// whatever the preview pane beside it is dragged to. Nothing in it is
+    /// painted over the pane, and no set runs under the scroll bar.
+    #[test]
+    fn the_review_list_keeps_to_its_own_side_of_the_window() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        app.selected = app.sets[0].members.first().map(|member| member.file_id);
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        // The window's own panels, in the order the window puts them: the tabs
+        // across the top, then the page with no margin of its own, which is what
+        // lets the toolbar's line run the width of the window.
+        let draw = |app: &mut App| {
+            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("1  Scan");
+                    });
+                    ui.add_space(6.0);
+                });
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style())
+                            .inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| app.review_view(ui));
+            })
+            .shapes
+        };
+        // The panel settles on its width over a frame or two.
+        draw(&mut app);
+        draw(&mut app);
+        let drawn = draw(&mut app);
+
+        let pane = app.preview_width.expect("the preview pane was not drawn");
+        // The first set starts below the toolbar rather than against it, and the
+        // list's scroll bar starts level with it rather than above or below it.
+        let bar = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - SCROLL_BAR).abs() < 1.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some(rect.rect.top())
+                }
+                _ => None,
+            })
+            .fold(f32::MAX, f32::min);
+        // The first set starts below the toolbar rather than against it.
+        let toolbar = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.rect.width() > screen.width() - 1.0 => {
+                    Some(rect.rect.bottom())
+                }
+                _ => None,
+            })
+            .filter(|bottom| *bottom < screen.height() / 2.0)
+            .fold(0.0_f32, f32::max);
+        let first = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.stroke.width > 0.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some(rect.rect.top())
+                }
+                _ => None,
+            })
+            .fold(f32::MAX, f32::min);
+        assert!(
+            first - toolbar >= SECTION_GAP - 1.0,
+            "the first set starts {} under the toolbar",
+            first - toolbar
+        );
+        // Level with the first set, to within the line drawn round it: the bar
+        // begins at the row, and the box's line is drawn just inside that.
+        assert!(
+            (bar - first).abs() <= BOX_EDGE + 0.01,
+            "the scroll bar starts at {bar} and the first set at {first}"
+        );
+        let outlined: Vec<egui::Rect> = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => Some(rect.rect),
+                _ => None,
+            })
+            .collect();
+        let boxes: Vec<&egui::Rect> =
+            outlined.iter().filter(|rect| rect.width() > 200.0 && rect.height() > 100.0).collect();
+        assert!(!boxes.is_empty(), "no set was drawn");
+        let pane_starts = screen.right() - pane;
+        for set in boxes {
+            assert!(
+                set.right() < pane_starts,
+                "a set reaches {} and the preview pane starts at {pane_starts}",
+                set.right()
+            );
+        }
+
+        // And whatever the list draws is cut off at the list's own edge rather
+        // than painted over the pane beside it. The page behind everything is
+        // clipped to the whole window, which is not the list.
+        for clipped in &drawn {
+            let clip = clipped.clip_rect;
+            let of_the_list = clip != screen && clip.left() < pane_starts && clip.top() > 56.0;
+            if of_the_list {
+                assert!(
+                    clip.right() <= pane_starts + 0.5,
+                    "something in the list is clipped to {clip:?}, which reaches over the pane"
+                );
+            }
+        }
+    }
+
+    /// The bar beside the list marks the room the list is drawn in, so it is in
+    /// the same place whatever the list is scrolled to. Only the handle inside it
+    /// moves.
+    #[test]
+    fn the_scroll_bar_beside_the_list_stays_where_it_is_when_the_list_moves() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        let draw = |app: &mut App| {
+            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style())
+                            .inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| app.review_view(ui));
+            })
+            .shapes
+        };
+        // The track: as wide as a bar and as tall as the list. The handle inside
+        // it is the same width and shorter, so the tallest of them is the track.
+        let track = |drawn: &[egui::epaint::ClippedShape]| -> egui::Rect {
+            drawn
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect)
+                        if (rect.rect.width() - SCROLL_BAR).abs() < 1.0
+                            && rect.rect.height() > 100.0 =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .fold(egui::Rect::NOTHING, |tallest, rect| {
+                    if rect.height() > tallest.height() {
+                        rect
+                    } else {
+                        tallest
+                    }
+                })
+        };
+
+        draw(&mut app);
+        let before = track(&draw(&mut app));
+        assert!(before.is_finite(), "the list's scroll bar was not drawn");
+        let was = app.list_offset;
+
+        // Down to the second set, the way the cursor keys take it there.
+        app.scroll_to = Some(1);
+        draw(&mut app);
+        let after = track(&draw(&mut app));
+        assert!(app.list_offset > was, "the list did not move, so this measures nothing");
+        assert_eq!(before, after, "the bar moved with the list it is beside");
+    }
+
+    /// Every set is drawn whole: the line round it is inside what the list is
+    /// allowed to paint in, top and bottom, so no box is sliced by the edge of
+    /// the list. One box stands as far from the next as `BETWEEN_BOXES`, the gap
+    /// from the window's edge to a box's left edge is the gap from its right
+    /// edge to the scroll bar, and what is inside a box keeps the same room on
+    /// either side.
+    #[test]
+    fn the_set_boxes_are_drawn_whole_and_evenly_spaced() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert!(app.sets.len() >= 2, "two sets were needed and {} were found", app.sets.len());
+
+        let ctx = window();
+        // Short enough that the list has more in it than fits, so the bar beside
+        // it is drawn and can be measured against the boxes.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        let draw = |app: &mut App| {
+            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("1  Scan");
+                    });
+                    ui.add_space(6.0);
+                });
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style())
+                            .inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| app.review_view(ui));
+            })
+            .shapes
+        };
+        draw(&mut app);
+        draw(&mut app);
+        let drawn = draw(&mut app);
+
+        // The boxes: the only outlined rectangles as wide as a set and as tall.
+        let mut boxes: Vec<(egui::Rect, egui::Rect, f32)> = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.stroke.width > 0.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some((rect.rect, clipped.clip_rect, rect.stroke.width))
+                }
+                _ => None,
+            })
+            .collect();
+        boxes.sort_by(|left, right| left.0.top().total_cmp(&right.0.top()));
+        assert!(boxes.len() >= 2, "{} sets were drawn, not two", boxes.len());
+
+        // Whole, not sliced: the line is drawn half on either side of the
+        // rectangle, and all of it has to be inside what the list may paint in.
+        for (set, clip, stroke) in &boxes {
+            let line = set.expand(stroke / 2.0);
+            // The bottom-most box runs off the end of the window, which is what
+            // a list does; none of them is cut off at the top of it.
+            assert!(
+                clip.top() <= line.top() + 0.01,
+                "a set drawn at {set:?} has its top cut off by the clip at {clip:?}"
+            );
+            assert!(
+                clip.left() <= line.left() + 0.01 && clip.right() >= line.right() - 0.01,
+                "a set drawn at {set:?} is cut off sideways by the clip at {clip:?}"
+            );
+        }
+
+        // Spaced, not stacked.
+        let gap = boxes[1].0.top() - boxes[0].0.bottom();
+        assert!(
+            gap >= BETWEEN_BOXES - 0.01,
+            "one set ends at {} and the next starts at {}, {gap} apart",
+            boxes[0].0.bottom(),
+            boxes[1].0.top()
+        );
+
+        // The same room on either side of a box: the window's margin on the
+        // left, and the same again between the box and the bar beside the list.
+        let bar = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.width() - SCROLL_BAR).abs() < 1.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some(rect.rect.left())
+                }
+                _ => None,
+            })
+            .fold(f32::MAX, f32::min);
+        assert!(bar < screen.right(), "the list's scroll bar was not drawn");
+        let (first, _, stroke) = boxes[0];
+        let left = first.left() - stroke / 2.0;
+        let right = bar - (first.right() + stroke / 2.0);
+        assert!(
+            (left - right).abs() < 0.51,
+            "a set has {left} to the left of it and {right} to the right of it"
+        );
+
+        // And inside a box, the pictures keep the same room on either side: what
+        // the strip is clipped to sits `BOX_PADDING` inside the box at both
+        // edges, so the first picture starts as far in as the last one ends.
+        let strip = drawn
+            .iter()
+            .map(|clipped| clipped.clip_rect)
+            .filter(|clip| {
+                clip.top() > first.top()
+                    && clip.bottom() < first.bottom()
+                    && clip.width() > 100.0
+                    && clip.right() < bar
+            })
+            .fold(egui::Rect::NOTHING, |widest, clip| {
+                if clip.width() > widest.width() {
+                    clip
+                } else {
+                    widest
+                }
+            });
+        assert!(strip.is_finite(), "the pictures in the first set were not drawn");
+        let inside = first.shrink(stroke / 2.0);
+        let (before, after) = (strip.left() - inside.left(), inside.right() - strip.right());
+        assert!(
+            (before - after).abs() < 0.51,
+            "the pictures start {before} inside the box and end {after} inside it"
+        );
+    }
+
+    /// A set nobody calls a set of copies is drawn half there: the pictures and
+    /// every line of writing under them at half their opacity. The buttons are
+    /// not, because they are how it stops being ignored.
+    #[test]
+    fn an_ignored_set_is_drawn_at_half_its_opacity_and_its_buttons_are_not() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        let draw = |app: &mut App| {
+            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style())
+                            .inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| app.review_view(ui));
+            })
+            .shapes
+        };
+        // What one line of writing in the list is drawn in. The file names under
+        // the pictures are the strip; "keep all" is the row of buttons. Only what
+        // is in the list: the pane beside it names the same file and is not part
+        // of any set.
+        let alpha_of = |drawn: &[egui::epaint::ClippedShape],
+                        words: &str,
+                        list_ends: f32|
+         -> Option<u8> {
+            drawn.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text)
+                    if text.pos.x < list_ends && text.galley.text().contains(words) =>
+                {
+                    Some(text.fallback_color.a())
+                }
+                _ => None,
+            })
+        };
+
+        draw(&mut app);
+        let plain = draw(&mut app);
+        let list_ends = screen.right() - app.preview_width.expect("the preview pane was not drawn");
+        let alpha_of = |drawn: &[egui::epaint::ClippedShape], words: &str| -> Option<u8> {
+            alpha_of(drawn, words, list_ends)
+        };
+        let strip = alpha_of(&plain, "one.png").expect("no file name was drawn under a picture");
+        let buttons = alpha_of(&plain, "keep all").expect("no buttons were drawn under the set");
+
+        app.ignore_set(set_id);
+        assert!(app.is_ignored(&app.sets[0]), "the set was not ignored");
+        draw(&mut app);
+        let faded = draw(&mut app);
+
+        let now = alpha_of(&faded, "one.png").expect("the file name went when the set was ignored");
+        assert!(
+            (f32::from(now) - f32::from(strip) / 2.0).abs() <= 2.0,
+            "the writing under the pictures went from {strip} to {now}, which is not half of it"
+        );
+        assert_eq!(
+            alpha_of(&faded, "keep all"),
+            Some(buttons),
+            "the buttons under an ignored set were faded with the rest of it"
+        );
+    }
+
+    /// Ignoring a set says none of its pictures are copies of each other. The
+    /// set stays on the review page, nothing in it is kept or dropped, the
+    /// folder's index remembers it, and a review holding nothing else has
+    /// nowhere for a cleanup to go.
+    #[test]
+    fn an_ignored_set_is_shown_and_left_alone() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 1, "the copies were not found");
+        let set_id = app.sets[0].set_id;
+        assert!(!app.is_ignored(&app.sets[0]), "a set was ignored before anybody said so");
+        let (going, _) = app.selected_for_removal();
+        assert!(going > 0, "nothing was going to be removed to begin with");
+
+        app.ignore_set(set_id);
+
+        assert_eq!(app.sets.len(), 1, "the set went instead of being left alone");
+        assert!(app.is_ignored(&app.sets[0]), "the set was not ignored");
+        assert_eq!(app.selected_for_removal().0, 0, "an ignored set still had something going");
+        assert!(app.build_plan().files() == 0, "the cleanup still had something to do");
+        // What it kept is still written down, and counts for nothing while it is
+        // ignored. That is what taking it back gives back.
+        assert!(app.keep.contains_key(&set_id), "an ignored set forgot what it had kept");
+
+        // Written down, so the next run knows it too.
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        again.load_sets();
+        settle(&mut again);
+        assert_eq!(again.sets.len(), 1, "the set was not found again");
+        assert!(again.is_ignored(&again.sets[0]), "the folder forgot that the set was ignored");
+    }
+
+    /// Ignoring is one press, and so is taking it back: the pairs go from the
+    /// index, the set is a set again, and what it keeps works as it did.
+    #[test]
+    fn a_set_can_be_unignored_again() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+
+        app.ignore_set(set_id);
+        assert!(app.is_ignored(&app.sets[0]), "the set was not ignored");
+        app.unignore_set(set_id);
+        assert!(!app.is_ignored(&app.sets[0]), "the set is still ignored");
+        assert!(app.selected_for_removal().0 > 0, "the set is not being cleaned up again");
+
+        // And the index no longer holds any of it.
+        let conn = db::open_read_only(app.db_path.as_ref().expect("a db")).expect("open");
+        assert!(db::ignored(&conn).expect("read").is_empty(), "the index still holds the pairs");
+        let _ = conn.close();
+
+        // Opened again from nothing, the set is a set.
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        again.load_sets();
+        settle(&mut again);
+        assert!(!again.is_ignored(&again.sets[0]), "the folder came back with it still ignored");
+    }
+
+    /// What the real folder's index actually holds about itself: every setting
+    /// the window claims to keep in it, and whether it is there.
+    ///
+    /// Read-only, and prints rather than asserts, because the point is the list.
+    #[test]
+    #[ignore = "reads the index of the folder the application is set to"]
+    fn what_the_real_folders_index_says_about_itself() {
+        let folder = crate::settings::Settings::load()
+            .folder
+            .expect("the application has no folder set to test against");
+        let db_path = headless::default_db_path(&folder);
+        assert!(db_path.is_file(), "{} has no index", folder.display());
+        let conn = db::open_read_only(&db_path).expect("open the real index");
+
+        let mut tables = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")
+            .unwrap();
+        let names: Vec<String> =
+            tables.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        drop(tables);
+        println!("tables and views: {names:?}");
+
+        use crate::notes::{
+            AUTO_RESCAN, DISPOSAL, MATCH_CORNERS, MATCH_WHOLE_FRAME, MOVE_DIR, MULTI_SELECT,
+            RECURSE, WITHIN_A_FOLDER,
+        };
+        for key in [
+            RECURSE,
+            DISPOSAL,
+            MOVE_DIR,
+            MULTI_SELECT,
+            MATCH_WHOLE_FRAME,
+            MATCH_CORNERS,
+            WITHIN_A_FOLDER,
+            AUTO_RESCAN,
+        ] {
+            let held = db::get_meta(&conn, key).expect("read");
+            println!("{key}: {held:?}");
+        }
+        let _ = conn.close();
+    }
+
+    /// With "only match within folders" on, a search of the real folder puts no
+    /// set together out of two folders. Read-only: it searches the index that is
+    /// there and writes nothing.
+    #[test]
+    #[ignore = "searches the index of the folder the application is set to"]
+    fn only_matching_within_folders_holds_on_the_real_folder() {
+        let folder = crate::settings::Settings::load()
+            .folder
+            .expect("the application has no folder set to test against");
+        let db_path = headless::default_db_path(&folder);
+        assert!(db_path.is_file(), "{} has no index to search", folder.display());
+
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let images = {
+            let conn = db::open_snapshot(&db_path).expect("read the real index");
+            let held = matching::load_images(&conn, &never, &|_| {}).expect("load").expect("images");
+            let _ = conn.close();
+            std::sync::Arc::new(held)
+        };
+        println!("{} pictures in the index", images.len());
+
+        let mut thresholds = Thresholds::at(matching::DEFAULT_SENSITIVITY);
+        thresholds.within_a_folder = true;
+        let started = std::time::Instant::now();
+        let sets = matching::find_sets_in(&images, thresholds, &never, &|_| {})
+            .expect("search")
+            .expect("not cancelled");
+        println!("{} sets, folders kept apart, in {:.1}s", sets.len(), started.elapsed().as_secs_f64());
+
+        let folder_of = |path: &str| match path.rfind('/') {
+            Some(at) => path[..at].to_string(),
+            None => String::new(),
+        };
+        for set in &sets {
+            let mut folders: Vec<String> =
+                set.members.iter().map(|member| folder_of(&member.rel_path)).collect();
+            folders.sort();
+            folders.dedup();
+            assert_eq!(
+                folders.len(),
+                1,
+                "a set was made out of {} folders: {:?}",
+                folders.len(),
+                set.members.iter().map(|member| member.rel_path.as_str()).collect::<Vec<_>>()
+            );
+        }
+        assert!(!sets.is_empty(), "the search found nothing, so this measured nothing");
+    }
+
+    /// Every box the window keeps in the folder's index goes into the real
+    /// folder's index and comes back out of it, through the window's own writing
+    /// and reading rather than through hand-written SQL.
+    ///
+    /// The index is left exactly as it was found.
+    #[test]
+    #[ignore = "writes to the index of the folder the application is set to"]
+    fn every_box_the_window_keeps_survives_the_real_folders_index() {
+        let folder = crate::settings::Settings::load()
+            .folder
+            .expect("the application has no folder set to test against");
+        let db_path = headless::default_db_path(&folder);
+        assert!(db_path.is_file(), "{} has no index to test against", folder.display());
+        use crate::notes::mark;
+        let before = crate::notes::of_folder(&db_path).expect("read what the folder says");
+        println!("before: {before:?}");
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.folder = Some(folder.clone());
+        app.db_path = Some(db_path.clone());
+        // Every one of them away from its default, so a box that is not written
+        // at all cannot pass by looking like the default.
+        app.recurse = true;
+        app.keep_index = true;
+        app.within_a_folder = true;
+        app.auto_rescan = true;
+        app.match_whole_frame = false;
+        app.match_corners = false;
+        app.multi_select = true;
+        app.destination = Destination::Delete;
+        app.move_dir = String::from("somewhere else");
+        app.remember_ways_of_matching();
+        app.remember_multi_select();
+        app.remember_disposal();
+
+        let said = crate::notes::of_folder(&db_path).expect("read what the folder says");
+
+        // Put the folder back the way it was before anything is asserted.
+        let restore = db::open_for_notes(&db_path).expect("open the real index to write to");
+        for (key, was) in [
+            (crate::notes::WITHIN_A_FOLDER, before.within_a_folder.map(|it| mark(it).to_string())),
+            (crate::notes::AUTO_RESCAN, before.auto_rescan.map(|it| mark(it).to_string())),
+            (
+                crate::notes::MATCH_WHOLE_FRAME,
+                before.match_whole_frame.map(|it| mark(it).to_string()),
+            ),
+            (crate::notes::MATCH_CORNERS, before.match_corners.map(|it| mark(it).to_string())),
+            (crate::notes::MULTI_SELECT, before.multi_select.map(|it| mark(it).to_string())),
+            (crate::notes::DISPOSAL, before.disposal.clone()),
+            (crate::notes::MOVE_DIR, before.move_dir.clone()),
+        ] {
+            match was {
+                Some(value) => {
+                    let _ = db::set_meta(&restore, key, &value);
+                }
+                None => {
+                    let _ = restore.execute("DELETE FROM meta WHERE key = ?1", [key]);
+                }
+            }
+        }
+        drop(restore);
+
+        assert_eq!(said.within_a_folder, Some(true), "only match within folders was not kept");
+        assert_eq!(said.auto_rescan, Some(true), "rescan on opening was not kept");
+        assert_eq!(said.match_whole_frame, Some(false), "matching whole frames was not kept");
+        assert_eq!(said.match_corners, Some(false), "matching corners was not kept");
+        assert_eq!(said.multi_select, Some(true), "allow multi-select was not kept");
+        assert_eq!(said.disposal.as_deref(), Some("delete"), "the destination was not kept");
+        assert_eq!(
+            said.move_dir.as_deref(),
+            Some("somewhere else"),
+            "the folder to move to was not kept"
+        );
+    }
+
+    /// Every setting the window keeps in the real folder's index survives that
+    /// index being written out, which is what a pass does at the end of a run.
+    ///
+    /// This is what was wrong: the window writes a setting into the file, the
+    /// pass writes the copy it has been holding over the top, and the setting is
+    /// gone. `recurse` was the only one that ever came back, because the pass
+    /// writes that one itself.
+    ///
+    /// The index is left exactly as it was found.
+    #[test]
+    #[ignore = "writes to the index of the folder the application is set to"]
+    fn the_real_folders_index_keeps_every_setting_the_window_writes() {
+        use crate::notes::{
+            AUTO_RESCAN, DISPOSAL, MATCH_CORNERS, MATCH_WHOLE_FRAME, MOVE_DIR, MULTI_SELECT,
+            WITHIN_A_FOLDER,
+        };
+        let folder = crate::settings::Settings::load()
+            .folder
+            .expect("the application has no folder set to test against");
+        let db_path = headless::default_db_path(&folder);
+        assert!(db_path.is_file(), "{} has no index to test against", folder.display());
+
+        let keys = [
+            DISPOSAL,
+            MOVE_DIR,
+            MULTI_SELECT,
+            MATCH_WHOLE_FRAME,
+            MATCH_CORNERS,
+            WITHIN_A_FOLDER,
+            AUTO_RESCAN,
+        ];
+        // Values nothing else would write, so what comes back is what this wrote.
+        let mine = |key: &str| format!("written by the test: {key}");
+
+        let before: Vec<(String, Option<String>)> = {
+            let conn = db::open_read_only(&db_path).expect("open the real index");
+            let held = keys
+                .iter()
+                .map(|key| ((*key).to_string(), db::get_meta(&conn, key).expect("read")))
+                .collect();
+            let _ = conn.close();
+            held
+        };
+        println!("before: {before:?}");
+
+        // A pass, holding the index in memory from before any of this.
+        let held = db::open(&db_path).expect("open the real index for writing");
+        // The window, writing every one of them while that pass runs.
+        let window = db::open_for_notes(&db_path).expect("open the real index to write to");
+        for key in keys {
+            db::set_meta(&window, key, &mine(key)).expect("write the setting");
+        }
+        drop(window);
+        // The pass finishing.
+        db::close(held, &db_path).expect("write the real index out");
+
+        let after: Vec<(String, Option<String>)> = {
+            let conn = db::open_read_only(&db_path).expect("open the real index");
+            let held = keys
+                .iter()
+                .map(|key| ((*key).to_string(), db::get_meta(&conn, key).expect("read")))
+                .collect();
+            let _ = conn.close();
+            held
+        };
+
+        // Put the folder back the way it was, whatever the answer is.
+        let restore = db::open_for_notes(&db_path).expect("open the real index to write to");
+        for (key, was) in &before {
+            match was {
+                Some(value) => {
+                    let _ = db::set_meta(&restore, key, value);
+                }
+                None => {
+                    let _ = restore.execute("DELETE FROM meta WHERE key = ?1", [key]);
+                }
+            }
+        }
+        drop(restore);
+
+        for (key, now) in &after {
+            assert_eq!(
+                now.as_deref(),
+                Some(mine(key).as_str()),
+                "the pass wrote over {key}, which the window had just set"
+            );
+        }
+
+        // And what the pass owns is still the pass's: how far it reached is a
+        // fact about the index it just built, not something the window keeps.
+        let conn = db::open_read_only(&db_path).expect("open the real index");
+        assert!(
+            db::get_meta(&conn, "recurse").expect("read").is_some(),
+            "the pass lost how far it had reached"
+        );
+        let _ = conn.close();
+    }
+
+    /// The pairs marked in the real folder's index survive that index being
+    /// written out, which is what a pass does at the end of every run.
+    ///
+    /// Run against the folder the application is set to, because that is where
+    /// this went wrong: the index there is on a network mount, is megabytes, and
+    /// is read into memory and written back whole. A generated folder on this
+    /// disk passed this while the real one lost every pair.
+    ///
+    /// The index is left exactly as it was found.
+    #[test]
+    #[ignore = "writes to the index of the folder the application is set to"]
+    fn the_real_folders_index_keeps_what_was_marked_when_it_is_written_out() {
+        let folder = crate::settings::Settings::load()
+            .folder
+            .expect("the application has no folder set to test against");
+        let db_path = headless::default_db_path(&folder);
+        assert!(db_path.is_file(), "{} has no index to test against", folder.display());
+
+        let before = {
+            let conn = db::open_read_only(&db_path).expect("open the real index");
+            let pairs = db::ignored(&conn).expect("read what is marked");
+            let _ = conn.close();
+            pairs
+        };
+        println!("{} holds {} marked pairs", db_path.display(), before.len());
+
+        // Two pictures out of the real index, and a pair that is not already
+        // marked, so what this writes is this test's own.
+        let ids: Vec<i64> = {
+            let conn = db::open_read_only(&db_path).expect("open the real index");
+            let mut statement = conn.prepare("SELECT id FROM files ORDER BY id LIMIT 2").unwrap();
+            let rows: Vec<i64> =
+                statement.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+            drop(statement);
+            let _ = conn.close();
+            rows
+        };
+        assert_eq!(ids.len(), 2, "the real index holds fewer than two pictures");
+        let mine = db::pair(ids[0], ids[1]);
+        assert!(!before.contains(&mine), "the pair this test uses is already marked");
+
+        // A pass, holding the index in memory from before the button is pressed.
+        let held = db::open(&db_path).expect("open the real index for writing");
+        // The window, marking a set while that pass runs.
+        let window = db::open_for_notes(&db_path).expect("open the real index to write to");
+        db::ignore(&window, &[mine]).expect("mark the pair");
+        drop(window);
+        // The pass finishing.
+        db::close(held, &db_path).expect("write the real index out");
+
+        let after = {
+            let conn = db::open_read_only(&db_path).expect("open the real index");
+            let pairs = db::ignored(&conn).expect("read what is marked");
+            let _ = conn.close();
+            pairs
+        };
+
+        // Put it back the way it was, whatever the answer is.
+        let restore = db::open_for_notes(&db_path).expect("open the real index to write to");
+        let _ = db::unignore(&restore, &[mine]);
+        drop(restore);
+
+        assert!(after.contains(&mine), "the pass wrote over what was marked while it ran");
+        for was in &before {
+            assert!(after.contains(was), "the pass lost a pair that was already marked: {was:?}");
+        }
+    }
+
+    /// A window opened on the folder it was left on comes up knowing which of its
+    /// sets are not sets of copies. That folder is never chosen: it is set before
+    /// the first frame, so whatever reads a folder's index has to read the
+    /// ignored pairs too, or a set ignored last time comes back as a set.
+    #[test]
+    fn a_folder_the_window_opens_on_comes_up_with_its_ignored_sets_ignored() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 1, "the copies were not found");
+        app.ignore_set(app.sets[0].set_id);
+        assert!(app.is_ignored(&app.sets[0]), "the set was not ignored");
+
+        // The next run of the window, opened on the folder it was left on rather
+        // than on one somebody picked.
+        let saved = crate::settings::Settings {
+            folder: Some(found.path().to_path_buf()),
+            ..crate::settings::Settings::default()
+        };
+        let mut again = App::from_settings(saved);
+        again.open_what_was_left_open();
+        settle(&mut again);
+
+        assert!(!again.ignored.is_empty(), "the folder came up knowing nothing was ignored");
+        again.load_sets();
+        settle(&mut again);
+        assert_eq!(again.sets.len(), 1, "the set was not found again");
+        assert!(again.is_ignored(&again.sets[0]), "the set came back as a set of copies");
+    }
+
+    /// Taking a set back gives back the picture it was keeping. Ignoring it does
+    /// not throw the mark away: while a set is ignored the mark means nothing and
+    /// the cleanup passes over it, and the moment it is a set again the mark is
+    /// where it was left.
+    #[test]
+    fn unignoring_a_set_gives_back_the_picture_it_was_keeping() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![member(1, "a.jpg", 300), member(2, "b.jpg", 200)],
+        }];
+        app.selected = Some(2);
+        app.keep_selected();
+        assert_eq!(app.keep.get(&1), Some(&Keep::One(2)), "the picture was not kept");
+
+        app.ignore_set(1);
+        assert!(app.is_ignored(&app.sets[0]), "the set was not ignored");
+        assert_eq!(app.selected_for_removal().0, 0, "an ignored set still had something going");
+        // And nothing in it can be marked or unmarked while it is ignored.
+        app.selected = Some(1);
+        app.keep_selected();
+
+        app.unignore_set(1);
+        assert_eq!(
+            app.keep.get(&1),
+            Some(&Keep::One(2)),
+            "the set came back keeping something other than what it had kept"
+        );
+        assert_eq!(app.selected_for_removal().0, 1, "the set is not being cleaned up again");
+    }
+
+    /// Ignoring the set the preview is in leaves the preview where it was, so the
+    /// cursor keys have somewhere to walk from: left and up to the set before it,
+    /// right and down to the set after it.
+    #[test]
+    fn ignoring_the_set_the_preview_is_in_leaves_the_keys_somewhere_to_go() {
+        let sets = || {
+            vec![
+                DuplicateSet {
+                    set_id: 1,
+                    members: vec![member(1, "a.jpg", 10), member(2, "b.jpg", 10)],
+                },
+                DuplicateSet {
+                    set_id: 2,
+                    members: vec![member(3, "c.jpg", 10), member(4, "d.jpg", 10)],
+                },
+                DuplicateSet {
+                    set_id: 3,
+                    members: vec![member(5, "e.jpg", 10), member(6, "f.jpg", 10)],
+                },
+            ]
+        };
+        let visible: Vec<usize> = (0..3).collect();
+
+        // Left and right cross into the set at the picture nearest to where they
+        // left; up and down keep their place in the set they land in.
+        for (direction, wanted, what) in [
+            (Direction::Back, 2, "left"),
+            (Direction::PreviousSet, 2, "up"),
+            (Direction::Forward, 5, "right"),
+            (Direction::NextSet, 6, "down"),
+        ] {
+            let mut app = App::from_settings(crate::settings::Settings::default());
+            app.sets = sets();
+            // The preview is on the second picture of the middle set, and that
+            // set is the one being ignored.
+            app.selected = Some(4);
+            app.ignore_set(2);
+            assert!(app.is_ignored(&app.sets[1]), "the set was not ignored");
+            assert_eq!(app.selected, Some(4), "{what}: ignoring took the preview away");
+
+            app.walk(&visible, direction);
+            assert_eq!(app.selected, Some(wanted), "{what} did not leave the ignored set");
+        }
+    }
+
+    /// The cursor keys step over a set nobody calls a set of copies: on to the
+    /// next set that is one, and nowhere at all when there is none.
+    #[test]
+    fn the_cursor_keys_step_over_ignored_sets() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![
+            DuplicateSet { set_id: 1, members: vec![member(1, "a.jpg", 10), member(2, "b.jpg", 10)] },
+            DuplicateSet { set_id: 2, members: vec![member(3, "c.jpg", 10), member(4, "d.jpg", 10)] },
+            DuplicateSet { set_id: 3, members: vec![member(5, "e.jpg", 10), member(6, "f.jpg", 10)] },
+        ];
+        // The middle set is not a set of copies.
+        app.ignored.insert(db::pair(3, 4));
+        let visible: Vec<usize> = (0..app.sets.len()).collect();
+
+        // Walking forward off the end of the first set lands in the third.
+        app.selected = Some(2);
+        app.walk(&visible, Direction::Forward);
+        assert_eq!(app.selected, Some(5), "forward did not step over the ignored set");
+
+        // And back again the same way.
+        app.walk(&visible, Direction::Back);
+        assert_eq!(app.selected, Some(2), "back did not step over the ignored set");
+
+        // A set at a time, the same.
+        app.selected = Some(1);
+        app.walk(&visible, Direction::NextSet);
+        assert_eq!(app.selected, Some(5), "the next set was the ignored one");
+
+        // With nothing but ignored sets beyond it, the keys do nothing.
+        app.ignored.insert(db::pair(5, 6));
+        app.selected = Some(2);
+        app.walk(&visible, Direction::Forward);
+        assert_eq!(app.selected, Some(2), "the keys moved into an ignored set");
+        app.walk(&visible, Direction::NextSet);
+        assert_eq!(app.selected, Some(2), "the keys moved into an ignored set");
+    }
+
+    /// Ignoring one pair of a larger set is not ignoring the set: the rest of
+    /// them are still copies of each other.
+    #[test]
+    fn a_set_is_only_ignored_when_every_pair_in_it_is() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![member(1, "a.jpg", 100), member(2, "b.jpg", 100), member(3, "c.jpg", 100)],
+        }];
+        app.ignored.insert(db::pair(1, 2));
+        assert!(!app.is_ignored(&app.sets[0]), "one pair of three was enough to ignore the set");
+
+        app.ignored.insert(db::pair(1, 3));
+        app.ignored.insert(db::pair(2, 3));
+        assert!(app.is_ignored(&app.sets[0]), "every pair was ignored and the set was not");
+    }
+
+    /// The numbers beside the steps are the run's own clock: how long since the
+    /// Scan button was pressed, not how long the window has been open. A window
+    /// left open for an hour and then told to scan reports milliseconds, not an
+    /// hour.
+    #[test]
+    fn the_times_beside_the_steps_are_measured_from_the_scan_button() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        // As if the window had been sitting there for a while before the press.
+        app.started = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+
+        app.start_scan();
+        settle(&mut app);
+
+        let lit: Vec<(Lamp, u128)> = LAMPS
+            .iter()
+            .filter_map(|(lamp, _)| self_lit(&app, *lamp).map(|at| (*lamp, at)))
+            .collect();
+        assert!(!lit.is_empty(), "the pass lit nothing");
+        for (lamp, at) in lit {
+            assert!(at < 60_000, "{lamp:?} says {at} ms, which is the window's clock");
+        }
+    }
+
+    fn self_lit(app: &App, lamp: Lamp) -> Option<u128> {
+        app.lit.get(&lamp).copied()
+    }
+
+    /// A step nothing was going to do is not a step that failed. A pass over a
+    /// folder where nothing has changed reads no files and indexes none, and
+    /// those four steps end as passed over rather than as still to happen.
+    #[test]
+    fn the_steps_a_pass_had_nothing_to_do_are_marked_as_passed_over() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+
+        // Every file was read the first time round, so all four turned.
+        for lamp in [
+            Lamp::StartedReadingNewFiles,
+            Lamp::FinishedReadingNewFiles,
+            Lamp::StartedIndexingNewFiles,
+            Lamp::FinishedIndexingNewFiles,
+        ] {
+            assert_eq!(app.how_it_went(lamp), Went::Happened, "{lamp:?} did not happen");
+        }
+
+        // A second pass over the same folder has nothing to read or index.
+        app.start_scan();
+        settle(&mut app);
+        assert!(app.scan.unchanged > 0, "the second pass read the folder again");
+        for lamp in [
+            Lamp::StartedReadingNewFiles,
+            Lamp::FinishedReadingNewFiles,
+            Lamp::StartedIndexingNewFiles,
+            Lamp::FinishedIndexingNewFiles,
+        ] {
+            assert_eq!(app.how_it_went(lamp), Went::Skipped, "{lamp:?} was not passed over");
+        }
+        // And the ones that did happen still say so.
+        assert_eq!(app.how_it_went(Lamp::CheckedForIndexFile), Went::Happened);
+    }
+
+    /// Opening a folder that has been scanned before reads its index into
+    /// memory whatever the rescan box says. That is what the index is for: the
+    /// pictures are known, so Find duplicates costs the comparing and nothing
+    /// else. Only the pass over the files is what the box decides.
+    #[test]
+    fn opening_a_folder_reads_its_index_without_scanning_it() {
+        let found = folder_with_a_duplicate();
+        let app = reviewing(found.path());
+        assert!(!app.auto_rescan, "the folder asked to be rescanned on its own");
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        assert!(again.images.is_none(), "a window with no folder open holds pictures");
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+
+        assert!(again.running.is_none(), "the folder was scanned although the box is off");
+        let held = again.images.as_ref().expect("the index was not read into memory");
+        assert_eq!(held.len(), 3, "the index came back holding {} pictures", held.len());
+        assert!(
+            again.lit.contains_key(&Lamp::LoadedIndexIntoMemory),
+            "nothing said the index had been read"
+        );
+
+        // And it can be searched straight away, without a pass.
+        again.load_sets();
+        settle(&mut again);
+        assert_eq!(again.sets.len(), 1, "the copies were not found from the index alone");
+    }
+
+    /// The other two boxes are kept with the folder as well: whether it is
+    /// searched one folder at a time, and whether opening it runs a pass.
+    #[test]
+    fn the_index_keeps_matching_within_folders_and_running_on_opening() {
+        let found = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(found.path().to_path_buf());
+        assert!(!app.within_a_folder, "folders were being kept apart to begin with");
+        assert!(!app.auto_rescan, "opening the folder was going to run a pass to begin with");
+
+        // Matching within folders needs the folder to be scanned with its
+        // subfolders, which is a fact the index holds, the pass writes, and a
+        // later pass over the same index does not argue with. So it is set
+        // before the folder has an index at all.
+        app.recurse = true;
+        app.start_scan();
+        settle(&mut app);
+        app.within_a_folder = true;
+        app.auto_rescan = true;
+        app.remember_ways_of_matching();
+        let written = crate::notes::of_folder(app.db_path.as_ref().expect("a db")).expect("notes");
+        assert_eq!(
+            (written.recurse, written.within_a_folder, written.auto_rescan),
+            (Some(true), Some(true), Some(true)),
+            "the index did not come out of that holding all three"
+        );
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        assert!(again.within_a_folder, "the folder came back without folders kept apart");
+        assert!(again.auto_rescan, "the folder came back without running on opening");
     }
 
     /// With the box unticked the mark moves: keeping one picture lets go of the
@@ -5942,7 +7670,7 @@ mod tests {
                 }
             }
             ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
             .shapes
         };
@@ -6004,7 +7732,7 @@ mod tests {
                 }
             }
             ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root));
+                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
             .shapes
         };
@@ -6334,7 +8062,7 @@ mod tests {
     /// happens until the Scan button is pressed. The settings file has no say
     /// in this.
     #[test]
-    fn a_folder_with_an_index_is_scanned_on_opening_and_one_without_is_not() {
+    fn a_folder_with_an_index_is_asked_about_on_opening_and_one_without_is_not() {
         let dir = tempfile::tempdir().expect("tempdir");
         let folder = dir.path().to_path_buf();
         let settings = |folder: &std::path::Path| crate::settings::Settings {
@@ -6343,10 +8071,16 @@ mod tests {
         };
 
         let app = App::from_settings(settings(&folder));
-        assert!(!app.scan_on_open, "a scan started although there is no index");
+        assert!(!app.scan_on_open, "an index that is not there was going to be asked anything");
         assert!(!app.keep_index, "the checkbox was ticked although there is no index");
 
-        // Scan the folder so that it has an index.
+        // Scan the folder so that it has an index. A pass writes one when it has
+        // read something, so there has to be something in the folder to read.
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])
+        }))
+        .save_with_format(folder.join("a.png"), image::ImageFormat::Png)
+        .expect("a fixture");
         let mut built = App::from_settings(crate::settings::Settings::default());
         built.open_folder(folder.clone());
         built.start_scan();
@@ -6354,7 +8088,7 @@ mod tests {
         assert!(headless::default_db_path(&folder).is_file(), "the scan did not write an index");
 
         let app = App::from_settings(settings(&folder));
-        assert!(app.scan_on_open, "an index exists but no scan started");
+        assert!(app.scan_on_open, "an index exists but nothing was going to ask it anything");
         assert!(app.keep_index, "an index exists but the checkbox was not ticked");
     }
 
@@ -6437,9 +8171,12 @@ mod tests {
         let ctx = window();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while std::time::Instant::now() < until {
+            // What the folder's index says about itself arrives on a thread of
+            // its own, and may start a pass, so it is waited for as well.
+            app.hear_the_index(&ctx);
             app.pump_indexer(&ctx);
             app.pump_search(&ctx);
-            if app.running.is_none() && app.searching.is_none() {
+            if app.asking.is_none() && app.running.is_none() && app.searching.is_none() {
                 return;
             }
         }
@@ -6522,7 +8259,7 @@ mod tests {
         );
     }
 
-    /// The duplicates scan is the stages that are going to happen and no
+    /// The Finding duplicates is the stages that are going to happen and no
     /// others. A search straight after a pass reads no index, because the pass
     /// built what it searches, and a bar that gave that stage a share of itself
     /// would open a third full for work nobody is going to do.
@@ -6605,11 +8342,12 @@ mod tests {
     /// A folder that has been scanned before is brought up to date the moment it
     /// is opened. One that has not waits for the button.
     #[test]
-    fn opening_a_folder_only_scans_one_that_has_been_scanned_before() {
+    fn opening_a_folder_scans_it_only_when_its_index_asks_for_that() {
         let known = folder_with_a_duplicate();
         let mut app = App::from_settings(crate::settings::Settings::default());
 
         app.open_folder(known.path().to_path_buf());
+        settle(&mut app);
         assert!(
             app.running.is_none() && app.error.is_none(),
             "a folder nothing is known about was scanned without being asked"
@@ -6617,17 +8355,36 @@ mod tests {
 
         app.start_scan();
         settle(&mut app);
+        assert!(!app.auto_rescan, "the box was ticked without anybody ticking it");
+
+        // Scanned before, and its index does not ask to be brought up to date on
+        // sight, so opening it does nothing.
+        app.open_folder(known.path().to_path_buf());
+        settle(&mut app);
+        assert!(app.running.is_none(), "the folder was scanned although its index did not ask");
+
+        // Ticked, and now opening it is enough.
+        app.auto_rescan = true;
+        app.remember_ways_of_matching();
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(known.path().to_path_buf());
+        let ctx = window();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut started = false;
+        while !started && std::time::Instant::now() < until {
+            again.hear_the_index(&ctx);
+            again.pump_indexer(&ctx);
+            started = again.running.is_some() || again.error.is_some();
+        }
+        assert!(started, "the index asked to be brought up to date and nothing happened");
+        assert!(again.auto_rescan, "the box came back unticked");
+        settle(&mut again);
 
         let fresh = tempfile::tempdir().expect("tempdir");
-        app.open_folder(fresh.path().to_path_buf());
-        assert!(app.running.is_none(), "the empty folder was scanned unasked");
-
-        app.open_folder(known.path().to_path_buf());
-        assert!(
-            app.running.is_some() || app.error.is_some(),
-            "the folder it had already scanned was not brought up to date"
-        );
-        settle(&mut app);
+        again.open_folder(fresh.path().to_path_buf());
+        settle(&mut again);
+        assert!(again.running.is_none(), "the empty folder was scanned unasked");
+        assert!(!again.auto_rescan, "a folder with no index came up ticked");
     }
 
     /// A different folder is different pictures, so what counted as a duplicate

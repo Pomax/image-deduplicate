@@ -503,7 +503,7 @@ The tally in the run log says how many were asked for, how many arrived, how lon
 
 ## Building
 
-`build.bat` on Windows, `build.sh` elsewhere. Never `cargo build` and the moves by hand.
+`scripts\build.bat` on Windows, `scripts/build.sh` elsewhere, and the same pair for `test`. Never `cargo build` and the moves by hand. The scripts step up out of their own directory, so they build the repository they are in wherever they are run from.
 
 The script builds the release, moves the binary to the repository root, and packs it with upx when upx is on the path. macOS never packs: upx dropped Mach-O support, and a packed binary cannot be signed.
 
@@ -622,7 +622,7 @@ The subset was cut with `pyftsubset` from fonttools, which is not a dependency o
 
 Nothing below has been tried. It is where to start, not what will happen.
 
-- `./build.sh` and read what the compiler says. The Windows specific code is in `folder_picker.rs`, which has a `cfg(windows)` COM implementation and an `rfd` path for everything else that has never been compiled here.
+- `scripts/build.sh` and read what the compiler says. The Windows specific code is in `folder_picker.rs`, which has a `cfg(windows)` COM implementation and an `rfd` path for everything else that has never been compiled here.
 - The output is `imgdedupe` in the repository root. It is a plain executable. No bundle, and none is to be created.
 - The script does not pack on macOS and must not start.
 - `eframe` is built with the `glow` backend and without default features. The `wayland` and `x11` features in the workspace manifest are Linux ones and do nothing there.
@@ -746,7 +746,11 @@ For orientation only; none of these paths exist on another machine.
 
 Everything described above is in the tree. The Windows build is packed to about 2.0 MB from a 5.5 MB link, the growth being the HEVC decoder, the TIFF decoder and the corner fingerprint.
 
-The suite is 300-odd tests and does not pass: 18 fail, 14 in the core and 4 in the window, all of them in scan, db and the app's own scan handling, and all of them from work committed before this session. They were checked by restoring the pre-session files and running them again, so they are not from anything described above.
+The suite passes: 156 in the window, 169 in the core, six in the two integration files, and ten more that are only run when asked for by name because they work against the folder the application is set to. The 18 that used to fail were fixtures written for an index kept open on disk, from before the index was worked on in memory; they open, write and close it the way the application does now.
+
+Nothing the window wrote to a folder's index survived a scan, and nobody noticed for weeks because every check ran against a generated folder on the local disk. The window writes a setting straight into the index file; a pass reads the index into memory when it starts and writes the whole of it back over the file when it ends, so the next scan replaced the file with a copy from before any of it was written. `recurse` was the only setting that ever came back, because the pass writes that one itself. Measured on the real folder, the index held `recurse` and nothing else: no destination, no move folder, no multi-select, neither matching box, not "only match within folders", not "rescan on opening". Closing the index now takes back everything the window owns — every `meta` row that is not the pass's own, and the whole `ignore` table — before it writes out.
+
+The ignored pairs were worse than lost: they were never written at all. The `ignore` table is created by the schema, the schema was only ever applied to the copy a pass holds in memory, and a pass that changes nothing does not write the index back — so an index made before the table existed never got one, and every press of the button failed with `no such table: ignore` into the run log. `open_for_notes` applies the schema too now, which is the only thing that brings an existing index up to date for a table added later.
 
 macOS and Ubuntu builds arrived from elsewhere while this was being written, and merging them is where `mesa.rs` and the winit Wayland decoration feature came from. `mesa.rs` sets `EGL_LOG_LEVEL` and, where there is no render node under `/dev/dri`, `LIBGL_ALWAYS_SOFTWARE`, so Mesa stops printing driver probes at the console.
 

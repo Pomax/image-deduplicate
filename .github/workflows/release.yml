@@ -58,12 +58,12 @@ jobs:
       - name: Build
         if: matrix.name == 'windows'
         shell: cmd
-        run: build.bat
+        run: scripts\build.bat
 
       - name: Build
         if: matrix.name != 'windows'
         shell: bash
-        run: bash build.sh
+        run: bash scripts/build.sh
 
       # The executable keeps the name the build gave it on every platform. What
       # says where it came from is the zip around it, which is also what keeps
