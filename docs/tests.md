@@ -7,6 +7,14 @@ A behavioural test uses the application: it scans a real folder of pictures,
 searches it, and looks at what the window is left holding. The rest are unit
 tests of a function whose inputs are its whole world.
 
+Every check about where something landed draws its frame through `shot.rs`, which
+fills the triangles the toolkit's tessellator produces into a buffer of its own
+and writes a PNG named after the check. The window is drawn by a graphics card and
+a test has none, so this is the only way to look at what a check was measuring.
+The pictures go to `IMGDEDUPE_SHOT_DIR`, or the temporary folder when that says
+nothing, and only the last frame a check drew is filled in — that is the frame it
+went on to measure, and filling one is the slow part.
+
 ## crates/imgdedupe-core/src/cleanup.rs
 
 ### a_plan_counts_its_files_and_bytes
@@ -1195,12 +1203,28 @@ Draws the whole review page with the preview pane beside the list. No set
 reaches into the pane, and everything the list draws is cut off at the list's
 own edge rather than painted over the pane.
 
-### an_ignored_set_is_drawn_at_half_its_opacity_and_its_buttons_are_not
+### an_ignored_set_is_drawn_faded_and_its_buttons_are_not
 
 Draws a really scanned set before and after it is ignored and reads the colour
-the writing was drawn in. The file names under the pictures come out at half the
-alpha they had; the row of buttons under them comes out unchanged, because the
-buttons are how a set stops being ignored.
+the writing was drawn in. The file names under the pictures come out at a quarter
+of the alpha they had; the row of buttons under them comes out unchanged, because
+the buttons are how a set stops being ignored.
+
+### a_picture_of_the_review_page
+
+Ignored unless it is asked for by name, and checks nothing. Draws the review page
+into a PNG — `IMGDEDUPE_SHOT` says where, otherwise the temporary folder — so what
+a change did to the window can be looked at instead of guessed at from the
+rectangles it reports. The window is drawn by a graphics card and a test has
+none, so `shot.rs` fills the triangles the toolkit's tessellator produces into a
+buffer of its own.
+
+### a_sets_bar_runs_the_width_of_the_box_and_the_band_has_a_line_on_it
+
+Draws a set with more pictures than fit across it and reads where its own scroll
+bar was painted: corner to corner inside the line round the box, not set in from
+either edge. The band of buttons under it has a line of its own along the top, so
+its edge is not mistaken for the box's.
 
 ### the_scroll_bar_beside_the_list_stays_where_it_is_when_the_list_moves
 

@@ -646,6 +646,10 @@ const BUTTON_ROW_GAP: f32 = 0.0;
 /// The band those buttons sit on.
 const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
 
+/// The line along the top of that band, darker than the line round the box so
+/// the band reads as the foot of the set rather than as another edge of it.
+const BUTTON_ROW_EDGE: egui::Color32 = egui::Color32::from_rgb(0x22, 0x22, 0x22);
+
 /// What the page keeps at its edges, and what a list keeps between what is in it
 /// and the scroll bar down its right: the same, so a box in a list stops as far
 /// from the bar as the list stops from the edge of the window.
@@ -744,6 +748,11 @@ fn set_row_height(ui: &egui::Ui) -> f32 {
 
 /// Kept between one set and the next.
 const BETWEEN_BOXES: f32 = 12.0;
+
+/// How much of a set nobody calls a set of copies is drawn: the pictures and
+/// every line of writing under them, but not the row of buttons, which is how it
+/// stops being ignored.
+const IGNORED_OPACITY: f32 = 0.25;
 
 /// The line the box is drawn with, on each side.
 const BOX_EDGE: f32 = 1.0;
@@ -3052,12 +3061,21 @@ impl App {
         (count, bytes)
     }
 
+    /// The first set that is a set of copies, not simply the first set. A set
+    /// nobody calls a set of copies keeps nothing and shows nothing as kept, so
+    /// opening the review on a picture in one puts the preview somewhere that
+    /// means nothing and gives the cursor keys nowhere sensible to start. A
+    /// review of nothing but ignored sets opens on nothing.
     fn preselect_first_keeper(&mut self) {
-        self.selected = self.sets.first().and_then(|set| match self.keep.get(&set.set_id) {
-            Some(Keep::One(file_id)) => Some(*file_id),
-            Some(Keep::Several(kept)) => kept.first().copied(),
-            _ => set.members.first().map(|member| member.file_id),
-        });
+        self.selected = self
+            .sets
+            .iter()
+            .find(|set| !self.is_ignored(set))
+            .and_then(|set| match self.keep.get(&set.set_id) {
+                Some(Keep::One(file_id)) => Some(*file_id),
+                Some(Keep::Several(kept)) => kept.first().copied(),
+                _ => set.members.first().map(|member| member.file_id),
+            });
         self.showing = None;
     }
 
@@ -3447,15 +3465,14 @@ impl App {
                 ui.set_min_width(inside.width());
 
                 // The strip has the top of the box, down to where the buttons
-                // begin, and keeps its own room inside the box's edge, since the
-                // box itself keeps none. Given the whole box it would put its
-                // own scroll bar under the buttons, at the very bottom.
+                // begin. It runs the whole width of the box, so the bar under it
+                // does too, the way the bar beside the list runs the height of
+                // the list. The pictures keep the box's padding on either side;
+                // that is theirs, not the bar's. Given the whole box the strip
+                // would put its bar under the buttons, at the very bottom.
                 let strip = egui::Rect::from_min_size(
-                    inside.min + egui::vec2(BOX_PADDING, BOX_PADDING),
-                    egui::vec2(
-                        inside.width() - 2.0 * BOX_PADDING,
-                        tile_strip_height(ui) + SCROLL_BAR,
-                    ),
+                    egui::pos2(inside.left(), inside.top() + BOX_PADDING),
+                    egui::vec2(inside.width(), tile_strip_height(ui) + SCROLL_BAR),
                 );
 
                 // One tile's width is what a click on the strip's scroll bar
@@ -3464,13 +3481,13 @@ impl App {
                 let bar = egui::Id::new(("set bar", set_id));
                 let (_, offset, viewport) = ui
                     .allocate_new_ui(egui::UiBuilder::new().max_rect(strip), |ui| {
-                        // A set nobody calls a set of copies is half there:
+                        // A set nobody calls a set of copies is barely there:
                         // everything above the buttons, the pictures and every
-                        // line of writing under them, at half its opacity. The
-                        // buttons are how it stops being ignored, so they are
-                        // not faded with the rest of it.
+                        // line of writing under them, at a quarter of its
+                        // opacity. The buttons are how it stops being ignored, so
+                        // they are not faded with the rest of it.
                         if ignored {
-                            ui.set_opacity(0.5);
+                            ui.set_opacity(IGNORED_OPACITY);
                         }
                         scrolled(
                             ui,
@@ -3479,7 +3496,16 @@ impl App {
                             step,
                             egui::ScrollArea::horizontal().id_salt(("set", set_id)),
                             |area, ui| {
-                                area.show(ui, |ui| {
+                                // The pictures keep the box's padding on either
+                                // side of them, inside a strip that is the whole
+                                // width of the box. Their own room, clipped to
+                                // it, so a picture scrolled up against the edge
+                                // stops there rather than in the padding.
+                                let room = ui.max_rect().shrink2(egui::vec2(BOX_PADDING, 0.0));
+                                let mut pictures =
+                                    ui.new_child(egui::UiBuilder::new().max_rect(room));
+                                pictures.set_clip_rect(room.intersect(ui.clip_rect()));
+                                area.show(&mut pictures, |ui| {
                                     ui.horizontal_top(|ui| {
                                         for member in &members {
                                             let width = tile_width(member);
@@ -3526,6 +3552,15 @@ impl App {
                     inside.max,
                 );
                 ui.painter().rect_filled(band, 0.0, BUTTON_ROW_BACKGROUND);
+                // A line of its own along the top of the band. Without it the
+                // band's edge is the same colour as the line round the box and
+                // as the one under the strip's scroll bar, and three edges of the
+                // same colour a few points apart read as one thick edge.
+                ui.painter().hline(
+                    band.x_range(),
+                    band.top(),
+                    egui::Stroke::new(1.0_f32, BUTTON_ROW_EDGE),
+                );
 
                 let mut pressed = None;
                 ui.allocate_new_ui(
@@ -4553,6 +4588,40 @@ mod tests {
         assert_eq!(app.selected, None);
     }
 
+    /// The review opens on the first set that is a set of copies. A set nobody
+    /// calls a set of copies is not somewhere to start: it keeps nothing, shows
+    /// nothing as kept, and the cursor keys would be starting from a set they are
+    /// only going to step out of.
+    #[test]
+    fn the_preview_does_not_open_inside_an_ignored_set() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![
+            DuplicateSet {
+                set_id: 1,
+                members: vec![member(1, "a.jpg", 10), member(2, "b.jpg", 10)],
+            },
+            DuplicateSet {
+                set_id: 2,
+                members: vec![member(3, "c.jpg", 10), member(4, "d.jpg", 10)],
+            },
+        ];
+        // The first set is not a set of copies.
+        app.ignored.insert(db::pair(1, 2));
+
+        app.preselect_first_keeper();
+        assert_eq!(app.selected, Some(3), "the review opened inside the ignored set");
+
+        // What the second set keeps, when it keeps something.
+        app.keep.insert(2, Keep::One(4));
+        app.preselect_first_keeper();
+        assert_eq!(app.selected, Some(4), "the review did not open on what the set keeps");
+
+        // Nothing but ignored sets is nowhere to open.
+        app.ignored.insert(db::pair(3, 4));
+        app.preselect_first_keeper();
+        assert_eq!(app.selected, None, "the review opened inside an ignored set anyway");
+    }
+
     #[test]
     fn right_and_left_run_through_the_whole_list_and_stop_at_its_ends() {
         let counts = [3, 1, 2];
@@ -5075,7 +5144,7 @@ mod tests {
         // taller than it is, and then animates the bar to its full width over
         // several more. What is wanted here is where it settles.
         for _ in 0..30 {
-            let output = ctx.run(input.clone(), |ctx| {
+            shapes = crate::shot::frame("a_list_that_scrolls", &ctx, input.clone(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     scrolled(
                         ui,
@@ -5093,7 +5162,6 @@ mod tests {
                     );
                 });
             });
-            shapes = output.shapes;
         }
 
         shapes
@@ -5142,10 +5210,9 @@ mod tests {
 
         let mut shapes = Vec::new();
         for _ in 0..30 {
-            let output = ctx.run(input.clone(), |ctx| {
+            shapes = crate::shot::frame("the_review_list_bar", &ctx, input.clone(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
             });
-            shapes = output.shapes;
         }
 
         shapes
@@ -5219,16 +5286,27 @@ mod tests {
         install_style(&ctx);
 
         let strip = egui::Rect::from_min_size(egui::pos2(388.0, 0.0), egui::vec2(12.0, 300.0));
-        let output = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                paint_scroll_bar(ui, strip, true, 60.0, 3000.0, 300.0, 0.0);
-            });
-        });
+        let shapes = crate::shot::frame(
+            "the_bar_has_a_track_a_handle_and_a_button_at_each_end",
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    paint_scroll_bar(ui, strip, true, 60.0, 3000.0, 300.0, 0.0);
+                });
+            },
+        );
 
         let mut track = None;
         let mut handle = None;
         let mut triangles = 0;
-        for clipped in output.shapes {
+        for clipped in shapes {
             match clipped.shape {
                 egui::Shape::Rect(rect) if rect.rect == strip => track = Some(rect),
                 egui::Shape::Rect(rect) if rect.rect.width() == strip.width() => {
@@ -5301,15 +5379,21 @@ mod tests {
                 }
                 // What the frame drew is not looked at here: this drives the bar
                 // and reads what it decided, which comes back through `wanted`.
-                let _ = ctx.run(input, |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        let moved =
-                            paint_scroll_bar(ui, strip, true, step, content, viewport, offset);
-                        if button == Some(true) {
-                            *wanted.borrow_mut() = moved;
-                        }
-                    });
-                });
+                // The picture is kept anyway, for when it decides something else.
+                let _ = crate::shot::frame(
+                    "pressing_the_handle_holds_it_where_it_was",
+                    &ctx,
+                    input,
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let moved =
+                                paint_scroll_bar(ui, strip, true, step, content, viewport, offset);
+                            if button == Some(true) {
+                                *wanted.borrow_mut() = moved;
+                            }
+                        });
+                    },
+                );
             }
             wanted.into_inner()
         };
@@ -5342,16 +5426,27 @@ mod tests {
         ctx.set_visuals(egui::Visuals::light());
 
         let strip = egui::Rect::from_min_size(egui::pos2(0.0, 288.0), egui::vec2(400.0, 12.0));
-        let output = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                paint_scroll_bar(ui, strip, false, 60.0, 4000.0, 400.0, 0.0);
-            });
-        });
+        let shapes = crate::shot::frame(
+            "a_sideways_bar_has_the_same_parts_lying_down",
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    paint_scroll_bar(ui, strip, false, 60.0, 4000.0, 400.0, 0.0);
+                });
+            },
+        );
 
         let mut track = None;
         let mut handle = None;
         let mut triangles = Vec::new();
-        for clipped in output.shapes {
+        for clipped in shapes {
             match clipped.shape {
                 egui::Shape::Rect(rect) if rect.rect == strip => track = Some(rect),
                 egui::Shape::Rect(rect) if rect.rect.height() == strip.height() => {
@@ -5588,20 +5683,21 @@ mod tests {
 
         let root = found.path().to_path_buf();
         let ctx = window();
-        let shapes = ctx
-            .run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::pos2(0.0, 0.0),
-                        egui::vec2(900.0, 500.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
-                },
-            )
-            .shapes;
+        let shapes = crate::shot::frame(
+            "only_the_picture_being_kept_is_labelled_and_the_others_keep_the_space",
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 500.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            },
+        );
 
         assert_eq!(
             label_rects(&shapes, "KEEP").len(),
@@ -5645,7 +5741,9 @@ mod tests {
         let ctx = window();
         let mut taken = 0.0;
         let mut buttons = 0.0;
-        let output = ctx.run(
+        let shapes = crate::shot::frame(
+            "a_set_box_is_not_taller_than_the_tiles_in_it",
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::pos2(0.0, 0.0),
@@ -5677,7 +5775,7 @@ mod tests {
             }
         }
         let mut bottom = 0.0_f32;
-        for clipped in &output.shapes {
+        for clipped in &shapes {
             lowest(&clipped.shape, &mut bottom);
         }
         assert!(bottom > 0.0, "the row painted no text at all");
@@ -5736,7 +5834,8 @@ mod tests {
                 });
             }
             ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
         };
 
@@ -5795,10 +5894,10 @@ mod tests {
             if let Some(pos) = at {
                 input.events.push(egui::Event::PointerMoved(pos));
             }
-            ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            crate::shot::frame("holding_the_pointer_over_a_set", &ctx, input, |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
-            .shapes
         };
 
         // Every place a pointer can rest inside the row, one point apart, and
@@ -5914,11 +6013,15 @@ mod tests {
 
         let ctx = window();
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
-        let drawn = ctx
-            .run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
-            })
-            .shapes;
+        let drawn = crate::shot::frame(
+            "a_set_has_its_buttons_in_a_row_along_the_bottom",
+            &ctx,
+            egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            },
+        );
 
         let painted = texts(&drawn);
         let where_it_is = |label: &str| {
@@ -5973,7 +6076,9 @@ mod tests {
         let mut bar_at = 0.0_f32;
         let mut list_at = 0.0_f32;
         let mut buttons = 0.0_f32;
-        let output = ctx.run(
+        let drawn = crate::shot::frame(
+            "a_set_row_fits_the_room_it_is_given",
+            &ctx,
             egui::RawInput { screen_rect: Some(screen), ..Default::default() },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -5997,8 +6102,8 @@ mod tests {
             },
         );
 
-        let outline = box_around_the_set(&output.shapes).expect("no box was drawn around the set");
-        let painted = texts(&output.shapes);
+        let outline = box_around_the_set(&drawn).expect("no box was drawn around the set");
+        let painted = texts(&drawn);
         let last = painted
             .iter()
             .filter(|(text, _)| !text.starts_with("keep"))
@@ -6061,10 +6166,10 @@ mod tests {
                     }
                 }
             }
-            ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            crate::shot::frame("two_clicks_on_a_picture", &ctx, input, |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
-            .shapes
         };
 
         // The pictures are the tile sized rectangles, and the one wanted here is
@@ -6115,14 +6220,14 @@ mod tests {
 
         let ctx = window();
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
-        let shapes = ctx
-            .run(
-                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
-                },
-            )
-            .shapes;
+        let shapes = crate::shot::frame(
+            "the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right",
+            &ctx,
+            egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
+            },
+        );
 
         // The toolbar is the top of the window, so what is drawn below it is the
         // review itself and no part of this.
@@ -6197,14 +6302,14 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 700.0));
         let waited = std::time::Instant::now();
         loop {
-            let shapes = ctx
-                .run(
-                    egui::RawInput { screen_rect: Some(screen), ..Default::default() },
-                    |ctx| {
-                        egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
-                    },
-                )
-                .shapes;
+            let shapes = crate::shot::frame(
+                "the_preview_shows_what_the_file_says_about_itself",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
+                },
+            );
             let painted = texts(&shapes);
             let said = |wanted: &str| painted.iter().any(|(text, _)| text == wanted);
             if said("Notes") && said("taken in a garden") {
@@ -6346,12 +6451,11 @@ mod tests {
                     });
                 }
             }
-            ctx.run(input, |ctx| {
+            crate::shot::frame("the_ways_of_matching_are_boxes", &ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.matching_section(ui, 600.0);
                 });
             })
-            .shapes
         };
 
         let drawn = frame(&mut app, None, None);
@@ -6378,13 +6482,16 @@ mod tests {
 
     /// Click where the index box is drawn, and say whether it went on.
     fn ticks_the_index_box(app: &mut App, ctx: &egui::Context, screen: egui::Rect) -> bool {
-        let drawn = ctx
-            .run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+        let drawn = crate::shot::frame(
+            "ticks_the_index_box",
+            ctx,
+            egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+            |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.folder_section(ui, 700.0);
                 });
-            })
-            .shapes;
+            },
+        );
         let Some(label) = label_rect(&drawn, "Save an index database for this folder") else {
             return false;
         };
@@ -6418,12 +6525,16 @@ mod tests {
         let mut app = reviewing(found.path());
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
         let draw = |app: &mut App| {
-            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    app.folder_section(ui, 700.0);
-                });
-            })
-            .shapes
+            crate::shot::frame(
+                "a_box_that_depends_on_another",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.folder_section(ui, 700.0);
+                    });
+                },
+            )
         };
 
         // Both are ticked, and both lose what they depend on.
@@ -6502,22 +6613,26 @@ mod tests {
         // across the top, then the page with no margin of its own, which is what
         // lets the toolbar's line run the width of the window.
         let draw = |app: &mut App| {
-            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("1  Scan");
+            crate::shot::frame(
+                "the_review_list_keeps_to_its_own_side_of_the_window",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("1  Scan");
+                        });
+                        ui.add_space(6.0);
                     });
-                    ui.add_space(6.0);
-                });
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::central_panel(&ctx.style())
-                            .inner_margin(egui::Margin::ZERO),
-                    )
-                    .show(ctx, |ui| app.review_view(ui));
-            })
-            .shapes
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::ZERO),
+                        )
+                        .show(ctx, |ui| app.review_view(ui));
+                },
+            )
         };
         // The panel settles on its width over a frame or two.
         draw(&mut app);
@@ -6608,6 +6723,267 @@ mod tests {
         }
     }
 
+    /// Every page of the window, drawn into picture files for the manual.
+    ///
+    /// A real folder, really scanned and really searched, so what the manual
+    /// shows is the window rather than a drawing of it. Ignored unless it is
+    /// asked for by name; the pictures go where `IMGDEDUPE_SHOT_DIR` says, or to
+    /// the temporary folder.
+    #[test]
+    #[ignore = "writes the pictures the manual is built from"]
+    fn the_pictures_for_the_manual() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        app.keep_index = true;
+        app.recurse = true;
+        app.selected = app.sets[0].members.first().map(|member| member.file_id);
+
+        let ctx = window();
+        // The window as it ships, not the toolkit's own dark.
+        ctx.set_visuals(egui::Visuals::light());
+        // Wide enough for the whole of the scan page, which is three boxes in a
+        // row and a run of lamps under them.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 720.0));
+        let mut camera = crate::shot::Camera::default();
+        let folder = crate::shot::folder();
+
+        // Each page, drawn the way the window draws it: the tabs across the top
+        // and the page under them. Several frames each, because the pictures and
+        // the panel beside them arrive over a few.
+        let mut page = |app: &mut App, name: &str, view: View| {
+            app.view = view;
+            for _ in 0..10 {
+                let drawing = &mut *app;
+                camera.shoot(
+                    &ctx,
+                    egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                    |ctx| {
+                        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                for (label, on) in [
+                                    ("1  Scan", drawing.view == View::Scan),
+                                    ("2  Review", drawing.view == View::Review),
+                                    ("3  Clean up", drawing.view == View::Cleanup),
+                                ] {
+                                    ui.add(egui::SelectableLabel::new(on, label));
+                                }
+                            });
+                            ui.add_space(6.0);
+                        });
+                        let margin = match drawing.view {
+                            View::Cleanup | View::Review => egui::Margin::ZERO,
+                            _ => egui::Margin::symmetric(16.0, 12.0),
+                        };
+                        egui::CentralPanel::default()
+                            .frame(
+                                egui::Frame::central_panel(&ctx.style()).inner_margin(margin),
+                            )
+                            .show(ctx, |ui| match drawing.view {
+                                View::Scan => drawing.scan_view(ui),
+                                View::Review => drawing.review_view(ui),
+                                View::Cleanup => drawing.cleanup_view(ui),
+                            });
+                    },
+                    &folder.join(format!("manual-{name}.png")),
+                );
+                app.thumbs.collect(&ctx);
+            }
+        };
+
+        // The scan page is the one page that writes the folder's path on itself,
+        // in the folder row and in the first lamp. What is drawn there is a
+        // folder anybody could have, not the temporary one this ran against and
+        // not the name of whoever ran it. Nothing is pressed while it is set, so
+        // nothing goes looking for it.
+        let real = app.folder.clone();
+        app.folder = Some(PathBuf::from("D:\\Photos\\2026"));
+        page(&mut app, "scan", View::Scan);
+        app.folder = real;
+
+        page(&mut app, "review", View::Review);
+
+        // The same review with a set nobody calls a set of copies.
+        let second = app.sets[1].set_id;
+        app.ignore_set(second);
+        page(&mut app, "ignored", View::Review);
+        app.unignore_set(second);
+
+        page(&mut app, "cleanup", View::Cleanup);
+        println!("the manual's pictures are in {}", folder.display());
+    }
+
+    /// Draw the review page into a picture file, so what it looks like can be
+    /// looked at. Names the file it wrote.
+    ///
+    /// Not a check of anything: it is the window, on paper, for whoever is
+    /// changing the layout. Ignored unless it is asked for by name.
+    #[test]
+    #[ignore = "writes a picture of the review page instead of checking anything"]
+    fn a_picture_of_the_review_page() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        app.selected = app.sets[0].members.first().map(|member| member.file_id);
+        // A set wider than the box, so its own scroll bar is in the picture, and
+        // a set nobody calls a set of copies, so the faded look is in it too.
+        let held: Vec<_> = app.sets[0].members.clone();
+        app.sets[0].members = (0..12)
+            .map(|at| {
+                let mut member = held[at % held.len()].clone();
+                member.file_id = 100 + at as i64;
+                member
+            })
+            .collect();
+        if app.sets.len() > 1 {
+            let second = app.sets[1].clone();
+            for pair in pairs_of(&second) {
+                app.ignored.insert(pair);
+            }
+        }
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        // The picture is for looking at, so it is drawn the way the window is
+        // rather than in whatever the toolkit ships as its default.
+        ctx.set_visuals(egui::Visuals::light());
+        let mut camera = crate::shot::Camera::default();
+        let at = std::env::var_os("IMGDEDUPE_SHOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("review.png"));
+        // The pictures arrive over a few frames, and the panel settles on its
+        // width over one or two, so the frame worth looking at is not the first.
+        for _ in 0..8 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let drawing = &mut app;
+            camera.shoot(&ctx, input, |ctx| {
+                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("1  Scan");
+                        ui.label("2  Review");
+                    });
+                    ui.add_space(6.0);
+                });
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| drawing.review_view(ui));
+            }, &at);
+            app.thumbs.collect(&ctx);
+        }
+        println!("the review page is at {}", at.display());
+    }
+
+    /// A set's own scroll bar runs the width of the box, edge to edge inside the
+    /// line round it, and the band of buttons under it has a line of its own
+    /// along the top.
+    #[test]
+    fn a_sets_bar_runs_the_width_of_the_box_and_the_band_has_a_line_on_it() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        // More pictures than fit across the box, so the strip has a bar at all.
+        app.sets[0].members = (100..124).map(|id| member(id, "a.jpg", 500)).collect();
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+        let draw = |app: &mut App| {
+            crate::shot::frame(
+                "a_sets_bar_runs_the_width_of_the_box_and_the_band_has_a_line_on_it",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::ZERO),
+                        )
+                        .show(ctx, |ui| app.review_view(ui));
+                },
+            )
+        };
+        draw(&mut app);
+        draw(&mut app);
+        let drawn = draw(&mut app);
+
+        // The first box: the topmost outlined rectangle as wide as a set.
+        let (set, stroke) = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.stroke.width > 0.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some((rect.rect, rect.stroke.width))
+                }
+                _ => None,
+            })
+            .fold((egui::Rect::NOTHING, 0.0), |first: (egui::Rect, f32), it| {
+                if it.0.top() < first.0.top() {
+                    it
+                } else {
+                    first
+                }
+            });
+        assert!(set.is_finite(), "no set was drawn");
+        let inside = set.shrink(stroke / 2.0);
+
+        // The strip's own bar: as tall as a bar, lying down, inside this box.
+        let bar = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if (rect.rect.height() - SCROLL_BAR).abs() < 1.0
+                        && rect.rect.width() > 100.0
+                        && inside.contains(rect.rect.center()) =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .fold(egui::Rect::NOTHING, |widest, rect| {
+                if rect.width() > widest.width() {
+                    rect
+                } else {
+                    widest
+                }
+            });
+        assert!(bar.is_finite(), "the set's own scroll bar was not drawn");
+        assert!(
+            (bar.left() - inside.left()).abs() < 0.51 && (bar.right() - inside.right()).abs() < 0.51,
+            "the bar runs {:?} inside a box that runs {:?}",
+            bar.x_range(),
+            inside.x_range()
+        );
+
+        // And the line along the top of the band under it.
+        let lines: Vec<(egui::Pos2, egui::Pos2)> = drawn
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == egui::epaint::ColorMode::Solid(BUTTON_ROW_EDGE) =>
+                {
+                    Some((points[0], points[1]))
+                }
+                _ => false.then_some((egui::Pos2::ZERO, egui::Pos2::ZERO)),
+            })
+            .collect();
+        // Corner to corner of the box, which is the rectangle the line round it
+        // was given rather than that rectangle less half of the line.
+        let band_line = lines.iter().any(|(from, to)| {
+            (to.x - from.x - set.width()).abs() < 0.51
+                && from.y >= bar.bottom() - 0.01
+                && from.y < inside.bottom()
+        });
+        assert!(
+            band_line,
+            "the band of buttons has no line along the top of it: lines {lines:?}, \
+             box {inside:?}, bar bottom {}",
+            bar.bottom()
+        );
+    }
+
     /// The bar beside the list marks the room the list is drawn in, so it is in
     /// the same place whatever the list is scrolled to. Only the handle inside it
     /// moves.
@@ -6619,15 +6995,19 @@ mod tests {
         let ctx = window();
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
         let draw = |app: &mut App| {
-            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::central_panel(&ctx.style())
-                            .inner_margin(egui::Margin::ZERO),
-                    )
-                    .show(ctx, |ui| app.review_view(ui));
-            })
-            .shapes
+            crate::shot::frame(
+                "the_scroll_bar_beside_the_list_stays_where_it_is_when_the_list_moves",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::ZERO),
+                        )
+                        .show(ctx, |ui| app.review_view(ui));
+                },
+            )
         };
         // The track: as wide as a bar and as tall as the list. The handle inside
         // it is the same width and shorter, so the tallest of them is the track.
@@ -6682,22 +7062,26 @@ mod tests {
         // it is drawn and can be measured against the boxes.
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
         let draw = |app: &mut App| {
-            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("1  Scan");
+            crate::shot::frame(
+                "the_set_boxes_are_drawn_whole_and_evenly_spaced",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("1  Scan");
+                        });
+                        ui.add_space(6.0);
                     });
-                    ui.add_space(6.0);
-                });
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::central_panel(&ctx.style())
-                            .inner_margin(egui::Margin::ZERO),
-                    )
-                    .show(ctx, |ui| app.review_view(ui));
-            })
-            .shapes
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::ZERO),
+                        )
+                        .show(ctx, |ui| app.review_view(ui));
+                },
+            )
         };
         draw(&mut app);
         draw(&mut app);
@@ -6796,11 +7180,11 @@ mod tests {
         );
     }
 
-    /// A set nobody calls a set of copies is drawn half there: the pictures and
-    /// every line of writing under them at half their opacity. The buttons are
-    /// not, because they are how it stops being ignored.
+    /// A set nobody calls a set of copies is barely drawn: the pictures and every
+    /// line of writing under them at `IGNORED_OPACITY`. The buttons are not,
+    /// because they are how it stops being ignored.
     #[test]
-    fn an_ignored_set_is_drawn_at_half_its_opacity_and_its_buttons_are_not() {
+    fn an_ignored_set_is_drawn_faded_and_its_buttons_are_not() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
         let set_id = app.sets[0].set_id;
@@ -6808,15 +7192,19 @@ mod tests {
         let ctx = window();
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
         let draw = |app: &mut App| {
-            ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::central_panel(&ctx.style())
-                            .inner_margin(egui::Margin::ZERO),
-                    )
-                    .show(ctx, |ui| app.review_view(ui));
-            })
-            .shapes
+            crate::shot::frame(
+                "an_ignored_set_is_drawn_faded_and_its_buttons_are_not",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::ZERO),
+                        )
+                        .show(ctx, |ui| app.review_view(ui));
+                },
+            )
         };
         // What one line of writing in the list is drawn in. The file names under
         // the pictures are the strip; "keep all" is the row of buttons. Only what
@@ -6851,9 +7239,10 @@ mod tests {
         let faded = draw(&mut app);
 
         let now = alpha_of(&faded, "one.png").expect("the file name went when the set was ignored");
+        let wanted = f32::from(strip) * IGNORED_OPACITY;
         assert!(
-            (f32::from(now) - f32::from(strip) / 2.0).abs() <= 2.0,
-            "the writing under the pictures went from {strip} to {now}, which is not half of it"
+            (f32::from(now) - wanted).abs() <= 2.0,
+            "the writing under the pictures went from {strip} to {now}, and not to {wanted}"
         );
         assert_eq!(
             alpha_of(&faded, "keep all"),
@@ -7669,10 +8058,10 @@ mod tests {
                     }
                 }
             }
-            ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            crate::shot::frame("two_clicks_with_multi_selected", &ctx, input, |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
-            .shapes
         };
 
         let drawn = frame(&mut app, None, 0, 0.0);
@@ -7731,10 +8120,10 @@ mod tests {
                     });
                 }
             }
-            ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+            crate::shot::frame("the_buttons_on_a_set_decide_all_or_none", &ctx, input, |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
             })
-            .shapes
         };
 
         // The pointer has to have been over a widget on an earlier frame before
@@ -7975,12 +8364,11 @@ mod tests {
                     });
                 }
             }
-            ctx.run(input, |ctx| {
+            crate::shot::frame("the_last_entry_of_the_previous_list", &ctx, input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.folder_section(ui, 600.0);
                 });
             })
-            .shapes
         };
 
         let drawn = frame(&mut app, None, None);
@@ -8230,11 +8618,21 @@ mod tests {
         fn fills(app: &mut App) -> Vec<egui::Rect> {
             let ctx = window();
             let fill = ctx.style().visuals.selection.bg_fill;
-            let output = ctx.run(Default::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.progress_section(ui));
-            });
-            output
-                .shapes
+            let shapes = crate::shot::frame(
+                "a_bar_with_nothing_done",
+                &ctx,
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        egui::vec2(700.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.progress_section(ui));
+                },
+            );
+            shapes
                 .into_iter()
                 .filter_map(|clipped| match clipped.shape {
                     egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect),
