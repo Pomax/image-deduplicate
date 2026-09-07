@@ -778,6 +778,40 @@ reached, is in the file when the pass is over. The pass tells the manager and th
 manager writes; nothing in the pass opens or closes anything. Checked against the
 file, because the file is what the next run of the program opens.
 
+### the_budget_is_ninety_percent_of_what_is_available
+
+Ten gigabytes to spare and nothing in hand: nine gigabytes may be read ahead.
+
+### filling_the_read_ahead_does_not_shrink_the_budget
+
+Ten gigabytes spare and nothing held, then the same machine with four gigabytes
+of files in hand and six spare: the budget is nine both times, because what is
+held is added back before the nine tenths are taken.
+
+### a_program_taking_memory_takes_the_budget_with_it
+
+Ten gigabytes spare and then two: the budget falls from nine to 1.8.
+
+### a_reader_waits_until_the_budget_grows_rather_than_for_a_release
+
+A reader waiting for room takes up memory the machine gave back, with no decode
+having finished and nothing released.
+
+### a_file_larger_than_the_whole_budget_is_let_through
+
+A file bigger than the whole budget goes through on its own rather than waiting
+for room that will never exist.
+
+### a_machine_that_will_not_say_gets_the_fallback
+
+A machine that answers nothing about its memory gets the gigabyte the limit used
+to be.
+
+### the_machine_says_how_much_memory_is_available
+
+The platform code answers with a believable number on the machine it is running
+on: more than nothing, less than a petabyte.
+
 ### a_first_pass_indexes_every_image
 
 A pass over a folder of pictures indexes all of them.

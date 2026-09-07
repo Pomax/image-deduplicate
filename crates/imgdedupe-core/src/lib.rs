@@ -9,6 +9,7 @@ pub mod format;
 pub mod frames;
 pub mod index;
 pub mod matching;
+pub mod memory;
 pub mod metadata;
 pub mod preview;
 pub mod runlog;
