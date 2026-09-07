@@ -130,7 +130,7 @@ struct Candidate {
     rel_path: String,
     abs_path: PathBuf,
     size_bytes: i64,
-    mtime_ns: i64,
+    mtime_ms: i64,
 }
 
 /// Walk the tree and list every file, ignoring the index and its sidecars.
@@ -217,7 +217,7 @@ fn walk(
                 rel_path,
                 abs_path: path,
                 size_bytes: entry.size_bytes,
-                mtime_ns: entry.mtime_ns,
+                mtime_ms: entry.mtime_ms,
             });
         }
         report(Event::Walking { found: out.len() as u64, of });
@@ -261,7 +261,7 @@ fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db
         seen.insert(candidate.rel_path.clone());
         let fresh = known.get(&candidate.rel_path).is_some_and(|entry| {
             entry.size_bytes == candidate.size_bytes
-                && entry.mtime_ns == candidate.mtime_ns
+                && entry.mtime_ms == candidate.mtime_ms
                 && entry.fingerprint_version == FINGERPRINT_VERSION
         });
         if fresh {
@@ -327,11 +327,11 @@ struct Spent {
 #[cfg(feature = "logging")]
 impl Spent {
     fn add(counter: &AtomicU64, at: Instant) {
-        counter.fetch_add(at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        counter.fetch_add(at.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 
     fn seconds(counter: &AtomicU64) -> f64 {
-        counter.load(Ordering::Relaxed) as f64 / 1e9
+        counter.load(Ordering::Relaxed) as f64 / 1e3
     }
 }
 
@@ -388,7 +388,7 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
     Outcome::Indexed(Box::new(Record {
         rel_path: candidate.rel_path.clone(),
         size_bytes: candidate.size_bytes,
-        mtime_ns: candidate.mtime_ns,
+        mtime_ms: candidate.mtime_ms,
         width,
         height,
         format,
@@ -1217,6 +1217,36 @@ mod tests {
         assert_eq!(summary.indexed, 2);
         assert_eq!(summary.unchanged, 0);
         assert_eq!(summary.failed, 0);
+    }
+
+    /// A folder is indexed, its index is rewritten the way a build keeping
+    /// nanoseconds would have described it, and it is passed over again: nothing
+    /// is read a second time.
+    #[test]
+    fn a_folder_indexed_on_one_machine_is_unchanged_on_another() {
+        let fx = fixture();
+        for n in 0..5 {
+            write_image(&fx.dir.path().join(format!("{n}.png")), 40, 30, n);
+        }
+        let (first, _) = scan(&fx);
+        assert_eq!(first.indexed, 5, "the folder was not indexed to begin with");
+
+        // The same index as written by a build that kept nanoseconds.
+        fx.index.let_go().expect("let the folder go");
+        let other = rusqlite::Connection::open(&fx.options.db_path).expect("the index file");
+        other
+            .execute_batch(
+                "DROP VIEW IF EXISTS indexed_images;
+                 ALTER TABLE files RENAME COLUMN mtime_ms TO mtime_ns;
+                 UPDATE files SET mtime_ns = mtime_ns * 1000000 + 654321;",
+            )
+            .expect("an index in nanoseconds");
+        drop(other);
+        fx.index.hold(&fx.options.db_path).expect("take it up again");
+
+        let (again, _) = scan(&fx);
+        assert_eq!(again.indexed, 0, "every file was read again on the other machine");
+        assert_eq!(again.unchanged, 5, "the files were not recognised as unchanged");
     }
 
     #[test]

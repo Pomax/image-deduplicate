@@ -23,6 +23,9 @@ pub const INDEX_FILENAME: &str = "imgdedupe.sqlite";
 /// removes. Which folder it is about is the folder the file sits in, so that is
 /// not written down anywhere.
 ///
+/// `files.mtime_ms` is milliseconds since the epoch; `files.last_scanned_at` is
+/// seconds.
+///
 /// `fingerprints.corners` holds the picture's corners and what each one looks
 /// like, and is empty for a picture with nothing corner-shaped in it: a flat
 /// sky, or one out of focus.
@@ -50,7 +53,7 @@ CREATE TABLE IF NOT EXISTS files (
     id              INTEGER PRIMARY KEY,
     rel_path        TEXT    NOT NULL UNIQUE,
     size_bytes      INTEGER NOT NULL,
-    mtime_ns        INTEGER NOT NULL,
+    mtime_ms        INTEGER NOT NULL,
     last_scanned_at INTEGER NOT NULL
 );
 
@@ -79,7 +82,7 @@ CREATE TABLE IF NOT EXISTS ignore (
 DROP TABLE IF EXISTS phash_bands;
 
 CREATE VIEW IF NOT EXISTS indexed_images AS
-SELECT f.id, f.rel_path, f.size_bytes, f.mtime_ns,
+SELECT f.id, f.rel_path, f.size_bytes, f.mtime_ms,
        i.width, i.height, i.format, i.channels,
        p.dct_hashes, p.ring_stats, p.corners
 FROM files f
@@ -127,8 +130,9 @@ fn migrate_the_file(path: &Path) -> Result<()> {
         .with_context(|| format!("opening the index at {}", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(SCHEMA).context("applying the schema")?;
-    drop_dead_columns(&conn)?;
     add_new_columns(&conn)?;
+    carry_the_stamps_across(&conn)?;
+    drop_dead_columns(&conn)?;
 
     let existing: Option<i64> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -176,7 +180,8 @@ pub fn files_of_the_index(path: &Path) -> Vec<std::path::PathBuf> {
 /// A file already on disk keeps whatever columns it was made with, and the ones
 /// that are `NOT NULL` would refuse every insert that no longer names them.
 fn drop_dead_columns(conn: &Connection) -> Result<()> {
-    let dead = [("files", "bytes_hash"), ("fingerprints", "dct_hash")];
+    let dead =
+        [("files", "bytes_hash"), ("fingerprints", "dct_hash"), ("files", "mtime_ns")];
     let mut found = Vec::new();
     for (table, column) in dead {
         let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -209,21 +214,47 @@ fn drop_dead_columns(conn: &Connection) -> Result<()> {
 /// in it are re-fingerprinted anyway, because the fingerprint version moved, and
 /// they need somewhere to be written to.
 fn add_new_columns(conn: &Connection) -> Result<()> {
-    let mut statement = conn.prepare("PRAGMA table_info(fingerprints)")?;
-    let present = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .filter_map(Result::ok)
-        .any(|name| name == "corners");
-    drop(statement);
-    if present {
+    let wanted = [
+        ("fingerprints", "corners", "BLOB NOT NULL DEFAULT x''"),
+        ("files", "mtime_ms", "INTEGER NOT NULL DEFAULT 0"),
+    ];
+    let mut added = false;
+    for (table, column, declaration) in wanted {
+        if has_column(conn, table, column)? {
+            continue;
+        }
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"))
+            .with_context(|| format!("adding {table}.{column}"))?;
+        added = true;
+    }
+    if !added {
         return Ok(());
     }
-    conn.execute_batch("ALTER TABLE fingerprints ADD COLUMN corners BLOB NOT NULL DEFAULT x''")
-        .context("adding the corners column")?;
-    // The view was made without it and would go on reading the old shape.
+    // The view was made without them and would go on reading the old shape.
     conn.execute_batch("DROP VIEW IF EXISTS indexed_images")?;
     conn.execute_batch(SCHEMA).context("rebuilding the schema")?;
     Ok(())
+}
+
+/// Fill `files.mtime_ms` from the nanoseconds an older build wrote. Runs between
+/// the column being added and `mtime_ns` being dropped.
+fn carry_the_stamps_across(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "files", "mtime_ns")? {
+        return Ok(());
+    }
+    conn.execute_batch("UPDATE files SET mtime_ms = mtime_ns / 1000000")
+        .context("carrying the modification times across")?;
+    Ok(())
+}
+
+/// Whether a table has a column.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let present = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == column);
+    Ok(present)
 }
 
 
@@ -295,7 +326,7 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 pub struct Known {
     pub id: i64,
     pub size_bytes: i64,
-    pub mtime_ns: i64,
+    pub mtime_ms: i64,
     pub fingerprint_version: i64,
 }
 
@@ -303,7 +334,7 @@ pub struct Known {
 /// as version -1 so it is always treated as stale.
 pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
     let mut statement = conn.prepare(
-        "SELECT f.rel_path, f.id, f.size_bytes, f.mtime_ns, COALESCE(p.fingerprint_version, -1)
+        "SELECT f.rel_path, f.id, f.size_bytes, f.mtime_ms, COALESCE(p.fingerprint_version, -1)
          FROM files f LEFT JOIN fingerprints p ON p.file_id = f.id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -312,7 +343,7 @@ pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
             Known {
                 id: row.get(1)?,
                 size_bytes: row.get(2)?,
-                mtime_ns: row.get(3)?,
+                mtime_ms: row.get(3)?,
                 fingerprint_version: row.get(4)?,
             },
         ))
@@ -329,7 +360,7 @@ pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
 pub struct Record {
     pub rel_path: String,
     pub size_bytes: i64,
-    pub mtime_ns: i64,
+    pub mtime_ms: i64,
     pub width: u32,
     pub height: u32,
     pub format: Format,
@@ -343,13 +374,13 @@ pub struct Record {
 /// transaction, which is what makes a killed run leave a consistent index.
 pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<()> {
     tx.execute(
-        "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+        "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(rel_path) DO UPDATE SET
              size_bytes = excluded.size_bytes,
-             mtime_ns = excluded.mtime_ns,
+             mtime_ms = excluded.mtime_ms,
              last_scanned_at = excluded.last_scanned_at",
-        params![record.rel_path, record.size_bytes, record.mtime_ns, scanned_at],
+        params![record.rel_path, record.size_bytes, record.mtime_ms, scanned_at],
     )?;
     let file_id: i64 = tx.query_row(
         "SELECT id FROM files WHERE rel_path = ?1",
@@ -464,7 +495,7 @@ mod ignoring {
         let path = dir.path().join("index.sqlite");
         let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch(
-            "INSERT INTO files (id, rel_path, size_bytes, mtime_ns, last_scanned_at)
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_ms, last_scanned_at)
              VALUES (7, 'a.jpg', 1, 1, 1), (9, 'b.jpg', 1, 1, 1), (11, 'c.jpg', 1, 1, 1)",
         )
         .expect("files");
@@ -483,7 +514,7 @@ mod ignoring {
         let path = dir.path().join("index.sqlite");
         let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch(
-            "INSERT INTO files (id, rel_path, size_bytes, mtime_ns, last_scanned_at)
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_ms, last_scanned_at)
              VALUES (1, 'a.jpg', 1, 1, 1), (2, 'b.jpg', 1, 1, 1)",
         )
         .expect("files");
@@ -524,7 +555,7 @@ mod tests {
         Record {
             rel_path: path.to_string(),
             size_bytes: 1234,
-            mtime_ns: 999,
+            mtime_ms: 999,
             width: 800,
             height: 600,
             format: Format::Jpeg,
@@ -621,7 +652,7 @@ mod tests {
         let known = load_known(&conn).expect("load");
         let entry = known.get("a.jpg").expect("path present");
         assert_eq!(entry.size_bytes, 1234);
-        assert_eq!(entry.mtime_ns, 999);
+        assert_eq!(entry.mtime_ms, 999);
         assert_eq!(entry.fingerprint_version, fingerprint::FINGERPRINT_VERSION);
     }
 
@@ -629,7 +660,7 @@ mod tests {
     fn a_file_without_fingerprints_reads_as_stale() {
         let conn = memory_db();
         conn.execute(
-            "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+            "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at)
              VALUES ('orphan.png', 1, 1, 1)",
             [],
         )
@@ -713,6 +744,111 @@ mod tests {
         let err = open_and_migrate(&path).expect_err("should refuse");
         assert!(err.to_string().contains("part way through"), "{err}");
         assert_eq!(std::fs::read(&path).expect("read"), was, "the index was written to");
+    }
+
+    /// An index from a build that kept stamps in nanoseconds comes back holding
+    /// milliseconds, and the nanosecond column is gone.
+    #[test]
+    fn an_index_written_in_nanoseconds_comes_back_in_milliseconds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        make_an_old_index(&path, "mtime_ns", 1_700_000_000_123_456_789);
+
+        let conn = open_and_migrate(&path).expect("open");
+        drop(conn);
+
+        // The file itself, not the copy that was handed back.
+        let file = Connection::open(&path).expect("open the file");
+        let columns = column_names(&file, "files");
+        assert!(columns.iter().any(|name| name == "mtime_ms"), "no mtime_ms: {columns:?}");
+        assert!(!columns.iter().any(|name| name == "mtime_ns"), "mtime_ns left: {columns:?}");
+        let stamp: i64 =
+            file.query_row("SELECT mtime_ms FROM files", [], |row| row.get(0)).expect("the row");
+        assert_eq!(stamp, 1_700_000_000_123, "the stamp was not carried across");
+        drop(file);
+
+        let conn = open_and_migrate(&path).expect("reopen");
+        let known = load_known(&conn).expect("load");
+        assert_eq!(known["a.jpg"].mtime_ms, 1_700_000_000_123);
+    }
+
+    /// A run killed after the stamps were carried across and before the old
+    /// column was dropped. The next open finishes the job rather than dividing
+    /// what it already divided.
+    #[test]
+    fn a_half_converted_index_is_finished_rather_than_converted_twice() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        make_an_old_index(&path, "mtime_ns", 1_700_000_000_123_456_789);
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(
+                "ALTER TABLE files ADD COLUMN mtime_ms INTEGER NOT NULL DEFAULT 0;
+                 UPDATE files SET mtime_ms = 1700000000123;",
+            )
+            .expect("half of it");
+        }
+
+        let conn = open_and_migrate(&path).expect("open");
+        let known = load_known(&conn).expect("load");
+        assert_eq!(
+            known["a.jpg"].mtime_ms, 1_700_000_000_123,
+            "the stamp was divided a second time"
+        );
+        drop(conn);
+
+        let file = Connection::open(&path).expect("open the file");
+        let columns = column_names(&file, "files");
+        assert!(!columns.iter().any(|name| name == "mtime_ns"), "mtime_ns left: {columns:?}");
+    }
+
+    /// A run killed after the column was added and before the stamps were
+    /// carried across. The next open carries them.
+    #[test]
+    fn an_index_given_the_new_column_but_no_values_is_converted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        make_an_old_index(&path, "mtime_ns", 1_700_000_000_123_456_789);
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch("ALTER TABLE files ADD COLUMN mtime_ms INTEGER NOT NULL DEFAULT 0")
+                .expect("the column and nothing else");
+        }
+
+        let conn = open_and_migrate(&path).expect("open");
+        let known = load_known(&conn).expect("load");
+        assert_eq!(known["a.jpg"].mtime_ms, 1_700_000_000_123, "the stamp was left at nought");
+        drop(conn);
+
+        let file = Connection::open(&path).expect("open the file");
+        let columns = column_names(&file, "files");
+        assert!(!columns.iter().any(|name| name == "mtime_ns"), "mtime_ns left: {columns:?}");
+    }
+
+    /// An index in the shape an older build left it, with one row.
+    fn make_an_old_index(path: &Path, column: &str, stamp: i64) {
+        let conn = Connection::open(path).expect("create");
+        conn.execute_batch(&format!(
+            "CREATE TABLE files (
+                 id              INTEGER PRIMARY KEY,
+                 rel_path        TEXT    NOT NULL UNIQUE,
+                 size_bytes      INTEGER NOT NULL,
+                 {column}        INTEGER NOT NULL,
+                 last_scanned_at INTEGER NOT NULL
+             );
+             INSERT INTO files(rel_path, size_bytes, {column}, last_scanned_at)
+             VALUES ('a.jpg', 1234, {stamp}, 1);"
+        ))
+        .expect("an older index");
+    }
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        conn.prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     }
 
     #[test]

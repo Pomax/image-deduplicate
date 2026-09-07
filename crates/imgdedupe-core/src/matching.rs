@@ -117,9 +117,9 @@ pub struct Member {
     pub format: String,
     pub channels: u8,
     pub size_bytes: i64,
-    /// When the file was last written, as the file system reports it. Nothing
+    /// When the file was last written, as milliseconds since the epoch. Nothing
     /// here reads a date out of the file's own metadata.
-    pub mtime_ns: i64,
+    pub mtime_ms: i64,
     pub auto_keep: bool,
 }
 
@@ -183,7 +183,7 @@ pub struct Image {
     format: String,
     channels: u8,
     size_bytes: i64,
-    mtime_ns: i64,
+    mtime_ms: i64,
     /// How good a keeper this is. Fixed by the file, so it is worked out once.
     score: f64,
     /// The hash the image was indexed under, and the seven for its rotations and
@@ -199,7 +199,7 @@ pub struct Image {
 }
 
 const LOAD_IMAGES: &str = "
-SELECT id, rel_path, width, height, format, channels, size_bytes, mtime_ns,
+SELECT id, rel_path, width, height, format, channels, size_bytes, mtime_ms,
        dct_hashes, ring_stats, corners
 FROM indexed_images
 ORDER BY id
@@ -751,7 +751,7 @@ pub fn load_images(
             format,
             channels,
             size_bytes,
-            mtime_ns: row.get(7)?,
+            mtime_ms: row.get(7)?,
             variants: hashes.map(|hash| fingerprint::words(&hash)),
             bands: hashes.map(|hash| fingerprint::bands(&hash)),
             ring: fingerprint::ring_weighted(&ring),
@@ -981,7 +981,7 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
                     a.score
                         .partial_cmp(&b.score)
                         .expect("no NaN in a keep score")
-                        .then(b.mtime_ns.cmp(&a.mtime_ns))
+                        .then(b.mtime_ms.cmp(&a.mtime_ms))
                         .then(b.rel_path.cmp(&a.rel_path))
                 })
                 .expect("a set has members");
@@ -998,7 +998,7 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
                         format: image.format.clone(),
                         channels: image.channels,
                         size_bytes: image.size_bytes,
-                        mtime_ns: image.mtime_ns,
+                        mtime_ms: image.mtime_ms,
                         auto_keep: *position == keeper,
                     }
                 })
@@ -1070,7 +1070,7 @@ mod tests {
         let record = db::Record {
             rel_path: path.to_string(),
             size_bytes: size,
-            mtime_ns: 1,
+            mtime_ms: 1,
             width,
             height,
             format: Format::Jpeg,
