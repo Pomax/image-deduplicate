@@ -2763,14 +2763,14 @@ impl App {
             }
         }
 
-        // The page's margin down the left of the list and a gap above the first
-        // set, kept here rather than by the panel, so the panels above can run
-        // the width of the window and draw their lines across all of it. Put
-        // into the rectangle the list is drawn in, because that is the one thing
-        // that decides where the list starts.
+        // The page's margin down the left of the list, kept here rather than by
+        // the panel, so the panels above can run the width of the window and
+        // draw their lines across all of it. The top is the line under the
+        // toolbar: the bar down the side of the list starts there, against the
+        // line, and the gap above the first set is put inside the list instead.
         let room = ui.available_rect_before_wrap();
         let room = egui::Rect::from_min_max(
-            egui::pos2(room.left() + PAGE_MARGIN, room.top() + SECTION_GAP),
+            egui::pos2(room.left() + PAGE_MARGIN, room.top()),
             room.max,
         );
         // What a row comes out as, worked out here where the list's own room is
@@ -2787,6 +2787,11 @@ impl App {
                     row_height + spacing,
                     list,
                     |list, ui| {
+                        // The gap above the first set, taken here rather than
+                        // from the rectangle the list was given: the bar down
+                        // the side of the list comes from that rectangle and has
+                        // to start at the line above it, not at the first box.
+                        ui.add_space(SECTION_GAP);
                         list.show_rows(ui, row_height, visible.len(), |ui, range| {
                             for position in range {
                                 let index = visible[position];
@@ -6692,11 +6697,12 @@ mod tests {
             "the first set starts {} under the toolbar",
             first - toolbar
         );
-        // Level with the first set, to within the line drawn round it: the bar
-        // begins at the row, and the box's line is drawn just inside that.
+        // The bar starts at the line under the toolbar, not at the first set:
+        // the list runs from that line down, and the gap above the first set is
+        // inside the list.
         assert!(
-            (bar - first).abs() <= BOX_EDGE + 0.01,
-            "the scroll bar starts at {bar} and the first set at {first}"
+            (bar - toolbar).abs() < 1.01,
+            "the scroll bar starts at {bar} and the line under the toolbar is at {toolbar}"
         );
         let outlined: Vec<egui::Rect> = drawn
             .iter()
