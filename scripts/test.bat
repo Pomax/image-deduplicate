@@ -25,5 +25,8 @@ cargo test --workspace --features imgdedupe/local
 if errorlevel 1 exit /b 1
 
 rem They are all marked to be asked for by name, because they take minutes and
-rem touch a real index. `local::` is the module they are all in.
-cargo test --workspace --features imgdedupe/local local:: -- --ignored --nocapture
+rem work on a real index. `local::` is the module they are all in.
+rem
+rem One at a time: there is one index and they all take it up, so run together
+rem they read each other's half-written work and three of the seven fail on it.
+cargo test --workspace --features imgdedupe/local local:: -- --ignored --nocapture --test-threads=1
