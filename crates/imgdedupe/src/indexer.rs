@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use imgdedupe_core::matching;
 use imgdedupe_core::scan::{self, Event, Options};
-use imgdedupe_core::{db, runlog};
+use imgdedupe_core::runlog;
 
 /// What the window needs from a pass while it runs.
 #[derive(Debug, Clone)]
@@ -71,7 +71,12 @@ impl Drop for Run {
     }
 }
 
-pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
+pub fn start(
+    index: imgdedupe_core::index::Index,
+    root: &Path,
+    db_path: &Path,
+    recurse: bool,
+) -> Result<Run> {
     let options = Options {
         root: root.to_path_buf(),
         db_path: db_path.to_path_buf(),
@@ -103,18 +108,18 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
         say(scan::Step::StartedOpeningTheIndexForWriting);
         #[cfg(feature = "logging")]
         let opening = std::time::Instant::now();
-        let outcome = db::open(&options.db_path).and_then(|mut conn| {
+        let outcome = index.hold(&options.db_path).and_then(|()| {
             runlog::log_line!(
                 "  open the index for writing: {:.2}s",
                 opening.elapsed().as_secs_f64()
             );
             say(scan::Step::FinishedOpeningTheIndexForWriting);
 
-            // Off the connection that has just read the file, rather than reading
-            // the same file a second time. `recurse` decides which files the pass
-            // is about to look at, so it is read before the walk starts.
+            // From the manager, which holds the index. `recurse` decides which
+            // files the pass is about to look at, so it is read before the walk
+            // starts.
             say(scan::Step::StartedReadingTheIndexSettings);
-            let notes = crate::notes::read(&conn);
+            let notes = crate::notes::read(&index);
             // Read and handed over, not applied: how far this pass reaches is
             // what the window was set to when the Scan button was pressed. A
             // folder that reaches into its subfolders says so when it is opened,
@@ -129,17 +134,7 @@ pub fn start(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
                     let _ = sender.send(update(event));
                 }
             };
-            let (summary, images) = scan::run(&mut conn, &options, &stop, &report)?;
-            // Only when the pass changed something. Writing the file back is a
-            // few megabytes across the network, and a pass over a folder where
-            // nothing has moved has nothing to say that the file does not already
-            // hold.
-            if summary.indexed > 0 || summary.removed > 0 {
-                db::close(conn, &options.db_path)?;
-            } else {
-                runlog::log_line!("the index is unchanged, so it is not written back");
-                drop(conn);
-            }
+            let (summary, images) = scan::run(&index, &options, &stop, &report)?;
             // Handed over before the pass reports itself finished, so whatever
             // runs next already has it and no search ever asks the database.
             if let Some(images) = images {
@@ -197,6 +192,12 @@ mod tests {
             .expect("a fixture");
     }
 
+    /// A pass, started the way the window starts one: on a manager of its own,
+    /// holding nothing until the pass gives it the folder.
+    fn start_a_pass(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
+        start(imgdedupe_core::index::Index::start(), root, db_path, recurse)
+    }
+
     fn drain(run: &mut Run) -> Vec<Update> {
         let mut seen = Vec::new();
         while let Ok(update) = run.updates.recv() {
@@ -219,7 +220,7 @@ mod tests {
         }
         let db_path = dir.path().join("index.sqlite");
 
-        let mut run = start(dir.path(), &db_path, false).expect("start");
+        let mut run = start_a_pass(dir.path(), &db_path, false).expect("start");
         let seen = drain(&mut run);
 
         // Not the first thing said any more: a pass reports the steps it goes
@@ -248,136 +249,11 @@ mod tests {
         let db_path = dir.path().join("index.sqlite");
         std::fs::write(&db_path, b"not a database at all").expect("fixture");
 
-        let mut run = start(dir.path(), &db_path, false).expect("start");
+        let mut run = start_a_pass(dir.path(), &db_path, false).expect("start");
         let seen = drain(&mut run);
         assert!(
             matches!(seen.last(), Some(Update::Finished { error: Some(_), .. })),
             "the pass said nothing about failing: {seen:?}"
-        );
-    }
-
-    /// Dropping a run must not wait for the pass to notice it has been cancelled.
-    ///
-    /// Closing the window drops the run on the thread that draws. When the pass is
-    /// inside a call the operating system will not interrupt, which is what a read
-    /// of a file on a network mount is, waiting for it holds that thread for as
-    /// long as the other machine takes. The window then cannot be closed, and the
-    /// process cannot be killed either, because a thread in an uninterruptible
-    /// wait does not die on a signal.
-    /// Reading the existing index is a read of one small file, not thousands of
-    /// round trips, run against the folder the application is set to.
-    ///
-    /// SQLite reads a database in pages as a query asks for them, and on a network
-    /// mount every page is its own round trip. This times the whole stretch from
-    /// the pass starting to the bars having a total, which is the listing plus the
-    /// index read plus the diff.
-    #[test]
-    #[ignore = "runs a real pass over the folder the application is set to"]
-    fn a_pass_reaches_its_total_without_reading_the_index_page_by_page() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = crate::headless::default_db_path(&folder);
-
-        let started = std::time::Instant::now();
-        let run = start(&folder, &db_path, false).expect("start");
-        let mut reached = None;
-        while let Ok(update) = run.updates.recv_timeout(std::time::Duration::from_secs(120)) {
-            if let Update::Start { total } = update {
-                reached = Some((started.elapsed(), total));
-                break;
-            }
-        }
-        let (took, total) = reached.expect("the pass never announced a total");
-        assert!(
-            took < std::time::Duration::from_secs(5),
-            "the bars had no total for {took:?} ({total} files)"
-        );
-    }
-
-    /// How fast files are actually read and indexed, against the folder the
-    /// application is set to. Prints the rate rather than asserting a number,
-    /// because the number is the point.
-    #[test]
-    #[ignore = "runs a real pass over the folder the application is set to"]
-    fn how_fast_new_files_are_read_and_indexed() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = crate::headless::default_db_path(&folder);
-
-        let run = start(&folder, &db_path, false).expect("start");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut best = 0;
-        let mut last = 0;
-        while std::time::Instant::now() < deadline {
-            match run.updates.recv_timeout(std::time::Duration::from_secs(10)) {
-                Ok(Update::Progress { per_sec, done, .. }) => {
-                    best = best.max(per_sec);
-                    last = done;
-                }
-                Ok(Update::Finished { .. }) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-        println!("read {last} files, peak {best} per second");
-        assert!(best > 0, "the pass never reported a rate");
-    }
-
-    /// The window hears from a pass almost immediately, run against the folder
-    /// the application is set to.
-    ///
-    /// Nothing was reported until the listing, the index read and the diff had all
-    /// finished, and the listing asked the file system about every file one at a
-    /// time. On a folder on a network mount that was over thirty seconds of a
-    /// window that had been told nothing, which is indistinguishable from a window
-    /// that has locked up.
-    #[test]
-    #[ignore = "runs a real pass over the folder the application is set to"]
-    fn a_pass_says_something_almost_at_once() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = crate::headless::default_db_path(&folder);
-
-        let started = std::time::Instant::now();
-        let run = start(&folder, &db_path, false).expect("start");
-        let first = run.updates.recv_timeout(std::time::Duration::from_secs(60));
-        let waited = started.elapsed();
-        assert!(first.is_ok(), "the pass said nothing at all in {waited:?}");
-        assert!(
-            waited < std::time::Duration::from_secs(3),
-            "the window was told nothing for {waited:?} after the pass began"
-        );
-    }
-
-    /// Run against the folder the application is set to, which is the only place
-    /// this fault exists. On a local disk the pass sees the cancel flag within
-    /// milliseconds and waiting for it looks free; it is a lock only when the
-    /// pass is inside a call the operating system will not interrupt, which is
-    /// what a read from a network mount is.
-    #[test]
-    #[ignore = "runs a real pass over the folder the application is set to"]
-    fn dropping_a_run_does_not_wait_for_the_pass_to_finish() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = crate::headless::default_db_path(&folder);
-
-        let run = start(&folder, &db_path, false).expect("start");
-        // Long enough to be inside the folder. Nothing is reported during the
-        // listing, so there is no message to wait for: this is the stretch where
-        // the pass is in a read that will not be interrupted, and it is the
-        // stretch a person closing the window lands in.
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        let at = std::time::Instant::now();
-        drop(run);
-        let waited = at.elapsed();
-        assert!(
-            waited < std::time::Duration::from_millis(50),
-            "dropping the run held the thread that draws for {waited:?}, \
-             which is how long the window would refuse to close"
         );
     }
 
@@ -391,14 +267,20 @@ mod tests {
         }
         let db_path = dir.path().join("index.sqlite");
 
-        let run = start(dir.path(), &db_path, false).expect("start");
+        let run = start_a_pass(dir.path(), &db_path, false).expect("start");
         let stop = std::sync::Arc::clone(&run.cancel);
         drop(run);
         assert!(stop.load(Ordering::Relaxed), "the pass was not asked to stop");
         // What the index looks like afterwards is not asserted here. Dropping no
         // longer waits for the pass, so the pass is still winding up at this
-        // point and the write-ahead log beside the index may or may not be gone
-        // yet. `closing_an_index_leaves_one_file_behind` is where that is checked,
-        // against a pass that has finished.
+        // point and the manager may still be writing the file.
+        // `a_pass_puts_every_row_it_indexed_into_the_file` is where that is
+        // checked, against a pass that has finished.
     }
+
+    /// The measurements against a real folder of photographs. Not in the
+    /// repository: see `docs/tests.md`.
+    #[cfg(feature = "local")]
+    #[path = "../../../../../local/indexer.rs"]
+    mod local;
 }

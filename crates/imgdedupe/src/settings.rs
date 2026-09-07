@@ -386,7 +386,7 @@ mod tests {
         let settings = dir.path().join(FILE);
         for path in [
             r"\\server\share\folder",
-            r"C:\Users\Mike\Pictures",
+            r"C:\Users\someone\Pictures",
             r"D:\link-to-somewhere",
             "/mnt/photos",
         ] {

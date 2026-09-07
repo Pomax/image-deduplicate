@@ -1752,6 +1752,7 @@ dependencies = [
  "image",
  "imgdedupe-core",
  "rfd",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "ttf-parser 0.24.1",

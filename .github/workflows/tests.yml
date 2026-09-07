@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest
+          - os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # eframe's glow backend links against these, and a checkout of a runner
+      # has none of them.
+      - name: What Linux needs to build a window
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Without the `local` feature, which is the whole suite. What is behind it
+      # reads a real folder of photographs on one person's machine, its source
+      # is not in this repository, and nothing here may depend on it.
+      - name: Test
+        run: cargo test --workspace

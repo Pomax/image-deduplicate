@@ -10,10 +10,7 @@
 //! Read in one place, so the names of the keys are written once. Nothing here
 //! decides anything: the window takes these and applies them.
 
-use std::path::Path;
-
-use anyhow::Result;
-use imgdedupe_core::db::{self, Connection};
+use imgdedupe_core::index::Index;
 
 /// Every choice an index holds, or nothing where the index has never been asked
 /// about one. Nothing is a folder that has not said, which is not the same as a
@@ -49,9 +46,9 @@ pub fn mark(on: bool) -> &'static str {
     }
 }
 
-/// Everything the index has to say, off a connection that is already open.
-pub fn read(conn: &Connection) -> Notes {
-    let value = |key: &str| db::get_meta(conn, key).ok().flatten();
+/// Everything the index has to say, asked of the manager holding it.
+pub fn read(index: &Index) -> Notes {
+    let value = |key: &str| index.meta(key).ok().flatten();
     let yes_or_no = |key: &str| value(key).map(|held| held == "1");
     Notes {
         recurse: yes_or_no(RECURSE),
@@ -65,12 +62,4 @@ pub fn read(conn: &Connection) -> Notes {
     }
 }
 
-/// The same, for an index nothing has opened yet. Called on a thread of its own:
-/// the folder can be on another machine, and this is a file opened across the
-/// network before anything has been drawn.
-pub fn of_folder(db_path: &Path) -> Result<Notes> {
-    let conn = db::open_for_notes(db_path)?;
-    let notes = read(&conn);
-    let _ = conn.close();
-    Ok(notes)
-}
+

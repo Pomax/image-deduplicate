@@ -13,6 +13,12 @@ path = "src/main.rs"
 # given `--test`.
 logging = ["imgdedupe-core/logging"]
 
+# The checks that only mean something against a real folder of photographs.
+# Their source is in `local/`, which is not in the repository and never will be:
+# they read the folder the application is set to. Off, so a checkout without
+# that directory builds and CI never looks for it.
+local = ["imgdedupe-core/local"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -41,4 +47,7 @@ windows = { version = "0.58", features = [
 
 [dev-dependencies]
 image.workspace = true
+# Only so a test can forge a folder's index in an older shape for the manager to
+# open. Nothing the program does opens a database.
+rusqlite.workspace = true
 tempfile = "3"

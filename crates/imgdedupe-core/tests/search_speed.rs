@@ -51,7 +51,7 @@ fn hash_for(index: usize) -> fingerprint::Hash {
 }
 
 fn build(path: &std::path::Path, files: usize) -> Connection {
-    let mut conn = db::open(path).expect("index");
+    let mut conn = db::open_and_migrate(path).expect("index");
     let tx = conn.transaction().expect("tx");
     for index in 0..files {
         let hash = hash_for(index);
@@ -163,7 +163,7 @@ fn a_folder_of_pictures_with_corners_does_not_become_quadratic() {
 
 /// Build a folder of `pictures` pictures that have corners, and time a search.
 fn time_corners(path: &std::path::Path, pictures: usize) -> f64 {
-    let mut conn = db::open(path).expect("index");
+    let mut conn = db::open_and_migrate(path).expect("index");
     let tx = conn.transaction().expect("tx");
     for index in 0..pictures {
         let record = Record {
@@ -209,7 +209,7 @@ fn corners_for(index: usize) -> Vec<imgdedupe_core::features::Keypoint> {
 
 /// Build a folder of `copies` copies of one picture and time a search over it.
 fn time_copies(path: &std::path::Path, copies: usize) -> f64 {
-    let mut conn = db::open(path).expect("index");
+    let mut conn = db::open_and_migrate(path).expect("index");
     let tx = conn.transaction().expect("tx");
     let hash = hash_for(0);
     for index in 0..copies {

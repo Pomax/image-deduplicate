@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use imgdedupe_core::cleanup::{self, Disposal, Plan};
-use imgdedupe_core::db;
-use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
+use imgdedupe_core::index::Index;
+use imgdedupe_core::matching::{DuplicateSet, Thresholds};
 
 use crate::headless;
 use crate::Strictness;
@@ -92,8 +92,8 @@ fn thresholds(args: &Args) -> Thresholds {
 
 fn report(folder: PathBuf, args: &Args) -> Result<()> {
     let db_path = args.db.clone().unwrap_or_else(|| headless::default_db_path(&folder));
-    let conn = headless::open_index(&db_path)?;
-    let sets = find_sets(&conn, thresholds(args))?;
+    let index = headless::open_index(&db_path)?;
+    let sets = sets_of(&index, thresholds(args))?;
     let text = match args.format {
         ReportFormat::Json => report_json(&sets),
         ReportFormat::Csv => report_csv(&sets),
@@ -104,8 +104,8 @@ fn report(folder: PathBuf, args: &Args) -> Result<()> {
 
 fn clean(folder: PathBuf, args: &Args) -> Result<()> {
     let db_path = args.db.clone().unwrap_or_else(|| headless::default_db_path(&folder));
-    let conn = headless::open_index(&db_path)?;
-    let sets = find_sets(&conn, thresholds(args))?;
+    let index = headless::open_index(&db_path)?;
+    let sets = sets_of(&index, thresholds(args))?;
     let plan = plan_from(&sets);
 
     if !args.apply {
@@ -123,15 +123,8 @@ fn clean(folder: PathBuf, args: &Args) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("--to move needs --move-dir"))?,
         ),
     };
-    print!("{}", apply(&folder, &plan, &disposal, &db_path)?);
+    print!("{}", apply(&folder, &plan, &disposal, &index)?);
     Ok(())
-}
-
-fn find_sets(conn: &db::Connection, thresholds: Thresholds) -> Result<Vec<DuplicateSet>> {
-    let mut sets = matching::find_sets(conn, thresholds)?;
-    // Largest reclaim first, which is the order a person wants to work in.
-    sets.sort_by_key(|set| std::cmp::Reverse(set.recoverable_bytes()));
-    Ok(sets)
 }
 
 fn report_json(sets: &[DuplicateSet]) -> String {
@@ -197,7 +190,7 @@ fn describe(plan: &Plan) -> String {
     )
 }
 
-fn apply(root: &Path, plan: &Plan, disposal: &Disposal, db_path: &Path) -> Result<String> {
+fn apply(root: &Path, plan: &Plan, disposal: &Disposal, index: &Index) -> Result<String> {
     let outcome = cleanup::apply(root, plan, disposal).context("carrying out the plan")?;
     let mut out = format!(
         "removed {} files, freed {:.1} MB\n",
@@ -208,7 +201,7 @@ fn apply(root: &Path, plan: &Plan, disposal: &Disposal, db_path: &Path) -> Resul
         out.push_str(&format!("failed {path}: {message}\n"));
     }
 
-    let forgotten = forget(db_path, &outcome.removed)?;
+    let forgotten = forget(index, &outcome.removed)?;
     out.push_str(&format!("dropped {forgotten} rows from the index\n"));
     Ok(out)
 }
@@ -216,23 +209,32 @@ fn apply(root: &Path, plan: &Plan, disposal: &Disposal, db_path: &Path) -> Resul
 /// Take the removed files out of the index. Whether they went to the recycle bin,
 /// to another folder or nowhere, they are not at those paths any more, and an
 /// index that still lists them offers duplicates of files that are gone.
-fn forget(db_path: &Path, removed: &[String]) -> Result<usize> {
+fn forget(index: &Index, removed: &[String]) -> Result<usize> {
     if removed.is_empty() {
         return Ok(0);
     }
-    let mut conn = db::open_for_notes(db_path)?;
-    let tx = conn.transaction()?;
-    let dropped = db::delete_paths(&tx, removed)?;
-    tx.commit()?;
-    drop(conn);
+    let dropped = index.delete_paths(removed.to_vec())?;
 
-    // Rebuilding costs a copy of the whole index, so it happens here and only
+    // Rebuilding costs a rewrite of the whole index, so it happens here and only
     // here: a cleanup is the one thing that leaves enough behind to be worth it,
     // and only when it actually dropped rows.
     if dropped > 0 {
-        db::compact(db_path)?;
+        index.compact()?;
     }
     Ok(dropped)
+}
+
+/// Search whatever the manager is holding.
+fn sets_of(index: &Index, thresholds: Thresholds) -> Result<Vec<DuplicateSet>> {
+    let found = index.find_sets(
+        thresholds,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        std::sync::Arc::new(|_| {}),
+    )?;
+    let mut sets = found.unwrap_or_default();
+    // Largest reclaim first, which is the order a person wants to work in.
+    sets.sort_by_key(|set| std::cmp::Reverse(set.recoverable_bytes()));
+    Ok(sets)
 }
 
 #[cfg(test)]
@@ -297,23 +299,21 @@ mod tests {
     fn cleaning_up_forgets_the_removed_files_and_only_those() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
-        let conn = db::open(&db_path).expect("an index");
+        let index = imgdedupe_core::index::Index::start();
+        index.hold(&db_path).expect("an index");
         for path in ["big.jpg", "small, odd.jpg", "elsewhere.jpg"] {
-            conn.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
-                 VALUES (?1, 1, 1, 1)",
-                [path],
-            )
-            .expect("insert");
+            index
+                .upsert(vec![row(path)], 1)
+                .expect("insert");
         }
-        // The index is worked on in memory, so closing it is what makes it a file
-        // for the cleanup to open.
-        db::close(conn, &db_path).expect("write it out");
 
-        let dropped = forget(&db_path, &[String::from("small, odd.jpg")]).expect("forget");
+        let dropped = forget(&index, &[String::from("small, odd.jpg")]).expect("forget");
         assert_eq!(dropped, 1);
 
-        let conn = headless::open_index(&db_path).expect("reopen");
+        // Read the file, not what the manager holds: the rows have to be gone
+        // from the folder's index, not only from this run.
+        index.synced().expect("wait for the file");
+        let conn = imgdedupe_core::db::open_and_migrate(&db_path).expect("reopen");
         let mut left: Vec<String> = conn
             .prepare("SELECT rel_path FROM files")
             .expect("prepare")
@@ -325,12 +325,32 @@ mod tests {
         assert_eq!(left, vec!["big.jpg".to_string(), "elsewhere.jpg".to_string()]);
     }
 
+    /// One picture's worth of index, enough to have a path in the folder.
+    fn row(rel_path: &str) -> imgdedupe_core::db::Record {
+        use imgdedupe_core::fingerprint::{Fingerprint, HASH_BYTES, VARIANTS};
+        imgdedupe_core::db::Record {
+            rel_path: rel_path.to_string(),
+            size_bytes: 1,
+            mtime_ns: 1,
+            width: 10,
+            height: 10,
+            format: imgdedupe_core::format::Format::Jpeg,
+            channels: 3,
+            fingerprint: Fingerprint {
+                dct_hashes: [[0u8; HASH_BYTES]; VARIANTS],
+                ring_stats: vec![0u8; 4],
+            },
+            corners: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_cleanup_that_removed_nothing_touches_no_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
-        db::open(&db_path).expect("an index");
-        assert_eq!(forget(&db_path, &[]).expect("forget"), 0);
+        let index = imgdedupe_core::index::Index::start();
+        index.hold(&db_path).expect("an index");
+        assert_eq!(forget(&index, &[]).expect("forget"), 0);
     }
 
     /// Neither flag means the window opens, and no flag is the help flag.

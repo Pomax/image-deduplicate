@@ -5,7 +5,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::db::{self, Record};
@@ -164,7 +163,7 @@ fn walk(
     // the size of a tree is as many answers as it has directories, and a total
     // that grows as they are found is a bar that goes backwards.
     let of = if options.recurse { None } else { dirlist::entry_count(&options.root) };
-    let sidecars = index_sidecars(&options.db_path);
+    let sidecars = db::files_of_the_index(&options.db_path);
     let mut out = Vec::new();
     let mut queue = vec![options.root.clone()];
     let mut first = true;
@@ -227,17 +226,6 @@ fn walk(
     // the folder said before it started.
     report(Event::Walking { found: out.len() as u64, of: Some(out.len() as u64) });
     Ok(out)
-}
-
-/// The index plus the files SQLite keeps beside it in WAL mode.
-fn index_sidecars(db_path: &Path) -> Vec<PathBuf> {
-    let mut out = vec![db_path.to_path_buf()];
-    if let Some(name) = db_path.file_name().and_then(|n| n.to_str()) {
-        for suffix in ["-wal", "-shm", "-journal"] {
-            out.push(db_path.with_file_name(format!("{name}{suffix}")));
-        }
-    }
-    out
 }
 
 /// Relative paths are stored with forward slashes so an index built on one
@@ -461,7 +449,7 @@ impl ReadAhead {
 /// across every core; writing runs on one thread in batched transactions, so the
 /// index is consistent at every commit.
 pub fn run(
-    conn: &mut Connection,
+    index: &crate::index::Index,
     options: &Options,
     cancel: &AtomicBool,
     report: &(dyn Fn(Event) + Sync),
@@ -478,16 +466,14 @@ pub fn run(
 
     #[cfg(feature = "logging")]
     let at = Instant::now();
-    // Read the file whole rather than through it. The log is folded in first, so
-    // the file is everything that has been written. See `db::open_snapshot`.
     if cancel.load(Ordering::Relaxed) {
         return Ok((Summary { cancelled: true, ..Summary::default() }, None));
     }
-    // Straight off the connection: the index is in memory from the moment it was
-    // opened, so this reads nothing from anywhere.
+    // Straight out of the manager, which has held the index in memory since the
+    // folder was taken up, so this reads nothing from anywhere.
     #[cfg(feature = "logging")]
     let step = Instant::now();
-    let known = db::load_known(conn).context("reading the existing index")?;
+    let known = index.known().context("reading the existing index")?;
     runlog::log_line!("  known paths: {:.2}s", step.elapsed().as_secs_f64());
     report(Event::Reached(Step::LoadedIndexIntoMemory));
     runlog::log_line!(
@@ -520,8 +506,9 @@ pub fn run(
         report(Event::Reached(Step::StartedConvertingTheIndex));
         #[cfg(feature = "logging")]
         let step = Instant::now();
-        images =
-            crate::matching::load_images(conn, cancel, &|_| {}).context("converting the index")?;
+        images = index
+            .images(std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(|_| {}))
+            .context("converting the index")?;
         runlog::log_line!("  convert to memory: {:.2}s", step.elapsed().as_secs_f64());
         report(Event::Reached(Step::FinishedConvertingTheIndex));
     }
@@ -531,9 +518,7 @@ pub fn run(
     if !removed.is_empty() {
         #[cfg(feature = "logging")]
         let at = Instant::now();
-        let tx = conn.transaction()?;
-        summary.removed = db::delete_paths(&tx, &removed)? as u64;
-        tx.commit()?;
+        summary.removed = index.delete_paths(removed.clone())? as u64;
         runlog::log_line!(
             "drop gone: {:.2}s, {} rows",
             at.elapsed().as_secs_f64(),
@@ -581,7 +566,9 @@ pub fn run(
                 report(Event::Reached(Step::StartedIndexingNewFiles));
             }
 
-            let flush = |conn: &mut Connection, pending: &mut Vec<Box<Record>>| -> Result<()> {
+            let flush = |index: &crate::index::Index,
+                         pending: &mut Vec<Box<Record>>|
+             -> Result<()> {
                 if pending.is_empty() {
                     return Ok(());
                 }
@@ -589,15 +576,12 @@ pub fn run(
                 let rows = pending.len();
                 #[cfg(feature = "logging")]
                 let at = Instant::now();
-                let tx = conn.transaction()?;
-                for record in pending.iter() {
-                    db::upsert(&tx, record, scanned_at)?;
-                }
+                let batch: Vec<Record> = pending.drain(..).map(|it| *it).collect();
+                index.upsert(batch, scanned_at)?;
                 #[cfg(feature = "logging")]
                 let inserted = at.elapsed().as_secs_f64();
                 #[cfg(feature = "logging")]
                 let at = Instant::now();
-                tx.commit()?;
                 runlog::log_line!(
                     "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
                     at.elapsed().as_secs_f64()
@@ -612,7 +596,7 @@ pub fn run(
                         indexed += 1;
                         pending.push(record);
                         if pending.len() >= BATCH {
-                            flush(conn, &mut pending)?;
+                            flush(index, &mut pending)?;
                         }
                         if indexed % REPORT_EVERY == 0 || told.elapsed() >= REPORT_AFTER {
                             report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
@@ -627,7 +611,7 @@ pub fn run(
                 }
             }
 
-            flush(conn, &mut pending)?;
+            flush(index, &mut pending)?;
             report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
             if !to_index.is_empty() {
                 report(Event::Reached(Step::FinishedIndexingNewFiles));
@@ -784,10 +768,10 @@ pub fn run(
     summary.failed = write_result.1;
     summary.cancelled = cancel.load(Ordering::Relaxed);
 
-    db::set_meta(conn, "last_scan", &now_seconds().to_string())?;
+    index.set_meta("last_scan", &now_seconds().to_string())?;
     // What the index covers, not a preference: a pass that does not descend
     // where the last one did would drop every subfolder row as vanished.
-    db::set_meta(conn, "recurse", if options.recurse { "1" } else { "0" })?;
+    index.set_meta("recurse", if options.recurse { "1" } else { "0" })?;
 
     // The pass changed the index, so the copy taken at the load step describes a
     // folder that no longer matches it. Convert again, from what was just
@@ -797,8 +781,9 @@ pub fn run(
     let empty = unchanged == 0 && summary.indexed == 0;
     if images.is_none() && !summary.cancelled && !empty {
         report(Event::Reached(Step::StartedConvertingTheIndex));
-        images =
-            crate::matching::load_images(conn, cancel, &|_| {}).context("converting the index")?;
+        images = index
+            .images(std::sync::Arc::new(AtomicBool::new(false)), std::sync::Arc::new(|_| {}))
+            .context("converting the index")?;
         report(Event::Reached(Step::FinishedConvertingTheIndex));
     }
 
@@ -899,11 +884,10 @@ mod tests {
         // A different picture, to be sure the answer is not "everything matches".
         write_detailed(&fx.dir.path().join("other.png"), 900, 700, 91);
 
-        let mut conn = db::open(&fx.options.db_path).expect("open");
-        let cancel = AtomicBool::new(false);
-        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = scan(&fx);
         assert_eq!(summary.indexed, 3);
 
+        let conn = on_disk(&fx);
         let sets = crate::matching::find_sets(&conn, crate::matching::Thresholds::at(15.0))
             .expect("search");
         assert_eq!(sets.len(), 1, "the crop and the picture are not one set: {sets:?}");
@@ -928,10 +912,10 @@ mod tests {
 
         let mut options = fx.options.clone();
         options.recurse = true;
-        let mut conn = db::open(&options.db_path).expect("open");
         let cancel = AtomicBool::new(false);
-        let (summary, _) = run(&mut conn, &options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&fx.index, &options, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 3);
+        let conn = on_disk(&fx);
 
         // The whole folder at once: all three are one set.
         let together = crate::matching::find_sets(&conn, crate::matching::Thresholds::at(15.0))
@@ -960,10 +944,9 @@ mod tests {
         write_detailed(&whole, 900, 700, 4);
         write_crop(&whole, &fx.dir.path().join("cropped.png"), 60);
 
-        let mut conn = db::open(&fx.options.db_path).expect("open");
-        let cancel = AtomicBool::new(false);
-        run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        scan(&fx);
 
+        let conn = on_disk(&fx);
         let mut thresholds = crate::matching::Thresholds::at(15.0);
         thresholds.corners = false;
         let sets = crate::matching::find_sets(&conn, thresholds).expect("search");
@@ -986,10 +969,9 @@ mod tests {
         );
         smaller.save(fx.dir.path().join("smaller.png")).expect("write");
 
-        let mut conn = db::open(&fx.options.db_path).expect("open");
-        let cancel = AtomicBool::new(false);
-        run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        scan(&fx);
 
+        let conn = on_disk(&fx);
         let both = crate::matching::find_sets(&conn, crate::matching::Thresholds::at(15.0))
             .expect("search");
         assert_eq!(both.len(), 1, "the resize was not found with everything on");
@@ -1013,17 +995,22 @@ mod tests {
         scan(&fx);
 
         // The index as an older build left it: no corners column, and rows that
-        // say they were fingerprinted by the version before this one.
-        let conn = db::open(&fx.options.db_path).expect("open");
-        conn.execute_batch(
-            "DROP VIEW IF EXISTS indexed_images;
-             ALTER TABLE fingerprints DROP COLUMN corners;
-             UPDATE fingerprints SET fingerprint_version = 1;",
-        )
-        .expect("making an older index");
-        db::close(conn, &fx.options.db_path).expect("close");
+        // say they were fingerprinted by the version before this one. Written
+        // into the file for the manager to pick up, because that is where a file
+        // from an older build comes from.
+        fx.index.let_go().expect("let the folder go");
+        let older = rusqlite::Connection::open(&fx.options.db_path).expect("the index file");
+        older
+            .execute_batch(
+                "DROP VIEW IF EXISTS indexed_images;
+                 ALTER TABLE fingerprints DROP COLUMN corners;
+                 UPDATE fingerprints SET fingerprint_version = 1;",
+            )
+            .expect("making an older index");
+        drop(older);
 
-        let mut conn = db::open(&fx.options.db_path).expect("reopen");
+        fx.index.hold(&fx.options.db_path).expect("take the older index up");
+        let conn = on_disk(&fx);
         let corners: i64 = conn
             .query_row(
                 "SELECT count(*) FROM pragma_table_info('fingerprints') WHERE name = 'corners'",
@@ -1033,11 +1020,11 @@ mod tests {
             .expect("looking for the column");
         assert_eq!(corners, 1, "the column an older index lacks was not added");
 
-        let cancel = AtomicBool::new(false);
-        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = scan(&fx);
         assert_eq!(summary.indexed, 2, "the rows from the older build were not read again");
         assert_eq!(summary.unchanged, 0, "a row from the older build was left as it was");
 
+        let conn = on_disk(&fx);
         let filled: i64 = conn
             .query_row("SELECT count(*) FROM fingerprints WHERE length(corners) > 0", [], |row| {
                 row.get(0)
@@ -1049,6 +1036,7 @@ mod tests {
     struct Fixture {
         dir: tempfile::TempDir,
         options: Options,
+        index: crate::index::Index,
     }
 
     fn fixture() -> Fixture {
@@ -1056,21 +1044,28 @@ mod tests {
         let root = dir.path().to_path_buf();
         let db_path = root.join(db::INDEX_FILENAME);
         let options = Options { root, db_path, recurse: true };
-        Fixture { dir, options }
+        let index = crate::index::Index::start();
+        index.hold(&options.db_path).expect("hold the index");
+        Fixture { dir, options, index }
     }
 
-    /// One pass, ending the way the application ends one: the index is worked on
-    /// in memory and written out as a file when the pass is over, so the pass
-    /// after this one finds what this one wrote.
+    /// The index as it is on disk, once the file has caught up with what the
+    /// manager holds. Reading it back is how these tests check that a pass wrote
+    /// what it says it wrote.
+    fn on_disk(fixture: &Fixture) -> db::Connection {
+        fixture.index.synced().expect("wait for the file");
+        db::open_and_migrate(&fixture.options.db_path).expect("read the index file")
+    }
+
+    /// One pass, the way the application makes one: everything through the
+    /// manager, which is holding the folder's index.
     fn scan(fixture: &Fixture) -> (Summary, Vec<Event>) {
-        let mut conn = db::open(&fixture.options.db_path).expect("open");
         let events = std::sync::Mutex::new(Vec::new());
         let cancel = AtomicBool::new(false);
-        let (summary, _images) = run(&mut conn, &fixture.options, &cancel, &|event| {
+        let (summary, _images) = run(&fixture.index, &fixture.options, &cancel, &|event| {
             events.lock().unwrap().push(event);
         })
         .expect("scan");
-        db::close(conn, &fixture.options.db_path).expect("close");
         (summary, events.into_inner().unwrap())
     }
 
@@ -1187,6 +1182,32 @@ mod tests {
         }
     }
 
+    /// Every row a pass says it indexed is in the file when the pass is over.
+    ///
+    /// The pass tells the manager and the manager writes; nothing in the pass
+    /// opens or closes anything. What is checked here is the file, because the
+    /// file is what the next run of the program opens.
+    #[test]
+    fn a_pass_puts_every_row_it_indexed_into_the_file() {
+        let fx = fixture();
+        for n in 0..12 {
+            write_image(&fx.dir.path().join(format!("{n}.png")), 40, 30, n);
+        }
+        let (summary, _) = scan(&fx);
+        assert_eq!(summary.indexed, 12, "the pass did not index the folder");
+
+        let conn = on_disk(&fx);
+        let rows: i64 =
+            conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).expect("count");
+        assert_eq!(rows as u64, summary.indexed, "the file is behind what the pass indexed");
+        let fingerprinted: i64 = conn
+            .query_row("SELECT count(*) FROM fingerprints", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(fingerprinted, 12, "rows reached the file without their fingerprints");
+        // And how far the pass reached, which the pass writes itself.
+        assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("1"));
+    }
+
     #[test]
     fn a_first_pass_indexes_every_image() {
         let fx = fixture();
@@ -1235,7 +1256,7 @@ mod tests {
         let (summary, _) = scan(&fx);
         assert_eq!(summary.removed, 1);
 
-        let conn = db::open(&fx.options.db_path).expect("open");
+        let conn = on_disk(&fx);
         let count: i64 = conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 1);
     }
@@ -1251,7 +1272,7 @@ mod tests {
         let (summary, _) = scan(&fx);
         assert_eq!(summary.indexed, 1);
 
-        let conn = db::open(&fx.options.db_path).expect("open");
+        let conn = on_disk(&fx);
         let width: i64 = conn
             .query_row("SELECT width FROM images", [], |r| r.get(0))
             .unwrap();
@@ -1311,7 +1332,7 @@ mod tests {
         let (summary, _) = scan(&fx);
         assert_eq!(summary.indexed, 2, "the pass did not index the two it was meant to");
 
-        let conn = db::open(&fx.options.db_path).expect("open");
+        let conn = on_disk(&fx);
         let mut paths: Vec<String> = conn
             .prepare("SELECT rel_path FROM files")
             .unwrap()
@@ -1334,9 +1355,10 @@ mod tests {
         let db_path = root.join(db::INDEX_FILENAME);
         let options = Options { root: root.clone(), db_path: db_path.clone(), recurse: true };
 
-        let mut conn = db::open(&db_path).expect("open");
+        let index = crate::index::Index::start();
+        index.hold(&db_path).expect("hold the index");
         let cancel = AtomicBool::new(false);
-        let (summary, _) = run(&mut conn, &options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&index, &options, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1, "the folder it was pointed at was skipped");
     }
 
@@ -1349,17 +1371,16 @@ mod tests {
 
         let mut shallow = fx.options.clone();
         shallow.recurse = false;
-        let mut conn = db::open(&shallow.db_path).expect("open");
         let cancel = AtomicBool::new(false);
-        let (summary, _) = run(&mut conn, &shallow, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&fx.index, &shallow, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1);
 
         // How far the pass reached is written down, because a later pass that
         // does not reach as far drops everything it cannot see.
-        assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("0"));
-        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        assert_eq!(fx.index.meta("recurse").expect("meta").as_deref(), Some("0"));
+        let (summary, _) = run(&fx.index, &fx.options, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1, "the subfolder was not picked up");
-        assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("1"));
+        assert_eq!(fx.index.meta("recurse").expect("meta").as_deref(), Some("1"));
     }
 
     #[test]
@@ -1370,7 +1391,7 @@ mod tests {
         let (summary, _) = scan(&fx);
         assert_eq!(summary.removed, 0, "a sidecar was treated as a vanished image");
 
-        let conn = db::open(&fx.options.db_path).expect("open");
+        let conn = on_disk(&fx);
         let paths: Vec<String> = conn
             .prepare("SELECT rel_path FROM files")
             .unwrap()
@@ -1388,7 +1409,7 @@ mod tests {
         write_image(&fx.dir.path().join("one").join("two").join("deep.png"), 32, 32, 0);
         scan(&fx);
 
-        let conn = db::open(&fx.options.db_path).expect("open");
+        let conn = on_disk(&fx);
         let path: String = conn
             .query_row("SELECT rel_path FROM files", [], |r| r.get(0))
             .unwrap();
@@ -1401,11 +1422,11 @@ mod tests {
         for n in 0..8 {
             write_image(&fx.dir.path().join(format!("{n}.png")), 32, 32, n);
         }
-        let mut conn = db::open(&fx.options.db_path).expect("open");
         let cancel = AtomicBool::new(true);
-        let (summary, _) = run(&mut conn, &fx.options, &cancel, &|_| {}).expect("scan");
+        let (summary, _) = run(&fx.index, &fx.options, &cancel, &|_| {}).expect("scan");
         assert!(summary.cancelled);
 
+        let conn = on_disk(&fx);
         let count: i64 = conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(count, summary.indexed as i64);
     }

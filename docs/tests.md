@@ -3,6 +3,16 @@
 Every test in the workspace, and what it is for. Run them with `cargo test
 --release --workspace`, or one at a time by name.
 
+Every one of them runs anywhere. Nothing here reads a folder of somebody's own
+photographs, names a path on anybody's disk, or needs a machine to be set up
+first: a check that wants pictures makes them in a temporary folder and throws
+them away. `.github/workflows/tests.yml` runs the whole suite on Ubuntu, macOS
+and Windows, all three, on every push and every pull request, and a change is
+not good until all three have passed.
+
+The checks that do need a real folder of photographs are not in this repository.
+See the last section.
+
 A behavioural test uses the application: it scans a real folder of pictures,
 searches it, and looks at what the window is left holding. The rest are unit
 tests of a function whose inputs are its whole world.
@@ -105,56 +115,73 @@ holds, which is what decides whether a file needs reading again.
 A row with no fingerprint is treated as never indexed, so a pass interrupted
 between writes picks it up next time.
 
-### reopening_an_index_from_another_schema_version_is_refused
+### an_index_from_another_schema_version_is_refused
 
 An index written by a different schema version is refused rather than read as if
 it matched.
 
-### compacting_gives_back_the_space_of_deleted_rows_and_keeps_the_rest
+### an_index_in_an_older_shape_is_migrated_on_disk_when_it_is_opened
 
-Rebuilding the index after a cleanup shrinks the file and keeps every row that is
-still in it.
+Opening brings the file itself to the current shape before anything is served
+from it. Checked against the file on disk, not against what was read out of it,
+because a migration that lives only in memory is lost the moment it is dropped.
 
-### compacting_leaves_the_original_alone_when_it_cannot_finish
+### an_index_with_a_hot_journal_is_not_read_as_though_it_were_committed
 
-The rebuild works on a copy, so a failure at any step leaves the index exactly as
-it was.
-
-### compacting_clears_what_a_failed_attempt_left_behind
-
-A half-written copy from an earlier attempt is cleared rather than reused.
-
-### what_is_written_reaches_the_file_when_the_index_is_closed_and_not_before
-
-An index is worked on in memory. A row inserted into an open index is not in the
-file beside it, and is in the file the moment the index is closed.
-
-### writing_the_index_out_keeps_the_pairs_marked_while_it_was_open
-
-A pass reads the index into memory and writes the whole of it back over the file,
-and a set marked as not a set of copies goes straight into the file. A pass that
-started before the button was pressed writes its copy out and the pair is still
-there.
-
-### writing_the_index_out_keeps_the_pairs_taken_back_while_it_was_open
-
-The same the other way round: a pair taken back while a pass was running stays
-taken back, rather than coming back from the copy the pass was holding.
-
-### compacting_keeps_every_row_the_index_was_closed_with
-
-Compacting is over a file, and a file is what a closed index is. Everything in it
-is still in it afterwards, with no log left beside it.
-
-### closing_an_index_leaves_one_file_behind
-
-A closed index is one file. A write-ahead log and a shared-memory file left beside
-it by an older build that held the index open are cleared when it is closed, and
-what was written is still there afterwards.
+An index left part way through a write is refused, rather than read as if the
+journal beside it were not there. Nothing is written over it.
 
 ### a_fresh_index_records_its_schema_version
 
 A new index writes down the version it was made with.
+
+## crates/imgdedupe-core/src/index.rs
+
+The one owner of a folder's index.
+
+### nothing_but_the_manager_holds_the_index
+
+A read and a write are both answered by messages, and nothing that comes back is
+a connection. A read made before any folder is held says so, rather than
+answering with nothing: an empty answer is what the old code substituted when a
+read failed, and it went on to be written over the real index.
+
+### letting_go_of_a_folder_waits_for_the_file_to_catch_up
+
+The manager holds the data and the file is a copy of it. Letting go answers only
+once the file holds everything the manager did.
+
+### a_scan_that_indexed_nothing_still_leaves_the_file_in_step
+
+A folder is opened, nothing at all happens to it, and it is let go: the migration
+made on the way in is in the file. The old code wrote the index out only when a
+pass had found work, so an index it had just migrated was thrown away and the
+next run migrated it again.
+
+### every_change_reaches_the_file
+
+One of every kind of change — rows written, rows deleted, a setting set, a
+setting forgotten, a pair marked, a compaction — then let go, and all of them are
+in the file.
+
+### a_broken_index_stops_the_manager_and_writes_nothing
+
+The three ways an index is broken: it is not a database, it is written under a
+schema version this build does not speak, or it cannot be written to. Each is
+refused with a reason, each leaves the manager holding nothing, and each leaves
+the file byte for byte what it was.
+
+### a_compaction_that_cannot_finish_leaves_the_index_where_it_was
+
+The rebuilt index is written beside the file and renamed onto it, so a write that
+cannot finish leaves the index where it was rather than half of a new one.
+
+### no_connection_is_made_outside_the_manager
+
+Reads the source of both crates and fails on `Connection::open`,
+`open_in_memory` or `open_with_flags` anywhere but `db.rs`, which holds the one
+opener, and `index.rs`, which is the manager that calls it. This is the only
+thing that keeps the rule true once it is true.
 
 ## crates/imgdedupe-core/src/decode.rs
 
@@ -436,20 +463,6 @@ An animated WebP is left out.
 A cut-off file gives an answer rather than crashing the pass.
 
 ## crates/imgdedupe-core/src/matching.rs
-
-### a_search_reports_while_it_runs
-
-Ignored unless it is asked for by name: it searches the real index in the folder
-`IMGDEDUPE_TEST_FOLDER` names.
-
-A search says what it is doing while it does it: reading the index, then comparing
-pairs, then grouping. It used to say nothing at all until it had the answer, so
-the window sat on whatever the pass had last put there for the whole of it. It
-also reports before counting the rows, because counting them is itself a scan of
-the whole view and gated everything behind it.
-
-Reads a real index, so it takes the folder from `IMGDEDUPE_TEST_FOLDER` and is
-marked to be asked for by name.
 
 ### comparing_is_reported_while_it_is_still_comparing
 
@@ -740,6 +753,13 @@ Nothing about them waits for the end. Reports come on a timer, and the first fil
 read is announced whenever it lands rather than waiting for one, so a pass over a
 folder that finishes inside the interval still reports while it works.
 
+### a_pass_puts_every_row_it_indexed_into_the_file
+
+Every row a pass says it indexed, with its fingerprints and how far the pass
+reached, is in the file when the pass is over. The pass tells the manager and the
+manager writes; nothing in the pass opens or closes anything. Checked against the
+file, because the file is what the next run of the program opens.
+
 ### a_first_pass_indexes_every_image
 
 A pass over a folder of pictures indexes all of them.
@@ -1005,8 +1025,27 @@ the next set at the end of one, and nowhere at the end of the list.
 ### an_unticked_folder_loses_its_index_when_the_cleanup_is_done
 
 A scan, search and cleanup on a folder with the checkbox unticked: the index and
-its write-ahead log are deleted and the window is left on the scan tab with
-nothing on it.
+everything the manager leaves beside it are deleted and the window is left on the
+scan tab with nothing on it.
+
+### a_folder_forgotten_leaves_no_index_and_says_how_many_rows_went
+
+Forgetting a folder takes the index and everything beside it, and the count of
+what went comes from the manager. The window used to remove the file itself and
+report a hardcoded nought, because it had nothing left to count.
+
+### a_folder_whose_index_is_in_an_older_shape_still_opens
+
+A folder whose index was written by an older build opens and can be searched
+without a pass having to happen first, and the file itself is left in the shape
+this build reads. Only one of the four old openers migrated, so an index no scan
+had touched was never brought up to date.
+
+### a_broken_index_leaves_the_lamp_red_and_the_window_stopped
+
+A folder whose index cannot be read stops there: the lamps for the index stay
+red, what went wrong is on screen, no pictures come out of it, no pass starts,
+and the file is not written to.
 
 ### taking_the_outcome_does_not_touch_the_index
 
@@ -1303,40 +1342,6 @@ again from nothing comes back with the set still ignored.
 Ignoring a set and then taking it back: the pairs go from the index, the set is
 being cleaned up again, and opening the folder from nothing comes back with it a
 set of copies.
-
-### what_the_real_folders_index_says_about_itself
-
-Ignored unless it is asked for by name: it reads the index of the folder the
-application is set to. Prints the tables in it and every setting the window keeps
-there, so what is actually in a real index can be seen rather than assumed.
-
-### the_real_folders_index_keeps_every_setting_the_window_writes
-
-Ignored unless it is asked for by name: it writes to the index of the folder the
-application is set to, and puts it back as it was found. A pass holds the index
-in memory, the window writes every setting it keeps into the file underneath it,
-and the pass writes out. All of them are still there afterwards, and how far the
-pass reached is still the pass's own.
-
-### the_real_folders_index_keeps_what_was_marked_when_it_is_written_out
-
-Ignored unless it is asked for by name: it writes to the index of the folder the
-application is set to, and puts it back as it was found. The same for a pair
-marked as not copies: marked while a pass holds the index, still marked after the
-pass writes out.
-
-### every_box_the_window_keeps_survives_the_real_folders_index
-
-Ignored unless it is asked for by name: it writes to the index of the folder the
-application is set to, and puts it back as it was found. Every box is set away
-from its default through the window's own writing, and read back through the
-window's own reading.
-
-### only_matching_within_folders_holds_on_the_real_folder
-
-Ignored unless it is asked for by name: it searches the index of the folder the
-application is set to, and writes nothing. With folders kept apart, no set is
-made out of two folders.
 
 ### a_folder_the_window_opens_on_comes_up_with_its_ignored_sets_ignored
 
@@ -1660,34 +1665,6 @@ parsed out of a pipe. The total is no longer the first thing it says: a pass
 reports the steps it goes through from the moment it starts, and the total is only
 known once the listing is over.
 
-### a_pass_says_something_almost_at_once
-
-The window hears from a pass within a second of it starting. Nothing was reported
-until the listing, the index read and the diff had all finished, and the listing
-asked the file system about every file one at a time, so on a folder on a network
-mount that was over thirty seconds of a window that had been told nothing, which
-is indistinguishable from one that has locked up.
-
-Run against the folder the application is set to, so it is marked to be asked for
-by name rather than run with everything else.
-
-### a_pass_reaches_its_total_without_reading_the_index_page_by_page
-
-Times the whole stretch from a pass starting to the bars having a total, which is
-the listing plus the index read plus the diff. SQLite reads a database in pages as
-a query asks for them, and on a network mount every page is its own round trip;
-the index is now read whole, in one go, and worked on in memory.
-
-Timing-sensitive and run against the real folder, so it is marked to be asked for
-by name. It has been seen to pass at 2.5s and fail at 6.3s against identical code,
-because a share's latency is not a constant.
-
-### how_fast_new_files_are_read_and_indexed
-
-Prints the peak read rate against the real folder rather than asserting a number,
-because the number is the point and it belongs to the storage rather than to the
-code. Marked to be asked for by name.
-
 ### a_pass_that_cannot_open_its_index_says_so_and_stops
 
 An index that cannot be opened is reported by the pass rather than leaving the
@@ -1696,22 +1673,6 @@ window waiting for a run that never says anything.
 ### dropping_a_run_stops_the_pass_it_started
 
 Dropping a run asks the pass to stop.
-
-### dropping_a_run_does_not_wait_for_the_pass_to_finish
-
-Dropping a run returns at once. It used to wait for the pass's thread, and closing
-the window drops the run on the thread that draws, so the window closed only once
-the pass had noticed it was cancelled. The pass checks between files, and a file
-on a network mount is read by a call the operating system will not interrupt, so
-that wait was as long as the other machine took. The window then could not be
-closed, and the process could not be killed either, because a thread in an
-uninterruptible wait does not die on a signal.
-
-Run against the folder the application is set to, because that is the only place
-the fault exists: on a local disk the pass sees the flag within milliseconds and
-waiting for it looks free. Measured on a folder on a network mount, dropping the
-run held the thread for **85.2 seconds** against the version that waited, and
-returns in under a millisecond against the version that does not.
 
 ## crates/imgdedupe/src/settings.rs
 
@@ -1879,3 +1840,33 @@ The debug build with no flags opens the window like the release build.
 ### report_and_clean_each_take_the_folder_and_cannot_be_combined
 
 The two debug flags each need a folder and cannot be given together.
+
+## Not in this repository: the checks against a real folder
+
+Eight checks only mean something against a real folder of photographs, on the
+machine and the mount that folder lives on. They read the folder the application
+is set to and print what they find there, so their source is in `local/`, which
+is in `.gitignore` and is never committed. A checkout does not have it and does
+not need it.
+
+They are behind the `local` feature, which is off, so `cargo test --workspace`
+never looks for the directory and CI never turns the feature on. With the
+directory present:
+
+    cargo test --features imgdedupe/local -- --ignored --nocapture
+
+None of them could run in CI even if the source were here. Each is a measurement
+of a large index over a network mount, and a generated folder on a runner's local
+disk answers a different question. What each one checks about the program is
+already checked in the suite proper, on a folder made for the purpose:
+
+| Not in the repository | What checks the behaviour here |
+| --- | --- |
+| `a_search_reports_while_it_runs` | `comparing_is_reported_while_it_is_still_comparing` |
+| `what_the_real_folders_index_says_about_itself` | nothing: it prints, it does not assert |
+| `only_matching_within_folders_holds_on_the_real_folder` | `matching_within_folders_never_puts_two_folders_together` |
+| `every_box_the_window_keeps_survives_the_real_folders_index` | `the_index_keeps_whether_multi_selected_was_ticked`, `the_index_keeps_which_ways_of_matching_were_ticked`, `the_index_keeps_matching_within_folders_and_running_on_opening` |
+| `a_pass_says_something_almost_at_once` | `the_event_stream_starts_and_ends` |
+| `a_pass_reaches_its_total_without_reading_the_index_page_by_page` | `a_folder_whose_index_is_in_an_older_shape_still_opens` |
+| `how_fast_new_files_are_read_and_indexed` | nothing: it prints a rate that belongs to the storage |
+| `dropping_a_run_does_not_wait_for_the_pass_to_finish` | `dropping_a_run_stops_the_pass_it_started` |

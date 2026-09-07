@@ -769,57 +769,6 @@ pub fn find_sets(conn: &Connection, thresholds: Thresholds) -> Result<Vec<Duplic
         .expect("a search that is never cancelled cannot come back cancelled"))
 }
 
-#[cfg(test)]
-mod search_reports {
-    use super::*;
-
-    /// A search says what it is doing while it does it, against a real index.
-    ///
-    /// It used to say nothing at all until it had the answer, so the window sat on
-    /// whatever the pass had last put there for the whole of the search. Reading
-    /// the index is most of that on a folder that is not on this machine.
-    #[test]
-    #[ignore = "searches the real index at IMGDEDUPE_TEST_FOLDER"]
-    fn a_search_reports_while_it_runs() {
-        let Some(folder) = std::env::var_os("IMGDEDUPE_TEST_FOLDER").map(std::path::PathBuf::from)
-        else {
-            panic!("set IMGDEDUPE_TEST_FOLDER to the folder to search");
-        };
-        let db_path = folder.join(crate::db::INDEX_FILENAME);
-        let conn = crate::db::open_read_only(&db_path).expect("the index");
-
-        let seen = std::sync::Mutex::new(Vec::new());
-        let never = AtomicBool::new(false);
-        let started = std::time::Instant::now();
-        let sets = find_sets_cancellable(&conn, Thresholds::preset("balanced"), &never, &|p| {
-            seen.lock().unwrap().push((started.elapsed(), p));
-        })
-        .expect("the search")
-        .expect("not cancelled");
-
-        let seen = seen.into_inner().unwrap();
-        assert!(!seen.is_empty(), "the search reported nothing at all");
-        let loading = seen
-            .iter()
-            .filter(|(_, p)| matches!(p, Progress::Loading { .. }))
-            .count();
-        let comparing = seen
-            .iter()
-            .filter(|(_, p)| matches!(p, Progress::Comparing { .. }))
-            .count();
-        assert!(loading > 1, "the search reported reading the index {loading} times");
-        assert!(comparing > 1, "the search reported comparing {comparing} times");
-        // And the first word from it comes before it has done any of the work,
-        // rather than after the count of what there is to do.
-        let first = seen[0].0;
-        assert!(
-            first < std::time::Duration::from_millis(50),
-            "the search said nothing for its first {first:?}"
-        );
-        println!("{} sets, {} reports", sets.len(), seen.len());
-    }
-}
-
 /// Batches the comparing is cut into, so it spreads across the machine's cores.
 const COMPARE_BATCHES: u64 = 32;
 
@@ -1583,4 +1532,10 @@ mod tests {
 
         assert_eq!(reported, expected, "the band search and comparing everything disagree");
     }
+
+    /// The measurements against a real index. Not in the repository: see
+    /// `docs/tests.md`.
+    #[cfg(feature = "local")]
+    #[path = "../../../../../local/matching.rs"]
+    mod local;
 }

@@ -1,6 +1,12 @@
 target
 dist
 *.log
+
+# The checks that read the folder the application is set to. They print real
+# paths out of a real photo collection, so they stay on the machine they were
+# written on. Nothing in the repository needs them: they are behind the `local`
+# feature, which is off, and CI never turns it on.
+/local/
 /imgdedupe
 /imgdedupe.exe
 /imgdedupe-new
