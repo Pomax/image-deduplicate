@@ -97,6 +97,9 @@ enum Opened {
     Notes(crate::notes::Notes),
     /// How far the reading has got.
     Reading(matching::Progress),
+    /// Whether the folder holds an index. Looked for on a thread, not while
+    /// drawing.
+    Found(bool),
     /// The pairs somebody said are not copies of each other, read off the same
     /// connection as the pictures. They are part of what a folder's index says
     /// about it, so they arrive with it and are held in memory from then on.
@@ -1345,13 +1348,10 @@ impl App {
     /// machine, so tests do not depend on what the last real run left behind.
     fn from_settings(saved: crate::settings::Settings) -> Self {
         let db_path = saved.folder.as_deref().map(headless::default_db_path);
-        // Look in the remembered folder for an index file. Whether one is there
-        // decides whether the folder counts as remembered and whether it is
-        // scanned on sight; the settings file is not asked.
-        let has_index = db_path.as_deref().is_some_and(Path::is_file);
-        // Whether the folder was looked in at all, which is what the first lamp
-        // reports. A window opened with no folder has looked in nothing.
+        // Runs before the first frame, so it touches no files. A thread looks
+        // for the index once the window is up and the answer ticks the box.
         let db_path_checked = db_path.is_some();
+        let has_index = false;
         App {
             view: View::Scan,
             folder: saved.folder,
@@ -1400,7 +1400,7 @@ impl App {
             // itself once the window is up, which is what decides whether it is
             // also scanned. Nothing here can do that: it would be a file opened
             // across the network before a single frame had been drawn.
-            scan_on_open: has_index,
+            scan_on_open: db_path_checked,
             window: saved.window,
             preview_width: saved.preview_width,
             error: None,
@@ -2070,18 +2070,20 @@ impl App {
         let Some(db_path) = self.db_path.clone() else {
             return;
         };
-        if !db_path.is_file() {
-            return;
-        }
         // Reading the index is the first thing done to a folder, so the clock
         // the lamps are timed against starts with it, the way it starts again
         // at the press of the Scan button.
         self.started = std::time::Instant::now();
         self.lit.clear();
-        self.lit.insert(Lamp::CheckedForIndexFile, 0);
         let (send, receive) = std::sync::mpsc::channel();
         self.asking = Some(receive);
         std::thread::spawn(move || {
+            // A network request for a folder on another machine.
+            let there = db_path.is_file();
+            let _ = send.send(Opened::Found(there));
+            if !there {
+                return;
+            }
             if let Ok(notes) = crate::notes::of_folder(&db_path) {
                 let _ = send.send(Opened::Notes(notes));
             }
@@ -2148,6 +2150,11 @@ impl App {
                     }
                 }
                 Opened::Reading(progress) => self.note_search_progress(progress),
+                Opened::Found(there) => {
+                    self.light(Lamp::CheckedForIndexFile);
+                    self.keep_index = there;
+                    self.settle_the_boxes();
+                }
                 Opened::Ignored(pairs) => self.ignored.extend(pairs),
                 Opened::Index(images) => {
                     self.light(Lamp::LoadedIndexIntoMemory);
@@ -8501,11 +8508,9 @@ mod tests {
         assert!(app.db_path.is_some(), "the index path was not derived");
     }
 
-    /// At startup the window opens the saved folder and checks whether it
-    /// contains an index file. If it does, the checkbox is ticked and a scan
-    /// starts immediately. If it does not, the checkbox is unticked and nothing
-    /// happens until the Scan button is pressed. The settings file has no say
-    /// in this.
+    /// Building the window asks the file system nothing: the folder is looked in
+    /// once the window is up, and the checkbox is ticked by the answer. A folder
+    /// with no index leaves it unticked. The settings file has no say in this.
     #[test]
     fn a_folder_with_an_index_is_asked_about_on_opening_and_one_without_is_not() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8515,8 +8520,10 @@ mod tests {
             ..crate::settings::Settings::default()
         };
 
-        let app = App::from_settings(settings(&folder));
-        assert!(!app.scan_on_open, "an index that is not there was going to be asked anything");
+        let mut app = App::from_settings(settings(&folder));
+        assert!(!app.keep_index, "the checkbox was ticked before the folder was looked in");
+        app.open_what_was_left_open();
+        settle(&mut app);
         assert!(!app.keep_index, "the checkbox was ticked although there is no index");
 
         // Scan the folder so that it has an index. A pass writes one when it has
@@ -8532,8 +8539,9 @@ mod tests {
         settle(&mut built);
         assert!(headless::default_db_path(&folder).is_file(), "the scan did not write an index");
 
-        let app = App::from_settings(settings(&folder));
-        assert!(app.scan_on_open, "an index exists but nothing was going to ask it anything");
+        let mut app = App::from_settings(settings(&folder));
+        app.open_what_was_left_open();
+        settle(&mut app);
         assert!(app.keep_index, "an index exists but the checkbox was not ticked");
     }
 
