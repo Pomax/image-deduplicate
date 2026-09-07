@@ -36,7 +36,7 @@ fn start_window() -> Result<()> {
         // taking so long.
         .with_inner_size([1100.0, 860.0])
         .with_min_inner_size([700.0, 780.0])
-        .with_title("imgdedupe")
+        .with_title(format!("imgdedupe {}", env!("CARGO_PKG_VERSION")))
         .with_icon(crate::icon::window_icon());
     if let Some(window) = saved.window {
         viewport = viewport
