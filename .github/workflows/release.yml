@@ -1,8 +1,9 @@
 name: Release
 
-# The three platforms build at the same time and their executables go out as one
-# release: a tag makes a release of its own, and a push to main replaces the one
-# called latest. A pull request builds all three and releases nothing.
+# Windows, macOS, and Linux build in parallel and their executables go into one
+# release, named after the version in Cargo.toml. A push to main only builds and
+# releases if that version changed since the previous commit. A v* tag always
+# releases, under the tag name. Pull requests build but release nothing.
 on:
   push:
     tags:
@@ -16,7 +17,25 @@ permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      release: ${{ steps.decide.outputs.release }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      # Two commits, so this commit's version can be compared to the one before.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check whether the version changed
+        id: decide
+        run: sh .github/workflows/check-version.sh
+
   build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -90,11 +109,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    # A tag makes a release of its own. A push to main replaces the one called
-    # latest, so the newest build of all three platforms is always downloadable
-    # without waiting for somebody to tag something.
-    if: github.event_name == 'push'
-    needs: build
+    # The release is always created, never edited, so an existing release is
+    # never changed or overwritten. If the tag already exists this fails, which
+    # is the right outcome: that version has already been released.
+    needs: [check, build]
+    if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -108,45 +127,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            tag="${{ github.ref_name }}"
-            title="$tag"
-          else
-            tag="latest"
-            title="Latest build of main"
-          fi
-
-          # Made once and replaced afterwards, so the three assets of a release
-          # are always from one build rather than from whichever job last
-          # finished.
-          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-            # A release that already exists keeps the tag it was made from, and
-            # editing its target does not move that tag, so latest would go on
-            # pointing at whatever it was first made from. The tag is moved.
-            if [ "$tag" = "latest" ]; then
-              gh api -X PATCH "repos/$REPO/git/refs/tags/latest" \
-                -f sha="$GITHUB_SHA" -F force=true >/dev/null
-            fi
-            gh release edit "$tag" --repo "$REPO" --target "$GITHUB_SHA" --title "$title"
-          else
-            gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "$title" --generate-notes
-          fi
-
-          gh release upload "$tag" --repo "$REPO" --clobber \
+          gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
+            --title "$TAG" --generate-notes \
             built/imgdedupe-windows.zip \
             built/imgdedupe-macos.zip \
             built/imgdedupe-linux.zip
-
-          # Uploading replaces an asset of the same name and leaves every other
-          # one where it is, so a release that has been made before still holds
-          # what earlier runs called things. A release holds these three.
-          gh release view "$tag" --repo "$REPO" --json assets \
-            --jq '.assets[].name' |
-          while read -r asset; do
-            case "$asset" in
-              imgdedupe-windows.zip|imgdedupe-macos.zip|imgdedupe-linux.zip) ;;
-              *) gh release delete-asset "$tag" "$asset" --repo "$REPO" --yes ;;
-            esac
-          done
