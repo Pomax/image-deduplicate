@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 # the dependency versions further down the file.
 read_version() {
     awk '
-        /^\[package\]/ { in_package = 1; next }
+        /^\[(workspace\.)?package\]/ { in_package = 1; next }
         /^\[/          { in_package = 0 }
         in_package && /^[[:space:]]*version[[:space:]]*=/ {
             gsub(/.*=[[:space:]]*"|".*/, "")
