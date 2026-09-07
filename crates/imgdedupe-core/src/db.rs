@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, OpenFlags, Transaction};
+use rusqlite::{params, Transaction};
 
 /// Re-exported so nothing above this layer needs its own SQLite dependency.
 pub use rusqlite::Connection;
@@ -87,37 +87,48 @@ JOIN images i       ON i.file_id = f.id
 JOIN fingerprints p ON p.file_id = f.id;
 ";
 
-/// Open for writing, creating the schema if it is not there. Only the indexer
-/// does this: it is the single writer.
-pub fn open(path: &Path) -> Result<Connection> {
-    // The index is worked on in memory and written out as one file when the pass
-    // is done. Every statement a pass runs against a database on another machine
-    // is a round trip: creating it, the write-ahead log, the shared memory file
-    // that a log needs and that a network filesystem cannot properly provide, the
-    // schema, and every insert. In memory they are all free, and what reaches the
-    // network is one sequential write of a file that is a few megabytes.
+/// Open a folder's index: bring the file to the current shape, then read it in.
+///
+/// Only the manager calls this, and nothing else opens the index.
+pub fn open_and_migrate(path: &Path) -> Result<Connection> {
+    // The file is brought to the current shape first, on disk, so no reader can
+    // be handed a connection to an index that is still in an older one.
+    migrate_the_file(path)?;
+
+    // Then read in one go. Every statement against a database on another machine
+    // is a round trip; in memory they are free, and what reaches the network is
+    // one sequential read of a file that is a few megabytes.
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
-    let conn = match std::fs::read(path) {
-        Ok(bytes) => {
-            let existing = into_memory(bytes, path, false)?;
-            crate::log_line!(
-                "    read {} bytes of index: {:.2}s",
-                std::fs::metadata(path).map(|it| it.len()).unwrap_or(0),
-                at.elapsed().as_secs_f64()
-            );
-            existing
-        }
-        // No index yet, or none that can be read. Either way this pass builds one.
-        Err(_) => Connection::open_in_memory().context("opening an index in memory")?,
-    };
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading the index at {}", path.display()))?;
+    crate::log_line!("    read {} bytes of index: {:.2}s", bytes.len(), at.elapsed().as_secs_f64());
+    let conn = into_memory(bytes, path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    #[cfg(feature = "logging")]
-    let at = std::time::Instant::now();
+    Ok(conn)
+}
+
+/// Bring the file itself to the current shape: the schema, the columns an older
+/// build lacks, and the version it is written under.
+///
+/// This is the only thing that writes the index other than the manager putting
+/// what it holds back, and it happens before anything reads a row.
+fn migrate_the_file(path: &Path) -> Result<()> {
+    if path.exists() {
+        let hot = with_suffix(path, "-journal");
+        if std::fs::metadata(&hot).map(|it| it.len()).unwrap_or(0) > 0 {
+            anyhow::bail!(
+                "{} was left part way through a write and cannot be trusted",
+                path.display()
+            );
+        }
+    }
+    let conn = Connection::open(path)
+        .with_context(|| format!("opening the index at {}", path.display()))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(SCHEMA).context("applying the schema")?;
     drop_dead_columns(&conn)?;
     add_new_columns(&conn)?;
-    crate::log_line!("    schema: {:.2}s", at.elapsed().as_secs_f64());
 
     let existing: Option<i64> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
@@ -132,7 +143,32 @@ pub fn open(path: &Path) -> Result<Connection> {
         Some(_) => {}
         None => set_meta(&conn, "schema_version", &SCHEMA_VERSION.to_string())?,
     }
-    Ok(conn)
+    drop(conn);
+    // The rollback journal SQLite keeps beside a file it is writing. Everything
+    // above is committed, so what is left is an empty one.
+    let _ = std::fs::remove_file(with_suffix(path, "-journal"));
+    Ok(())
+}
+
+/// Where the index is written before it is moved onto itself.
+pub fn being_written(path: &Path) -> std::path::PathBuf {
+    with_suffix(path, ".writing")
+}
+
+/// Every file the index is made of: the index and anything SQLite or a write
+/// leaves beside it. A scan skips these, and removing an index removes all of
+/// them.
+///
+/// `-wal` and `-shm` are here for an index left behind by a build that wrote in
+/// that mode. Nothing makes them now.
+pub fn files_of_the_index(path: &Path) -> Vec<std::path::PathBuf> {
+    vec![
+        path.to_path_buf(),
+        with_suffix(path, "-journal"),
+        with_suffix(path, "-wal"),
+        with_suffix(path, "-shm"),
+        being_written(path),
+    ]
 }
 
 /// Take the columns nothing reads out of an index written by an older build.
@@ -190,65 +226,6 @@ fn add_new_columns(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Give back the space the deleted rows were using. Everything still indexed
-/// stays exactly as it is.
-///
-/// Without this the file only ever grows: a delete leaves its pages inside the
-/// file for the next write to use, and nothing ever gives them back.
-///
-/// The index is copied, the copy is cleaned, and the copy takes its place. The
-/// original is not opened for writing at any point, so a failure at any step
-/// leaves it exactly as it was and costs nothing but the copy.
-///
-/// Nothing may be holding the index open when this runs.
-pub fn compact(path: &Path) -> Result<()> {
-    let scratch = path.with_extension("compacting");
-    let scratch_log = log_beside(&scratch);
-    let log = log_beside(path);
-
-    clear(&scratch)?;
-    clear(&scratch_log)?;
-
-    std::fs::copy(path, &scratch)
-        .with_context(|| format!("copying {} to clean up", path.display()))?;
-    // The tail of the index lives in the log beside it, so the copy is not a copy
-    // of everything without it.
-    if log.exists() {
-        std::fs::copy(&log, &scratch_log)
-            .with_context(|| format!("copying {}", log.display()))?;
-    }
-
-    {
-        let conn = Connection::open(&scratch)
-            .with_context(|| format!("opening {}", scratch.display()))?;
-        conn.execute_batch("VACUUM").context("cleaning up the copy of the index")?;
-        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-            .context("folding the copy's write-ahead log into it")?;
-    }
-    clear(&scratch_log)?;
-
-    // Only now, with a finished copy on disk, does the original go. Its log has
-    // to go with it: it describes the original's pages, and SQLite would apply it
-    // to the file taking its place, which was never written for it. Everything it
-    // held is in the copy.
-    clear(path)?;
-    clear(&log)?;
-    clear(&index_beside(path))?;
-
-    std::fs::rename(&scratch, path)
-        .with_context(|| format!("putting the cleaned index at {}", path.display()))?;
-    Ok(())
-}
-
-/// The write-ahead log SQLite keeps beside an index, and the shared-memory file
-/// that goes with it.
-fn log_beside(path: &Path) -> std::path::PathBuf {
-    with_suffix(path, "-wal")
-}
-
-fn index_beside(path: &Path) -> std::path::PathBuf {
-    with_suffix(path, "-shm")
-}
 
 fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -256,50 +233,12 @@ fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-fn clear(path: &Path) -> Result<()> {
-    if path.exists() {
-        std::fs::remove_file(path).with_context(|| format!("clearing {}", path.display()))?;
-    }
-    Ok(())
-}
 
-/// Open without the ability to write. The GUI holds one of these open while the
-/// indexer runs, which WAL allows.
-pub fn open_read_only(path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("opening index at {} for reading", path.display()))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(conn)
-}
 
-/// Read the whole index in one go and open that, in memory.
-///
-/// SQLite reads a database in pages, as a query asks for them. That is right for
-/// a file on this machine and wrong for one that is not: every page is its own
-/// round trip, and a join across two tables re-fetches pages the cache was too
-/// small to keep. The file is small. Reading it once, in order, costs one
-/// transfer at whatever the link does, and every query after that is against
-/// memory.
-///
-/// The caller must be sure no write-ahead log is outstanding, because this reads
-/// the database file and nothing beside it. `checkpoint` is what makes that true
-/// while a writer is open.
-pub fn open_snapshot(path: &Path) -> Result<Connection> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading the index at {}", path.display()))?;
-    into_memory(bytes, path, true)
-}
 
-/// Hand a database's bytes to SQLite as a database in memory.
-///
-/// `read_only` decides whether it can then be written to. A writable one grows in
-/// memory as rows are added and is written back out with `write_out`.
-fn into_memory(mut bytes: Vec<u8>, path: &Path, read_only: bool) -> Result<Connection> {
-    if !can_be_read_in_memory(&mut bytes, path) {
-        // Something is in the log that the file does not have. Read it the slow
-        // way rather than read it wrong.
-        return open_read_only(path);
-    }
+/// Hand a database's bytes to SQLite as a database in memory. What comes back
+/// grows as rows are added, and the manager puts it back on disk.
+fn into_memory(bytes: Vec<u8>, path: &Path) -> Result<Connection> {
     let size = bytes.len();
 
     // SQLite takes ownership of this and frees it with its own allocator, so it
@@ -315,155 +254,15 @@ fn into_memory(mut bytes: Vec<u8>, path: &Path, read_only: bool) -> Result<Conne
     let data = unsafe { rusqlite::serialize::OwnedData::from_raw_nonnull(held, size) };
 
     let mut conn = Connection::open_in_memory().context("opening an index in memory")?;
-    conn.deserialize(rusqlite::DatabaseName::Main, data, read_only)
+    conn.deserialize(rusqlite::DatabaseName::Main, data, false)
         .with_context(|| format!("reading {} as a database", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(conn)
 }
 
-/// Write a database that has been worked on in memory out to its file.
-///
-/// One sequential write of the whole thing, which is what a few megabytes going
-/// to another machine should cost. It is written beside the real file and then
-/// moved onto it, so a run that dies half way through leaves the old index rather
-/// than half of a new one.
-pub fn write_out(conn: &Connection, path: &Path) -> Result<usize> {
-    let data = conn
-        .serialize(rusqlite::DatabaseName::Main)
-        .context("taking the index out of memory")?;
-    let bytes: &[u8] = &data;
-    let beside = path.with_extension("writing");
-    std::fs::write(&beside, bytes)
-        .with_context(|| format!("writing the index to {}", beside.display()))?;
-    std::fs::rename(&beside, path)
-        .with_context(|| format!("moving the index onto {}", path.display()))?;
-    Ok(bytes.len())
-}
 
-/// Whether these bytes can be handed to SQLite as an in-memory database, making
-/// them so if the only thing in the way is the journal mode.
-///
-/// A database in memory cannot have a write-ahead log, so SQLite refuses an image
-/// whose header says the file is in WAL mode, which is what a file with a pass
-/// open on it says. Bytes 18 and 19 are the write and read format versions, 1 for
-/// a rollback journal and 2 for WAL, and turning them back to 1 is the whole of
-/// the difference **once the log has been folded in**.
-///
-/// So this only does that when no log is left holding anything. A `-wal` longer
-/// than its own 32 byte header has frames the database file does not, and reading
-/// the file without them answers with rows that have been superseded.
-fn can_be_read_in_memory(bytes: &mut [u8], path: &Path) -> bool {
-    const WRITE_VERSION: usize = 18;
-    const READ_VERSION: usize = 19;
-    const WAL: u8 = 2;
-    const ROLLBACK: u8 = 1;
-    /// A `-wal` holding nothing is this long: the header and no frames.
-    const EMPTY_WAL: u64 = 32;
 
-    if bytes.len() <= READ_VERSION {
-        return false;
-    }
-    if bytes[WRITE_VERSION] != WAL && bytes[READ_VERSION] != WAL {
-        return true;
-    }
-    let log = path.with_file_name(format!(
-        "{}-wal",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
-    ));
-    if std::fs::metadata(&log).map(|it| it.len()).unwrap_or(0) > EMPTY_WAL {
-        return false;
-    }
-    bytes[WRITE_VERSION] = ROLLBACK;
-    bytes[READ_VERSION] = ROLLBACK;
-    true
-}
 
-/// Fold the write-ahead log back into the database file, so a copy of that file
-/// is the whole of what has been written.
-pub fn checkpoint(conn: &Connection) -> Result<()> {
-    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-        .context("checkpointing the index")?;
-    Ok(())
-}
-
-/// Close a writing connection and leave one file behind.
-///
-/// A database in WAL mode keeps a `-wal` beside it holding everything written
-/// since the last checkpoint, and a `-shm` that every connection maps to find
-/// its way around that log. Folding the log back in and taking the database out
-/// of WAL mode is what removes both; deleting them by hand throws away whatever
-/// the log still holds.
-/// The settings a pass writes for itself, which are the truth about the index it
-/// has just built and are not the window's to keep.
-///
-/// `recurse` is how far this pass actually reached; `schema_version` is what
-/// wrote it. Everything else in `meta` is somebody's answer about the folder.
-const THE_PASS_OWNS: [&str; 2] = ["recurse", "schema_version"];
-
-/// Take back everything the window wrote while the pass was running.
-///
-/// The index is read into memory at the start of a pass and the whole of it is
-/// written over the file at the end. Everything the window decides — which sets
-/// are not sets of copies, which ways of matching this folder wants, where a
-/// cleanup sends what it removes — goes straight into the file, because it has to
-/// survive the window being shut. Without this, the pass puts back a copy of the
-/// index from before any of it was written and every one of those answers is
-/// lost, which is what made the checkboxes and the ignored sets come back empty
-/// on the next run.
-///
-/// The file is the authority for all of it: the pass owns the pictures and the
-/// two settings above, and the window owns the rest. A pair whose picture the
-/// pass has just dropped is dropped with it, which is what `OR IGNORE` does with
-/// a pair that has nothing to point at.
-fn keep_what_the_window_wrote(conn: &Connection, path: &Path) {
-    let Ok(file) = open_read_only(path) else {
-        return;
-    };
-    let kept = THE_PASS_OWNS.map(|key| format!("'{key}'")).join(", ");
-    let held: Vec<(String, String)> = file
-        .prepare(&format!("SELECT key, value FROM meta WHERE key NOT IN ({kept})"))
-        .and_then(|mut statement| {
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            Ok(rows.filter_map(Result::ok).collect())
-        })
-        .unwrap_or_default();
-    let marked = ignored(&file).unwrap_or_default();
-    drop(file);
-
-    if conn.execute(&format!("DELETE FROM meta WHERE key NOT IN ({kept})"), []).is_ok() {
-        for (key, value) in &held {
-            let _ = set_meta(conn, key, value);
-        }
-    }
-    if conn.execute("DELETE FROM ignore", []).is_ok() {
-        let _ = ignore(conn, &marked);
-    }
-}
-
-pub fn close(conn: Connection, path: &Path) -> Result<()> {
-    keep_what_the_window_wrote(&conn, path);
-    #[cfg(feature = "logging")]
-    let at = std::time::Instant::now();
-    // The byte count is only there to be logged, but the write itself is not.
-    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
-    let written = write_out(&conn, path)?;
-    crate::log_line!(
-        "write the index out: {:.2}s, {written} bytes",
-        at.elapsed().as_secs_f64()
-    );
-    drop(conn);
-    // A write-ahead log and its shared memory file, left by a version that kept
-    // the index open across the network. Nothing writes them now and a stale one
-    // beside the file would be read as newer than it.
-    for suffix in ["-wal", "-shm"] {
-        let stale = path.with_file_name(format!(
-            "{}{suffix}",
-            path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
-        ));
-        let _ = std::fs::remove_file(stale);
-    }
-    Ok(())
-}
 
 pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
@@ -474,23 +273,12 @@ pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Open the index for writing what the review left behind, without touching
-/// anything a scan owns.
-///
-/// The schema is applied here as well as where a pass opens the index. Every
-/// statement in it creates something only if it is not already there, and it is
-/// the only thing that brings an index written by an older build up to date. An
-/// index that has not been scanned since a table was added does not have that
-/// table: a pass works on a copy in memory and only writes it back when it
-/// changed something, so a folder where nothing has moved never gets one. Without
-/// this, every write the review makes to such an index fails on a table that is
-/// not there.
-pub fn open_for_notes(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path)
-        .with_context(|| format!("opening index at {} to write to", path.display()))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute_batch(SCHEMA).context("applying the schema")?;
-    Ok(conn)
+
+/// Take a setting out, leaving a folder that has never been asked about it,
+/// which is not the same as one that answered no.
+pub fn forget_meta(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+    Ok(())
 }
 
 pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -674,7 +462,7 @@ mod ignoring {
     fn a_pair_is_the_same_pair_either_way_round() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
-        let conn = open(&path).expect("open");
+        let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch(
             "INSERT INTO files (id, rel_path, size_bytes, mtime_ns, last_scanned_at)
              VALUES (7, 'a.jpg', 1, 1, 1), (9, 'b.jpg', 1, 1, 1), (11, 'c.jpg', 1, 1, 1)",
@@ -693,7 +481,7 @@ mod ignoring {
     fn a_pair_goes_when_either_of_its_pictures_does() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
-        let conn = open(&path).expect("open");
+        let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch(
             "INSERT INTO files (id, rel_path, size_bytes, mtime_ns, last_scanned_at)
              VALUES (1, 'a.jpg', 1, 1, 1), (2, 'b.jpg', 1, 1, 1)",
@@ -712,7 +500,7 @@ mod ignoring {
     fn an_index_without_the_table_has_nothing_ignored() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
-        let conn = open(&path).expect("open");
+        let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch("DROP TABLE ignore").expect("drop");
         assert!(ignored(&conn).expect("read").is_empty());
     }
@@ -850,237 +638,88 @@ mod tests {
         assert_eq!(known["orphan.png"].fingerprint_version, -1);
     }
 
+    /// An index written by a schema version this build does not speak is one it
+    /// cannot bring to the current shape, so it is refused rather than read.
     #[test]
-    fn reopening_an_index_from_another_schema_version_is_refused() {
+    fn an_index_from_another_schema_version_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
         {
-            let conn = open(&path).expect("create");
-            set_meta(&conn, "schema_version", "99").expect("bump");
-            close(conn, &path).expect("write it out");
+            let conn = open_and_migrate(&path).expect("create");
+            drop(conn);
+            let file = Connection::open(&path).expect("open the file");
+            set_meta(&file, "schema_version", "99").expect("bump");
         }
-        let err = open(&path).expect_err("should refuse");
+        let err = open_and_migrate(&path).expect_err("should refuse");
         assert!(err.to_string().contains("schema version 99"), "{err}");
     }
 
-    /// An index with `count` rows in it, on disk. The index is worked on in
-    /// memory and becomes a file when it is closed, so anything that reads the
-    /// file has to close it first.
-    fn fill(path: &Path, count: usize) {
-        let mut conn = open(path).expect("create");
-        let tx = conn.transaction().expect("begin");
-        for index in 0..count {
-            tx.execute(
-                "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
-                 VALUES (?1, 1, 1, 1)",
-                [format!("a-fairly-long-path-name/{index}.jpeg")],
+    /// The schema and the columns an older build lacks are applied to the file,
+    /// not to a copy of it, so nothing can be handed an index in an older shape.
+    #[test]
+    fn an_index_in_an_older_shape_is_migrated_on_disk_when_it_is_opened() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        {
+            let conn = Connection::open(&path).expect("create");
+            conn.execute_batch(
+                "CREATE TABLE files (
+                     id              INTEGER PRIMARY KEY,
+                     rel_path        TEXT    NOT NULL UNIQUE,
+                     size_bytes      INTEGER NOT NULL,
+                     mtime_ns        INTEGER NOT NULL,
+                     last_scanned_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE fingerprints (
+                     file_id             INTEGER PRIMARY KEY,
+                     fingerprint_version INTEGER NOT NULL,
+                     dct_hashes          BLOB    NOT NULL,
+                     ring_stats          BLOB    NOT NULL
+                 );
+                 INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+                 VALUES ('a.jpg', 1234, 5, 1);",
             )
-            .expect("insert");
-        }
-        tx.commit().expect("commit");
-        close(conn, path).expect("write it out");
-    }
-
-    fn count_files(path: &Path) -> i64 {
-        open_read_only(path)
-            .expect("open")
-            .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
-            .expect("count")
-    }
-
-    /// Deleting rows leaves their pages inside the file for the next write to
-    /// use, so an index that is scanned and cleaned up over and over only grows.
-    /// Compacting gives that space back, and everything still indexed stays.
-    #[test]
-    fn compacting_gives_back_the_space_of_deleted_rows_and_keeps_the_rest() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        fill(&path, 4000);
-        compact(&path).expect("compact");
-        let full = std::fs::metadata(&path).expect("stat").len();
-
-        {
-            let mut conn = open(&path).expect("open");
-            let tx = conn.transaction().expect("begin");
-            let paths: Vec<String> =
-                (0..3000).map(|index| format!("a-fairly-long-path-name/{index}.jpeg")).collect();
-            assert_eq!(delete_paths(&tx, &paths).expect("delete"), 3000);
-            tx.commit().expect("commit");
-            close(conn, &path).expect("write it out");
-        }
-        compact(&path).expect("compact");
-
-        let after = std::fs::metadata(&path).expect("stat").len();
-        assert!(after < full, "the file did not shrink: {full} then {after}");
-        assert_eq!(count_files(&path), 1000, "compacting took live rows with it");
-    }
-
-    /// The original is copied and the copy is cleaned. Nothing writes to the
-    /// original, so a failure at any step leaves it exactly as it was.
-    #[test]
-    fn compacting_leaves_the_original_alone_when_it_cannot_finish() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        fill(&path, 100);
-        let before = std::fs::read(&path).expect("read");
-
-        // A directory where the copy has to be written.
-        std::fs::create_dir(path.with_extension("compacting")).expect("mkdir");
-        compact(&path).expect_err("should not have finished");
-
-        assert_eq!(std::fs::read(&path).expect("read"), before, "the index was written to");
-        assert_eq!(count_files(&path), 100);
-    }
-
-    #[test]
-    fn compacting_clears_what_a_failed_attempt_left_behind() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        fill(&path, 100);
-
-        std::fs::write(path.with_extension("compacting"), b"not a database").expect("leftover");
-        compact(&path).expect("compact");
-        assert_eq!(count_files(&path), 100);
-    }
-
-    /// An index is worked on in memory and reaches its file when it is closed.
-    /// Nothing a pass writes is on disk before that, and everything it wrote is
-    /// on disk after it, whether the file was there to begin with or not.
-    #[test]
-    fn what_is_written_reaches_the_file_when_the_index_is_closed_and_not_before() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        fill(&path, 20);
-        assert_eq!(count_files(&path), 20, "the fixture wrote no index");
-
-        let conn = open(&path).expect("open");
-        conn.execute(
-            "INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
-             VALUES ('written-late.jpeg', 1, 1, 1)",
-            [],
-        )
-        .expect("insert");
-        assert_eq!(count_files(&path), 20, "the row reached the file before it was closed");
-
-        close(conn, &path).expect("close");
-        assert_eq!(count_files(&path), 21, "the row written last was lost");
-    }
-
-    /// A pass reads the index into memory and writes the whole of it back over
-    /// the file. A set marked as not a set of copies goes straight into the file,
-    /// so a pass that started before the button was pressed must not put back a
-    /// copy of the index that never had it.
-    #[test]
-    fn writing_the_index_out_keeps_the_pairs_marked_while_it_was_open() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        {
-            let mut conn = open(&path).expect("create");
-            let tx = conn.transaction().expect("tx");
-            for name in ["a.jpg", "b.jpg"] {
-                upsert(&tx, &record(name, 1), 1).expect("insert");
-            }
-            tx.commit().expect("commit");
-            close(conn, &path).expect("write it out");
+            .expect("an older index");
         }
 
-        // A pass, holding the index in memory from before any of this.
-        let held = open(&path).expect("open");
+        let conn = open_and_migrate(&path).expect("open");
+        drop(conn);
 
-        // The window, marking a set while that pass runs.
-        let window = open_for_notes(&path).expect("open");
-        ignore(&window, &[pair(1, 2)]).expect("ignore");
-        drop(window);
-
-        // The pass finishes and writes its copy out.
-        close(held, &path).expect("close");
-
-        let file = open_read_only(&path).expect("reopen");
-        assert_eq!(
-            ignored(&file).expect("read"),
-            vec![pair(1, 2)],
-            "the pass wrote over what the window had marked"
-        );
-    }
-
-    /// And taking a pair back while a pass runs sticks, too: the file is what
-    /// says which pairs there are, not the copy the pass has been holding.
-    #[test]
-    fn writing_the_index_out_keeps_the_pairs_taken_back_while_it_was_open() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        {
-            let mut conn = open(&path).expect("create");
-            let tx = conn.transaction().expect("tx");
-            for name in ["a.jpg", "b.jpg"] {
-                upsert(&tx, &record(name, 1), 1).expect("insert");
-            }
-            ignore(&tx, &[pair(1, 2)]).expect("ignore");
-            tx.commit().expect("commit");
-            close(conn, &path).expect("write it out");
-        }
-
-        let held = open(&path).expect("open");
-        assert_eq!(ignored(&held).expect("read"), vec![pair(1, 2)], "the pass read no pairs");
-
-        let window = open_for_notes(&path).expect("open");
-        unignore(&window, &[pair(1, 2)]).expect("unignore");
-        drop(window);
-
-        close(held, &path).expect("close");
-
-        let file = open_read_only(&path).expect("reopen");
-        assert!(ignored(&file).expect("read").is_empty(), "the pair the window took back came back");
-    }
-
-    /// Compacting is over a file, and a file is what an index that has been
-    /// closed is. What was in it stays in it.
-    #[test]
-    fn compacting_keeps_every_row_the_index_was_closed_with() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        fill(&path, 20);
-
-        compact(&path).expect("compact");
-
-        assert!(!log_beside(&path).exists(), "a write-ahead log was left beside the index");
-        assert_eq!(count_files(&path), 20, "compacting lost rows");
-    }
-
-    /// An index that has been closed is one file. A write-ahead log and the
-    /// shared-memory file beside it are what an older build left while it held
-    /// the index open, and closing an index clears both.
-    #[test]
-    fn closing_an_index_leaves_one_file_behind() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-
-        let mut conn = open(&path).expect("open");
-        let tx = conn.transaction().expect("tx");
-        upsert(&tx, &record("a.jpg", 1), 1).expect("insert");
-        tx.commit().expect("commit");
-        assert!(!path.exists(), "the index was written before it was closed");
-        // As an older build would have left them.
-        std::fs::write(log_beside(&path), b"stale log").expect("fixture");
-        std::fs::write(index_beside(&path), b"stale shared memory").expect("fixture");
-
-        close(conn, &path).expect("close");
-        assert!(path.is_file());
-        assert!(!log_beside(&path).exists(), "the write-ahead log was left behind");
-        assert!(!index_beside(&path).exists(), "the shared-memory file was left behind");
-
-        // And what was written is in the file it was closed into.
-        let conn = open_read_only(&path).expect("reopen");
+        // The file itself, not the copy that was handed back.
+        let file = Connection::open(&path).expect("open the file");
+        let columns: Vec<String> = file
+            .prepare("PRAGMA table_info(fingerprints)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(columns.iter().any(|name| name == "corners"), "not migrated: {columns:?}");
         let rows: i64 =
-            conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
-        assert_eq!(rows, 1, "closing the index lost what it held");
+            file.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
+        assert_eq!(rows, 1, "the row was lost");
+    }
+
+    /// An index left part way through a write cannot be trusted, so it is
+    /// refused and nothing is written over it.
+    #[test]
+    fn an_index_with_a_hot_journal_is_not_read_as_though_it_were_committed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        drop(open_and_migrate(&path).expect("create"));
+        let was = std::fs::read(&path).expect("read");
+        std::fs::write(with_suffix(&path, "-journal"), b"half a transaction").expect("fixture");
+
+        let err = open_and_migrate(&path).expect_err("should refuse");
+        assert!(err.to_string().contains("part way through"), "{err}");
+        assert_eq!(std::fs::read(&path).expect("read"), was, "the index was written to");
     }
 
     #[test]
     fn a_fresh_index_records_its_schema_version() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
-        let conn = open(&path).expect("create");
+        let conn = open_and_migrate(&path).expect("create");
         assert_eq!(
             get_meta(&conn, "schema_version").expect("meta"),
             Some(SCHEMA_VERSION.to_string())

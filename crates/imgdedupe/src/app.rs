@@ -605,15 +605,9 @@ fn install_style(ctx: &egui::Context) {
 /// Spacing used between the sections of a view, so they are consistent.
 const SECTION_GAP: f32 = 14.0;
 
-/// Height of the boxes on the scan row. Fixed, so the row is flush and nothing
-/// the pointer does can change it. Sized to the tallest of the three, which is
-/// the matching box at four rows.
-
 /// Border and inner margin `Frame::group` adds around its contents, so the
 /// arithmetic below is about outer widths.
 const FRAME_EXTRA: f32 = 14.0;
-
-
 
 /// The largest a picture in a set may be drawn. What the strip of them is tall
 /// is worked out from this and the font, in `tile_strip_height`.
@@ -1236,6 +1230,9 @@ pub struct App {
     /// another machine, and this is a file opened across the network before
     /// anything has been drawn.
     asking: Option<std::sync::mpsc::Receiver<Opened>>,
+    /// The one thing that owns the folder's index. Everything that reads or
+    /// writes it asks this.
+    index: imgdedupe_core::index::Index,
     /// Whether this folder's index has already said what it was set to. It says
     /// so once, when the folder is opened; a pass over the folder says it again,
     /// and by then the boxes are whoever pressed Scan's business, not the
@@ -1367,6 +1364,7 @@ impl App {
             ignored: std::collections::HashSet::new(),
             auto_rescan: false,
             asking: None,
+            index: imgdedupe_core::index::Index::start(),
             noted: false,
             // What counts as a duplicate is a decision about the pictures in
             // front of the person making it, so every run starts on the default
@@ -1856,11 +1854,10 @@ impl App {
                 // machine that is three round trips the window would otherwise
                 // sit through with the pointer as a spinning wheel. Nothing here
                 // waits on the answer, and the box is already unticked.
-                if let Some(db_path) = self.db_path.clone() {
-                    std::thread::spawn(move || {
-                        discard_index(Some(&db_path));
-                    });
-                }
+                let index = self.index.clone();
+                std::thread::spawn(move || {
+                    discard_index(&index);
+                });
                 self.thumbs.forget();
                 self.sets.clear();
                 self.keep.clear();
@@ -2077,32 +2074,39 @@ impl App {
         self.lit.clear();
         let (send, receive) = std::sync::mpsc::channel();
         self.asking = Some(receive);
+        let index = self.index.clone();
         std::thread::spawn(move || {
-            // A network request for a folder on another machine.
+            // Everything below is the manager's work, on this thread rather than
+            // the one that draws: for a folder on another machine, taking up an
+            // index is a request over the network.
             let there = db_path.is_file();
-            let _ = send.send(Opened::Found(there));
-            if !there {
+            if let Err(err) = index.hold(&db_path) {
+                let _ = send.send(Opened::Failed(format!("{err:#}")));
                 return;
             }
-            if let Ok(notes) = crate::notes::of_folder(&db_path) {
-                let _ = send.send(Opened::Notes(notes));
+            let _ = send.send(Opened::Found(there));
+            let _ = send.send(Opened::Notes(crate::notes::read(&index)));
+            // The pairs are part of what the index holds about this folder, and
+            // after this they are in memory and nothing asks again.
+            match index.ignored() {
+                Ok(pairs) => {
+                    let _ = send.send(Opened::Ignored(pairs));
+                }
+                Err(err) => {
+                    let _ = send.send(Opened::Failed(format!("{err:#}")));
+                    return;
+                }
             }
-            // And the index itself. Having it in memory is what a folder that
-            // has been scanned before is for: the pictures can be searched
-            // without reading anything again, whether or not a pass runs.
-            let read = imgdedupe_core::db::open_snapshot(&db_path).and_then(|conn| {
-                let never = std::sync::atomic::AtomicBool::new(false);
-                let report = |progress| {
-                    let _ = send.send(Opened::Reading(progress));
-                };
-                // Off the same connection as the pictures: the pairs are part of
-                // what the index holds about this folder, and after this they
-                // are in memory and nothing asks the index about them again.
-                let _ = send.send(Opened::Ignored(imgdedupe_core::db::ignored(&conn)?));
-                let images = matching::load_images(&conn, &never, &report)?;
-                let _ = conn.close();
-                Ok(images)
-            });
+            // And the pictures. Having them in memory is what a folder that has
+            // been scanned before is for: it can be searched without reading
+            // anything again, whether or not a pass runs.
+            let telling = send.clone();
+            let read = index.images(
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::sync::Arc::new(move |progress| {
+                    let _ = telling.send(Opened::Reading(progress));
+                }),
+            );
             match read {
                 Ok(Some(images)) => {
                     let _ = send.send(Opened::Index(std::sync::Arc::new(images)));
@@ -2506,7 +2510,7 @@ impl App {
             self.previous = crate::settings::sorted(&self.previous);
             self.remember();
         }
-        match indexer::start(&folder, &db_path, self.recurse) {
+        match indexer::start(self.index.clone(), &folder, &db_path, self.recurse) {
             Ok(run) => self.running = Some(run),
             Err(err) => self.fail(&format!("{err:#}")),
         }
@@ -2821,9 +2825,9 @@ impl App {
         let Some(db_path) = &self.db_path else {
             return;
         };
+        let _ = db_path;
         let stored = if self.multi_select { "1" } else { "0" };
-        let result =
-            db::open_for_notes(db_path).and_then(|conn| db::set_meta(&conn, "multi_select", stored));
+        let result = self.index.set_meta("multi_select", stored);
         if let Err(err) = result {
             runlog::log_line!("the multi-select choice could not be written: {err:#}");
         }
@@ -2861,8 +2865,8 @@ impl App {
         let Some(db_path) = &self.db_path else {
             return;
         };
-        let result =
-            db::open_for_notes(db_path).and_then(|conn| db::ignore(&conn, &pairs));
+        let _ = db_path;
+        let result = self.index.ignore(&pairs);
         if let Err(err) = result {
             runlog::log_line!("the ignored pairs could not be written: {err:#}");
         }
@@ -2882,7 +2886,8 @@ impl App {
         let Some(db_path) = &self.db_path else {
             return;
         };
-        let result = db::open_for_notes(db_path).and_then(|conn| db::unignore(&conn, &pairs));
+        let _ = db_path;
+        let result = self.index.unignore(&pairs);
         if let Err(err) = result {
             runlog::log_line!("the ignored pairs could not be taken back: {err:#}");
         }
@@ -2944,13 +2949,14 @@ impl App {
         let Some(db_path) = &self.db_path else {
             return;
         };
+        let _ = db_path;
         use crate::notes::{mark, MATCH_CORNERS, MATCH_WHOLE_FRAME, AUTO_RESCAN, WITHIN_A_FOLDER};
-        let result = db::open_for_notes(db_path).and_then(|conn| {
-            db::set_meta(&conn, MATCH_WHOLE_FRAME, mark(self.match_whole_frame))?;
-            db::set_meta(&conn, MATCH_CORNERS, mark(self.match_corners))?;
-            db::set_meta(&conn, WITHIN_A_FOLDER, mark(self.within_a_folder))?;
-            db::set_meta(&conn, AUTO_RESCAN, mark(self.auto_rescan))
-        });
+        let result = self
+            .index
+            .set_meta(MATCH_WHOLE_FRAME, mark(self.match_whole_frame))
+            .and_then(|()| self.index.set_meta(MATCH_CORNERS, mark(self.match_corners)))
+            .and_then(|()| self.index.set_meta(WITHIN_A_FOLDER, mark(self.within_a_folder)))
+            .and_then(|()| self.index.set_meta(AUTO_RESCAN, mark(self.auto_rescan)));
         if let Err(err) = result {
             runlog::log_line!("the ways of matching could not be written: {err:#}");
         }
@@ -2961,21 +2967,18 @@ impl App {
     /// what is safe to delete outright somewhere is not safe everywhere.
     #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     fn remember_disposal(&self) {
-        let Some(db_path) = &self.db_path else {
+        if self.db_path.is_none() {
             return;
-        };
+        }
         let stored = self.destination.name();
-        let result = db::open_for_notes(db_path).and_then(|conn| {
-            db::set_meta(&conn, "disposal", stored)?;
-            db::set_meta(&conn, "move_dir", &self.move_dir)
-        });
+        let result = self
+            .index
+            .set_meta("disposal", stored)
+            .and_then(|()| self.index.set_meta("move_dir", &self.move_dir));
         if let Err(err) = result {
             runlog::log_line!("the cleanup choice could not be written: {err:#}");
         }
     }
-
-    /// Take back what this folder's index records: where a cleanup sends what it
-    /// removes, and how far down the folder the index reaches.
 
     /// Move the preview with the cursor keys. Nothing happens at either end.
     fn walk(&mut self, visible: &[usize], direction: Direction) {
@@ -4058,7 +4061,7 @@ impl App {
 
         let (send, receive) = std::sync::mpsc::channel::<Removal>();
         let steps = send.clone();
-        let db_path = self.db_path.clone();
+        let index = self.index.clone();
         let keep_index = self.keep_index;
         std::thread::spawn(move || {
             let result = cleanup::apply_reporting(&root, &plan, &disposal, &|done| {
@@ -4071,9 +4074,9 @@ impl App {
                     // of copying, and the window would not paint for that long.
                     let _ = steps.send(Removal::Tidying);
                     let forgotten = if keep_index {
-                        forget_rows(db_path.as_deref(), &outcome.removed)
+                        forget_rows(&index, &outcome.removed)
                     } else {
-                        discard_index(db_path.as_deref())
+                        discard_index(&index)
                     };
                     Removal::Done(Box::new(outcome), forgotten)
                 }
@@ -4190,39 +4193,20 @@ impl App {
 /// Nothing is going to read it again: the next run opens on no folder, and a
 /// scan of this one builds it from nothing. Deleting the file is what dropping
 /// the rows and rebuilding around them was for, without the copy.
-#[cfg_attr(not(feature = "logging"), allow(unused_variables, unused_assignments))]
-fn discard_index(db_path: Option<&Path>) -> usize {
-    let Some(db_path) = db_path else {
-        return 0;
-    };
+#[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+fn discard_index(index: &imgdedupe_core::index::Index) -> usize {
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
-    let mut gone = 0;
-    for path in [
-        db_path.to_path_buf(),
-        with_suffix(db_path, "-wal"),
-        with_suffix(db_path, "-shm"),
-    ] {
-        match std::fs::remove_file(&path) {
-            Ok(()) => gone += 1,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => runlog::log_line!("{} would not go: {err}", path.display()),
+    match index.delete() {
+        Ok(rows) => {
+            runlog::log_line!("delete index: {:.2}s, {rows} rows went with it", at.elapsed().as_secs_f64());
+            rows
+        }
+        Err(err) => {
+            runlog::log_line!("the index would not go: {err:#}");
+            0
         }
     }
-    runlog::log_line!(
-        "delete index: {:.2}s, {gone} files, {}",
-        at.elapsed().as_secs_f64(),
-        db_path.display()
-    );
-    0
-}
-
-/// The index's write-ahead log and shared memory file sit beside it under the
-/// same name with a suffix.
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
 }
 
 /// Take the files that were removed out of the index. Deleted or moved, they are
@@ -4232,34 +4216,27 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// This runs on the removal's own thread. It rewrites the index file, which on a
 /// folder of thousands is seconds of work.
 #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
-fn forget_rows(db_path: Option<&Path>, removed: &[String]) -> usize {
-    let Some(db_path) = db_path else {
-        runlog::log_line!("nothing was dropped from the index: no index is open");
-        return 0;
-    };
+fn forget_rows(index: &imgdedupe_core::index::Index, removed: &[String]) -> usize {
     if removed.is_empty() {
         return 0;
     }
-    let dropped = db::open_for_notes(db_path).and_then(|mut conn| {
+    let dropped = (|| {
         #[cfg(feature = "logging")]
         let at = std::time::Instant::now();
-        let tx = conn.transaction()?;
-        let dropped = db::delete_paths(&tx, removed)?;
-        tx.commit()?;
-        drop(conn);
+        let dropped = index.delete_paths(removed.to_vec())?;
         runlog::log_line!("drop removed: {:.2}s, {dropped} rows", at.elapsed().as_secs_f64());
 
-        // Rebuilding costs a copy of the whole index, so it happens here and only
-        // here: a cleanup is the one thing that leaves enough behind to be worth
-        // it, and only when it actually dropped rows.
+        // Rebuilding costs a rewrite of the whole index, so it happens here and
+        // only here: a cleanup is the one thing that leaves enough behind to be
+        // worth it, and only when it actually dropped rows.
         if dropped > 0 {
             #[cfg(feature = "logging")]
             let at = std::time::Instant::now();
-            db::compact(db_path)?;
+            index.compact()?;
             runlog::log_line!("rebuild index: {:.2}s", at.elapsed().as_secs_f64());
         }
-        Ok(dropped)
-    });
+        anyhow::Ok(dropped)
+    })();
     match dropped {
         Ok(count) => count,
         Err(err) => {
@@ -4723,9 +4700,105 @@ mod tests {
         assert_eq!(app.selected, None, "nothing was selected and something moved");
     }
 
+    /// Forgetting a folder takes the index and everything beside it, and says
+    /// how many pictures went with it. The count used to be a hardcoded nought,
+    /// because the window removed the file itself and had nothing left to count.
+    #[test]
+    fn a_folder_forgotten_leaves_no_index_and_says_how_many_rows_went() {
+        let scanned = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(scanned.path());
+        let app = reviewing(scanned.path());
+        app.index.synced().expect("wait for the file");
+        assert!(db_path.is_file(), "the pass wrote no index");
+
+        let went = discard_index(&app.index);
+        assert_eq!(went, 3, "the count of what went is not what the folder held");
+        for beside in db::files_of_the_index(&db_path) {
+            assert!(!beside.exists(), "{} was left behind", beside.display());
+        }
+        assert!(app.index.holding().is_none(), "the manager still holds an index that is gone");
+    }
+
+    /// A folder whose index cannot be read stops there: the lamp for reading the
+    /// index stays red, what went wrong is on screen, and nothing else about the
+    /// folder is attempted. What to do about it is the user's to decide.
+    #[test]
+    fn a_broken_index_leaves_the_lamp_red_and_the_window_stopped() {
+        let found = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(found.path());
+        std::fs::write(&db_path, b"not a database, just some bytes").expect("a broken index");
+        let was = std::fs::read(&db_path).expect("read it");
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(found.path().to_path_buf());
+        settle(&mut app);
+
+        assert!(app.error.is_some(), "nothing said the index could not be read");
+        assert_eq!(
+            app.how_it_went(Lamp::CheckedForIndexFile),
+            Went::Waiting,
+            "the lamp for the index went green over an index that cannot be read"
+        );
+        assert_eq!(
+            app.how_it_went(Lamp::LoadedIndexIntoMemory),
+            Went::Waiting,
+            "the window went on to read an index it could not open"
+        );
+        assert!(app.images.is_none(), "pictures came out of an index that cannot be read");
+        assert!(app.running.is_none(), "a pass was started on a folder that stopped");
+        assert_eq!(std::fs::read(&db_path).expect("read"), was, "the broken index was written to");
+    }
+
+
+    /// A folder whose index was written by an older build opens: the manager
+    /// brings the file to the shape this build reads before anything is served
+    /// from it, so the window comes up on it without a pass having to happen
+    /// first.
+    #[test]
+    fn a_folder_whose_index_is_in_an_older_shape_still_opens() {
+        let found = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(found.path());
+        {
+            let scanned = reviewing(found.path());
+            scanned.index.synced().expect("wait for the file");
+            assert_eq!(scanned.sets.len(), 1, "the fixture found nothing to begin with");
+            scanned.index.let_go().expect("let the folder go");
+        }
+
+        // The index as an older build left it.
+        let older = rusqlite::Connection::open(&db_path).expect("the index file");
+        older
+            .execute_batch(
+                "DROP VIEW IF EXISTS indexed_images;
+                 ALTER TABLE fingerprints DROP COLUMN corners;",
+            )
+            .expect("making an older index");
+        drop(older);
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(found.path().to_path_buf());
+        settle(&mut app);
+        assert!(app.error.is_none(), "the folder would not open: {:?}", app.error);
+        app.load_sets();
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the older index gave nothing without a pass");
+
+        // And the file itself is in the current shape, not only what the manager
+        // is holding.
+        let conn = index_file(&app, &db_path);
+        let corners: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('fingerprints') WHERE name = 'corners'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("looking for the column");
+        assert_eq!(corners, 1, "the file was left in the older shape");
+    }
+
     /// With the checkbox unticked, the index is deleted once the cleanup is over,
-    /// along with its write-ahead log. The next run opens the folder with no
-    /// index and a scan builds it again.
+    /// along with everything the manager left beside it. The next run opens the
+    /// folder with no index and a scan builds it again.
     #[test]
     fn an_unticked_folder_loses_its_index_when_the_cleanup_is_done() {
         let scanned = folder_with_a_duplicate();
@@ -4749,9 +4822,9 @@ mod tests {
             app.pump_cleanup(&ctx);
         }
 
-        assert!(!db_path.exists(), "the index was left behind");
-        assert!(!with_suffix(&db_path, "-wal").exists());
-        assert!(!with_suffix(&db_path, "-shm").exists());
+        for beside in db::files_of_the_index(&db_path) {
+            assert!(!beside.exists(), "{} was left behind", beside.display());
+        }
 
         // And the window is back on the scan with nothing on it, so the only way
         // on is another folder or another scan.
@@ -4783,7 +4856,7 @@ mod tests {
             app.pump_cleanup(&ctx);
         }
 
-        let conn = db::open_read_only(&db_path).expect("the index");
+        let conn = index_file(&app, &db_path);
         let left: i64 = conn
             .query_row("SELECT count(*) FROM files WHERE rel_path = ?1", [&going], |row| {
                 row.get(0)
@@ -7364,7 +7437,8 @@ mod tests {
         assert!(app.selected_for_removal().0 > 0, "the set is not being cleaned up again");
 
         // And the index no longer holds any of it.
-        let conn = db::open_read_only(app.db_path.as_ref().expect("a db")).expect("open");
+        let db_path = app.db_path.clone().expect("a db");
+        let conn = index_file(&app, &db_path);
         assert!(db::ignored(&conn).expect("read").is_empty(), "the index still holds the pairs");
         let _ = conn.close();
 
@@ -7375,338 +7449,6 @@ mod tests {
         again.load_sets();
         settle(&mut again);
         assert!(!again.is_ignored(&again.sets[0]), "the folder came back with it still ignored");
-    }
-
-    /// What the real folder's index actually holds about itself: every setting
-    /// the window claims to keep in it, and whether it is there.
-    ///
-    /// Read-only, and prints rather than asserts, because the point is the list.
-    #[test]
-    #[ignore = "reads the index of the folder the application is set to"]
-    fn what_the_real_folders_index_says_about_itself() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = headless::default_db_path(&folder);
-        assert!(db_path.is_file(), "{} has no index", folder.display());
-        let conn = db::open_read_only(&db_path).expect("open the real index");
-
-        let mut tables = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') ORDER BY name")
-            .unwrap();
-        let names: Vec<String> =
-            tables.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
-        drop(tables);
-        println!("tables and views: {names:?}");
-
-        use crate::notes::{
-            AUTO_RESCAN, DISPOSAL, MATCH_CORNERS, MATCH_WHOLE_FRAME, MOVE_DIR, MULTI_SELECT,
-            RECURSE, WITHIN_A_FOLDER,
-        };
-        for key in [
-            RECURSE,
-            DISPOSAL,
-            MOVE_DIR,
-            MULTI_SELECT,
-            MATCH_WHOLE_FRAME,
-            MATCH_CORNERS,
-            WITHIN_A_FOLDER,
-            AUTO_RESCAN,
-        ] {
-            let held = db::get_meta(&conn, key).expect("read");
-            println!("{key}: {held:?}");
-        }
-        let _ = conn.close();
-    }
-
-    /// With "only match within folders" on, a search of the real folder puts no
-    /// set together out of two folders. Read-only: it searches the index that is
-    /// there and writes nothing.
-    #[test]
-    #[ignore = "searches the index of the folder the application is set to"]
-    fn only_matching_within_folders_holds_on_the_real_folder() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = headless::default_db_path(&folder);
-        assert!(db_path.is_file(), "{} has no index to search", folder.display());
-
-        let never = std::sync::atomic::AtomicBool::new(false);
-        let images = {
-            let conn = db::open_snapshot(&db_path).expect("read the real index");
-            let held = matching::load_images(&conn, &never, &|_| {}).expect("load").expect("images");
-            let _ = conn.close();
-            std::sync::Arc::new(held)
-        };
-        println!("{} pictures in the index", images.len());
-
-        let mut thresholds = Thresholds::at(matching::DEFAULT_SENSITIVITY);
-        thresholds.within_a_folder = true;
-        let started = std::time::Instant::now();
-        let sets = matching::find_sets_in(&images, thresholds, &never, &|_| {})
-            .expect("search")
-            .expect("not cancelled");
-        println!("{} sets, folders kept apart, in {:.1}s", sets.len(), started.elapsed().as_secs_f64());
-
-        let folder_of = |path: &str| match path.rfind('/') {
-            Some(at) => path[..at].to_string(),
-            None => String::new(),
-        };
-        for set in &sets {
-            let mut folders: Vec<String> =
-                set.members.iter().map(|member| folder_of(&member.rel_path)).collect();
-            folders.sort();
-            folders.dedup();
-            assert_eq!(
-                folders.len(),
-                1,
-                "a set was made out of {} folders: {:?}",
-                folders.len(),
-                set.members.iter().map(|member| member.rel_path.as_str()).collect::<Vec<_>>()
-            );
-        }
-        assert!(!sets.is_empty(), "the search found nothing, so this measured nothing");
-    }
-
-    /// Every box the window keeps in the folder's index goes into the real
-    /// folder's index and comes back out of it, through the window's own writing
-    /// and reading rather than through hand-written SQL.
-    ///
-    /// The index is left exactly as it was found.
-    #[test]
-    #[ignore = "writes to the index of the folder the application is set to"]
-    fn every_box_the_window_keeps_survives_the_real_folders_index() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = headless::default_db_path(&folder);
-        assert!(db_path.is_file(), "{} has no index to test against", folder.display());
-        use crate::notes::mark;
-        let before = crate::notes::of_folder(&db_path).expect("read what the folder says");
-        println!("before: {before:?}");
-
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.folder = Some(folder.clone());
-        app.db_path = Some(db_path.clone());
-        // Every one of them away from its default, so a box that is not written
-        // at all cannot pass by looking like the default.
-        app.recurse = true;
-        app.keep_index = true;
-        app.within_a_folder = true;
-        app.auto_rescan = true;
-        app.match_whole_frame = false;
-        app.match_corners = false;
-        app.multi_select = true;
-        app.destination = Destination::Delete;
-        app.move_dir = String::from("somewhere else");
-        app.remember_ways_of_matching();
-        app.remember_multi_select();
-        app.remember_disposal();
-
-        let said = crate::notes::of_folder(&db_path).expect("read what the folder says");
-
-        // Put the folder back the way it was before anything is asserted.
-        let restore = db::open_for_notes(&db_path).expect("open the real index to write to");
-        for (key, was) in [
-            (crate::notes::WITHIN_A_FOLDER, before.within_a_folder.map(|it| mark(it).to_string())),
-            (crate::notes::AUTO_RESCAN, before.auto_rescan.map(|it| mark(it).to_string())),
-            (
-                crate::notes::MATCH_WHOLE_FRAME,
-                before.match_whole_frame.map(|it| mark(it).to_string()),
-            ),
-            (crate::notes::MATCH_CORNERS, before.match_corners.map(|it| mark(it).to_string())),
-            (crate::notes::MULTI_SELECT, before.multi_select.map(|it| mark(it).to_string())),
-            (crate::notes::DISPOSAL, before.disposal.clone()),
-            (crate::notes::MOVE_DIR, before.move_dir.clone()),
-        ] {
-            match was {
-                Some(value) => {
-                    let _ = db::set_meta(&restore, key, &value);
-                }
-                None => {
-                    let _ = restore.execute("DELETE FROM meta WHERE key = ?1", [key]);
-                }
-            }
-        }
-        drop(restore);
-
-        assert_eq!(said.within_a_folder, Some(true), "only match within folders was not kept");
-        assert_eq!(said.auto_rescan, Some(true), "rescan on opening was not kept");
-        assert_eq!(said.match_whole_frame, Some(false), "matching whole frames was not kept");
-        assert_eq!(said.match_corners, Some(false), "matching corners was not kept");
-        assert_eq!(said.multi_select, Some(true), "allow multi-select was not kept");
-        assert_eq!(said.disposal.as_deref(), Some("delete"), "the destination was not kept");
-        assert_eq!(
-            said.move_dir.as_deref(),
-            Some("somewhere else"),
-            "the folder to move to was not kept"
-        );
-    }
-
-    /// Every setting the window keeps in the real folder's index survives that
-    /// index being written out, which is what a pass does at the end of a run.
-    ///
-    /// This is what was wrong: the window writes a setting into the file, the
-    /// pass writes the copy it has been holding over the top, and the setting is
-    /// gone. `recurse` was the only one that ever came back, because the pass
-    /// writes that one itself.
-    ///
-    /// The index is left exactly as it was found.
-    #[test]
-    #[ignore = "writes to the index of the folder the application is set to"]
-    fn the_real_folders_index_keeps_every_setting_the_window_writes() {
-        use crate::notes::{
-            AUTO_RESCAN, DISPOSAL, MATCH_CORNERS, MATCH_WHOLE_FRAME, MOVE_DIR, MULTI_SELECT,
-            WITHIN_A_FOLDER,
-        };
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = headless::default_db_path(&folder);
-        assert!(db_path.is_file(), "{} has no index to test against", folder.display());
-
-        let keys = [
-            DISPOSAL,
-            MOVE_DIR,
-            MULTI_SELECT,
-            MATCH_WHOLE_FRAME,
-            MATCH_CORNERS,
-            WITHIN_A_FOLDER,
-            AUTO_RESCAN,
-        ];
-        // Values nothing else would write, so what comes back is what this wrote.
-        let mine = |key: &str| format!("written by the test: {key}");
-
-        let before: Vec<(String, Option<String>)> = {
-            let conn = db::open_read_only(&db_path).expect("open the real index");
-            let held = keys
-                .iter()
-                .map(|key| ((*key).to_string(), db::get_meta(&conn, key).expect("read")))
-                .collect();
-            let _ = conn.close();
-            held
-        };
-        println!("before: {before:?}");
-
-        // A pass, holding the index in memory from before any of this.
-        let held = db::open(&db_path).expect("open the real index for writing");
-        // The window, writing every one of them while that pass runs.
-        let window = db::open_for_notes(&db_path).expect("open the real index to write to");
-        for key in keys {
-            db::set_meta(&window, key, &mine(key)).expect("write the setting");
-        }
-        drop(window);
-        // The pass finishing.
-        db::close(held, &db_path).expect("write the real index out");
-
-        let after: Vec<(String, Option<String>)> = {
-            let conn = db::open_read_only(&db_path).expect("open the real index");
-            let held = keys
-                .iter()
-                .map(|key| ((*key).to_string(), db::get_meta(&conn, key).expect("read")))
-                .collect();
-            let _ = conn.close();
-            held
-        };
-
-        // Put the folder back the way it was, whatever the answer is.
-        let restore = db::open_for_notes(&db_path).expect("open the real index to write to");
-        for (key, was) in &before {
-            match was {
-                Some(value) => {
-                    let _ = db::set_meta(&restore, key, value);
-                }
-                None => {
-                    let _ = restore.execute("DELETE FROM meta WHERE key = ?1", [key]);
-                }
-            }
-        }
-        drop(restore);
-
-        for (key, now) in &after {
-            assert_eq!(
-                now.as_deref(),
-                Some(mine(key).as_str()),
-                "the pass wrote over {key}, which the window had just set"
-            );
-        }
-
-        // And what the pass owns is still the pass's: how far it reached is a
-        // fact about the index it just built, not something the window keeps.
-        let conn = db::open_read_only(&db_path).expect("open the real index");
-        assert!(
-            db::get_meta(&conn, "recurse").expect("read").is_some(),
-            "the pass lost how far it had reached"
-        );
-        let _ = conn.close();
-    }
-
-    /// The pairs marked in the real folder's index survive that index being
-    /// written out, which is what a pass does at the end of every run.
-    ///
-    /// Run against the folder the application is set to, because that is where
-    /// this went wrong: the index there is on a network mount, is megabytes, and
-    /// is read into memory and written back whole. A generated folder on this
-    /// disk passed this while the real one lost every pair.
-    ///
-    /// The index is left exactly as it was found.
-    #[test]
-    #[ignore = "writes to the index of the folder the application is set to"]
-    fn the_real_folders_index_keeps_what_was_marked_when_it_is_written_out() {
-        let folder = crate::settings::Settings::load()
-            .folder
-            .expect("the application has no folder set to test against");
-        let db_path = headless::default_db_path(&folder);
-        assert!(db_path.is_file(), "{} has no index to test against", folder.display());
-
-        let before = {
-            let conn = db::open_read_only(&db_path).expect("open the real index");
-            let pairs = db::ignored(&conn).expect("read what is marked");
-            let _ = conn.close();
-            pairs
-        };
-        println!("{} holds {} marked pairs", db_path.display(), before.len());
-
-        // Two pictures out of the real index, and a pair that is not already
-        // marked, so what this writes is this test's own.
-        let ids: Vec<i64> = {
-            let conn = db::open_read_only(&db_path).expect("open the real index");
-            let mut statement = conn.prepare("SELECT id FROM files ORDER BY id LIMIT 2").unwrap();
-            let rows: Vec<i64> =
-                statement.query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
-            drop(statement);
-            let _ = conn.close();
-            rows
-        };
-        assert_eq!(ids.len(), 2, "the real index holds fewer than two pictures");
-        let mine = db::pair(ids[0], ids[1]);
-        assert!(!before.contains(&mine), "the pair this test uses is already marked");
-
-        // A pass, holding the index in memory from before the button is pressed.
-        let held = db::open(&db_path).expect("open the real index for writing");
-        // The window, marking a set while that pass runs.
-        let window = db::open_for_notes(&db_path).expect("open the real index to write to");
-        db::ignore(&window, &[mine]).expect("mark the pair");
-        drop(window);
-        // The pass finishing.
-        db::close(held, &db_path).expect("write the real index out");
-
-        let after = {
-            let conn = db::open_read_only(&db_path).expect("open the real index");
-            let pairs = db::ignored(&conn).expect("read what is marked");
-            let _ = conn.close();
-            pairs
-        };
-
-        // Put it back the way it was, whatever the answer is.
-        let restore = db::open_for_notes(&db_path).expect("open the real index to write to");
-        let _ = db::unignore(&restore, &[mine]);
-        drop(restore);
-
-        assert!(after.contains(&mine), "the pass wrote over what was marked while it ran");
-        for was in &before {
-            assert!(after.contains(was), "the pass lost a pair that was already marked: {was:?}");
-        }
     }
 
     /// A window opened on the folder it was left on comes up knowing which of its
@@ -7979,7 +7721,7 @@ mod tests {
         app.within_a_folder = true;
         app.auto_rescan = true;
         app.remember_ways_of_matching();
-        let written = crate::notes::of_folder(app.db_path.as_ref().expect("a db")).expect("notes");
+        let written = crate::notes::read(&app.index);
         assert_eq!(
             (written.recurse, written.within_a_folder, written.auto_rescan),
             (Some(true), Some(true), Some(true)),
@@ -8242,6 +7984,7 @@ mod tests {
         let found = folder_with_a_duplicate();
         let db_path = headless::default_db_path(found.path());
         let mut app = reviewing(found.path());
+        app.index.synced().expect("wait for the file");
         let before = std::fs::metadata(&db_path).expect("the index").len();
 
         let moving_to = app.sets[0].members[1].file_id;
@@ -8256,7 +7999,7 @@ mod tests {
             before,
             "reviewing wrote to the index"
         );
-        let conn = db::open_read_only(&db_path).expect("the index");
+        let conn = index_file(&app, &db_path);
         let rows: i64 =
             conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
         assert_eq!(rows, 3, "reviewing changed what the index holds");
@@ -8599,6 +8342,14 @@ mod tests {
         app.load_sets();
         settle(&mut app);
         app
+    }
+
+    /// The folder's index as it is on disk, once the file has caught up with
+    /// what the window's manager holds. Tests read this rather than the manager
+    /// because the file is what the next run of the window opens.
+    fn index_file(app: &App, db_path: &std::path::Path) -> db::Connection {
+        app.index.synced().expect("wait for the file");
+        db::open_and_migrate(db_path).expect("read the index file")
     }
 
     /// A folder of pictures, two of them the same, so a real pass over it has
@@ -9023,4 +8774,12 @@ mod tests {
             "the permanent option does not say so"
         );
     }
+
+    /// The checks against a real folder of photographs. Not in the repository:
+    /// see `docs/tests.md`.
+    /// The path is from `src/app/tests/`, which is where a module inside a
+    /// module inside `app.rs` is taken to live, so five steps reach the root.
+    #[cfg(feature = "local")]
+    #[path = "../../../../../local/app.rs"]
+    mod local;
 }

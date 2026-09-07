@@ -7,6 +7,7 @@ pub mod features;
 pub mod fingerprint;
 pub mod format;
 pub mod frames;
+pub mod index;
 pub mod matching;
 pub mod metadata;
 pub mod preview;

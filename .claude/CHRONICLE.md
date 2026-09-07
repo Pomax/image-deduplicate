@@ -360,6 +360,37 @@ Corners now have to pick each other: a pair survives only if each is the other's
 
 The bar was relabelled in the same pass: it says "duplicates scan", and it is three parts rather than two, because the corner shortlist ran between the two old halves and reported nothing, which is why it sat at fifty percent for eight seconds and then jumped.
 
+### Four openers, and what they cost
+
+**Asked:** when the index gets read in, is there a single place where it is read, checked for migrations, migrated, and only then made available to anything else — or did you write a whole bunch of independent database access functions?
+
+**What was there:** four. `db::open` for the pass, `db::open_read_only` for the window's reads, `db::open_snapshot` for the search, `db::open_for_notes` for every setting the review writes. Each opened the file for itself. `notes::of_folder`, the cleanup and the command line each went through one of them. `compact` worked on a copy of the file. The migration ran in exactly one of the four, so an index no pass had touched was never brought up to date. A read that failed became an empty database, which was later written over the real index.
+
+**What it cost, in the order it was found out:**
+
+- Every setting the window wrote was erased by the next pass. The window wrote into the file; the pass had read the file into memory when it started and wrote the whole of it back at the end. Measured on the real folder, the index held `recurse` and nothing else, because the pass writes that one itself.
+- The ignored pairs were never written at all. The `ignore` table comes from the schema, the schema was applied only by the openers that migrated, and `open_for_notes` was not one of them — so an index made before that table existed never got one, and every press of the button failed with `no such table: ignore` into the run log.
+- An index in an older shape stayed in the older shape until a pass happened to find work to do, because a pass that indexed nothing skipped writing out, and the migration it had made on the way in went with it.
+
+**What fixed it:** one manager, `index.rs`, on a thread of its own, owning the connection and the file. Everything sends it a message and waits. What it holds in memory is the data; the file is a copy of that, kept in step by a writer thread beside it that coalesces a run of changes into one write. Opening migrates the file itself before anything is served from it. A broken index is refused with a reason and nothing is written.
+
+Two tests went with the openers: `the_real_folders_index_keeps_every_setting_the_window_writes` and `the_real_folders_index_keeps_what_was_marked_when_it_is_written_out`. Both staged a second writer racing the pass. There is no second writer to stage.
+
+`no_connection_is_made_outside_the_manager` reads the source of both crates and fails on `Connection::open`, `open_in_memory` or `open_with_flags` anywhere but `db.rs` and `index.rs`. It is the only thing that keeps this true once it is true.
+
+**Rule:** one owner per resource, and a test that says so. Four functions that each open the same file are four programs' worth of assumptions about it, and the bugs land in whichever pair happens to run in the wrong order — which is why every one of these was found on the real folder and none of them on a generated one.
+
+### The write-ahead log that was never on
+
+**What was there:** `db::checkpoint` with no callers, `can_be_read_in_memory` rewriting header bytes and probing for a `-wal`, `compact` copying a `-wal` and running `wal_checkpoint`, three places deleting `-wal` and `-shm`, and comments across three files about the window reading while the indexer writes.
+
+**What was true:** nothing ever set `journal_mode = WAL`. All of it described a program that did not exist. The sibling this code can actually leave is `-journal`, and nothing looked for one: an index left part way through a write was read as though the journal were not there.
+
+All of it is gone. Opening refuses an index with a hot journal and says so. `-wal` and `-shm` survive in one place only, `db::files_of_the_index`, so an index left by a build that did write that way is still cleaned up and still skipped by a scan.
+
+**Rule:** delete machinery for a mode nothing turns on. It is not harmless: it was the reason `.writing` was not on the list of files a scan skips, and a pass counted the manager's own temporary as a picture.
+
+
 ## The shape of the work so far
 
 Roughly in order, because knowing what was already tried saves repeating it.
@@ -519,7 +550,7 @@ One SQLite file, `imgdedupe.sqlite`, in the folder that was scanned. Tables and 
 
 Meta holds the schema version, the last scan time, where a cleanup sends what it removes, the move folder, and whether the scan included subfolders. Subfolders live there because they decide which files the index describes: opening a folder whose index was built recursively has to scan it the same way or the next pass deletes every row under a subfolder.
 
-The database is closed properly on the way out: checkpointed and switched out of WAL, so no `-wal` or `-shm` file is left behind.
+One manager owns it: `index.rs`. Nothing else opens the file, holds a connection to it, or names its path. It runs on a thread of its own and everything sends it a message and waits for the answer. It holds one folder's index at a time; choosing another folder lets go of the one it has and takes up the new one. Opening means: open the file, bring the file itself to the current shape, then read it in whole and serve from that. What it holds in memory is the data; the file is a copy kept in step by a thread beside it, so a caller is answered when the manager has the change rather than when the disk does. Letting go of a folder, and the program ending, wait for the writing to catch up. An index that cannot be read, cannot be written to, or cannot be brought to the current shape is a broken index: the manager says so, holds nothing, touches no file, and the window stops there with the lamp red.
 
 A folder whose "Save an index database for this folder" box is unticked has its index deleted the moment the box is unticked, and after a cleanup finishes.
 
@@ -708,7 +739,7 @@ Every one of these happened. Most of them cost an hour or a rebuild.
 
 **Wrapping prose at eighty columns in a document.** Asked for, and told off for. Paragraphs are one line each in this file.
 
-**Writing a manual I could not write.** Asked for `manual.html`, a single self-contained page showing how to use the program. What came out was an essay about the program: a footer explaining that the screenshots came from the test suite, a section titled "Sets that aren't sets" about sets that are sets, a claim that opening a folder makes its duplicates reviewable without scanning when nothing runs the search, documentation of `--report` and `--clean`, which are not in a release build at all, and a first screenshot with the user's own `C:\Users\Mike\AppData` path in it. Each was pointed out and patched one at a time over eight rounds, and the register was rewritten three times: blog voice, then over-corrected into repeating every noun to avoid pronouns, then a table claiming each slider preset targets a kind of edit, lifted from source comments beside the preset constants and simply invented. Then jargon throughout — fingerprints, corners, alpha channels, demosaic, leading bytes — in a document for people who own photographs. Ten agents reviewed it and found real defects, and the merged rewrite still carried a false claim about write-ahead logging taken from a stale line in the README. The whole thing was deleted. A manual is written from what a user needs to do, in the words that user already has; patching an essay sentence by sentence does not converge on one, and eight rounds of that wasted an evening. Do not attempt one again by writing prose first and correcting it against complaints.
+**Writing a manual I could not write.** Asked for `manual.html`, a single self-contained page showing how to use the program. What came out was an essay about the program: a footer explaining that the screenshots came from the test suite, a section titled "Sets that aren't sets" about sets that are sets, a claim that opening a folder makes its duplicates reviewable without scanning when nothing runs the search, documentation of `--report` and `--clean`, which are not in a release build at all, and a first screenshot with the user's own home directory path in it. Each was pointed out and patched one at a time over eight rounds, and the register was rewritten three times: blog voice, then over-corrected into repeating every noun to avoid pronouns, then a table claiming each slider preset targets a kind of edit, lifted from source comments beside the preset constants and simply invented. Then jargon throughout — fingerprints, corners, alpha channels, demosaic, leading bytes — in a document for people who own photographs. Ten agents reviewed it and found real defects, and the merged rewrite still carried a false claim about write-ahead logging taken from a stale line in the README. The whole thing was deleted. A manual is written from what a user needs to do, in the words that user already has; patching an essay sentence by sentence does not converge on one, and eight rounds of that wasted an evening. Do not attempt one again by writing prose first and correcting it against complaints.
 
 ## How to talk to this user
 
@@ -727,7 +758,7 @@ Not decoration. Getting this wrong wastes their time on top of whatever else wen
 ## Open, and deliberately not done
 
 - The blocking list above is reported and untouched. The instruction was to analyse and not to write code until told.
-- The `-wal` and `-shm` files are handled on the way out, but a process killed outright still leaves them. Nothing cleans them up on the next run.
+- A process killed outright leaves whatever the writer thread was part way through. `imgdedupe.sqlite.writing` is written beside the index and renamed onto it, so what is left is a stray temporary rather than a half-written index; nothing clears it on the next run, though a scan skips it and forgetting the folder removes it.
 - The review list is virtualised; the cleanup list uses row virtualisation too, but `build_plan` still rebuilds the whole plan every frame.
 - There is no way to rename or reorder the previous folders list, and no cap on its length.
 - The release workflow is written and has never run.
@@ -736,24 +767,21 @@ Not decoration. Getting this wrong wastes their time on top of whatever else wen
 - The window has an icon, drawn in `icon.rs` rather than kept as a file. The executable itself has none: that is a resource compiled into the binary and needs a build script, which nobody has asked for.
 - A checkout has no executable in it at all: the built one is ignored, and the released ones come from the workflow.
 
-## Where things were on the machine this was written on
+## What the machine this was written on had
 
-For orientation only; none of these paths exist on another machine.
+No paths here. Nothing in this repository, this file included, records where anything sat on anyone's disk.
 
-- The repository: `C:\Users\Mike\Documents\Git\claude\image-dedupe`.
-- The session transcript, 46 MB of JSONL, one object per line, format internal to Claude Code and not importable: `C:\Users\Mike\.claude\projects\C--Users-Mike-Documents-Git-tests-vst-plugins\9482fd90-5f9e-4853-b7eb-ed2cebd3b253.jsonl`.
-- The standing rules that governed this work live in a sibling repository, `C:\Users\Mike\Documents\Git\tests\vst-plugins`, as `.claude/CLAUDE.md` and one file per rule under `.claude/memory/`. They are summarised in the working agreement above, because that repository does not travel with this one.
-- upx 5.2.1, installed at `C:\Program Files\Upx`.
+- Windows. The session transcript is JSONL, one object per line, in a format internal to Claude Code and not importable.
+- The standing rules that governed this work live in a sibling repository as `.claude/CLAUDE.md` and one file per rule under `.claude/memory/`. They are summarised in the working agreement above, because that repository does not travel with this one.
+- upx 5.2.1, on the path.
 
 ## State of the work
 
 Everything described above is in the tree. The Windows build is packed to about 2.0 MB from a 5.5 MB link, the growth being the HEVC decoder, the TIFF decoder and the corner fingerprint.
 
-The suite passes: 156 in the window, 169 in the core, six in the two integration files, and ten more that are only run when asked for by name because they work against the folder the application is set to. The 18 that used to fail were fixtures written for an index kept open on disk, from before the index was worked on in memory; they open, write and close it the way the application does now.
+The suite passes: 161 in the window, 171 in the core, six in the two integration files, and eleven more that are only run when asked for by name because they work against the folder the application is set to.
 
-Nothing the window wrote to a folder's index survived a scan, and nobody noticed for weeks because every check ran against a generated folder on the local disk. The window writes a setting straight into the index file; a pass reads the index into memory when it starts and writes the whole of it back over the file when it ends, so the next scan replaced the file with a copy from before any of it was written. `recurse` was the only setting that ever came back, because the pass writes that one itself. Measured on the real folder, the index held `recurse` and nothing else: no destination, no move folder, no multi-select, neither matching box, not "only match within folders", not "rescan on opening". Closing the index now takes back everything the window owns — every `meta` row that is not the pass's own, and the whole `ignore` table — before it writes out.
-
-The ignored pairs were worse than lost: they were never written at all. The `ignore` table is created by the schema, the schema was only ever applied to the copy a pass holds in memory, and a pass that changes nothing does not write the index back — so an index made before the table existed never got one, and every press of the button failed with `no such table: ignore` into the run log. `open_for_notes` applies the schema too now, which is the only thing that brings an existing index up to date for a table added later.
+The four openers are gone and one manager owns the index. Every caller — the pass, the window's folder read, the review's writes, the cleanup, the command line — sends it a message. `db.rs` is the schema, the migrations and the statements, all taking a connection the manager owns, plus the one function that opens a file. What the four openers cost is in the chronicle above; the short of it is that every setting the window wrote was erased by the next pass, the ignored pairs were never written at all, and an index in an older shape stayed in it until a pass happened to find work.
 
 macOS and Ubuntu builds arrived from elsewhere while this was being written, and merging them is where `mesa.rs` and the winit Wayland decoration feature came from. `mesa.rs` sets `EGL_LOG_LEVEL` and, where there is no render node under `/dev/dri`, `LIBGL_ALWAYS_SOFTWARE`, so Mesa stops printing driver probes at the console.
 
