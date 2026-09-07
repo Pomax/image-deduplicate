@@ -639,9 +639,11 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
     fitted(member.width, member.height).x.max(1.0) + TILE_BORDER + TILE_RING * 2.0
 }
 
-/// Room round the buttons along the bottom of a set. None: the band is the
-/// buttons, and the space between them is the space the row lays them out with.
-const BUTTON_ROW_GAP: f32 = 0.0;
+/// Room above and below the buttons inside the band along the bottom of a set,
+/// so the line along the top of the band stands clear of the buttons instead of
+/// being drawn along their top edge. The space between the buttons is the space
+/// the row lays them out with.
+const BUTTON_ROW_GAP: f32 = 2.0;
 
 /// The band those buttons sit on.
 const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
@@ -741,10 +743,17 @@ fn set_row_height(ui: &egui::Ui) -> f32 {
     BOX_PADDING
         + tile_strip_height(ui)
         + SCROLL_BAR
+        + STRIP_TO_BAND
         + button_row_height(ui)
         + 2.0 * BOX_EDGE
         + BETWEEN_BOXES
 }
+
+/// Kept between what is in the box — the pictures, the writing under them and
+/// the strip's own scroll bar — and the band of buttons under all of it. Enough
+/// to be seen: the band is what a set is told to do, and it reads as part of the
+/// set above it when the two touch.
+const STRIP_TO_BAND: f32 = 6.0;
 
 /// Kept between one set and the next.
 const BETWEEN_BOXES: f32 = 12.0;
@@ -1653,40 +1662,41 @@ impl App {
     }
 
     fn scan_view(&mut self, ui: &mut egui::Ui) {
+        // Everything on one row: the groups and the buttons are all short and
+        // stacking them full width leaves most of the window empty.
+        let widths = share_row_width(ui.available_width(), &self.scan_content, SECTION_GAP);
+        let mut measured = self.scan_content.clone();
+        // The three boxes end level with each other, at the height of whichever
+        // holds the most. Nothing is a fixed height, so taking a control out
+        // takes its space with it.
+        let mut tallest = 0.0_f32;
+        ui.horizontal_top(|ui| {
+            let folder = self.folder_section(ui, widths[0]);
+            ui.add_space(SECTION_GAP);
+            let matching = self.matching_section(ui, widths[1]);
+            ui.add_space(SECTION_GAP);
+            let run = self.run_section(ui, widths[2]);
+            measured = vec![folder.x, matching.x, run.x];
+            tallest = folder.y.max(matching.y).max(run.y);
+        });
+        self.scan_content = measured;
+        self.scan_row = tallest;
+        self.progress_section(ui);
+
+        // Only the lamps scroll. The boxes and the bars are the page: a window
+        // too short for the whole run of lamps still shows what the folder is
+        // set to and how far the run has got, and the bar beside the lamps
+        // reaches from the first lamp to the bottom of the window rather than
+        // down the whole page.
+        ui.add_space(SECTION_GAP);
         let step = ui.spacing().interact_size.y * 3.0;
         scrolled(
             ui,
-            egui::Id::new("scan view"),
+            egui::Id::new("scan lamps"),
             true,
             step,
             egui::ScrollArea::vertical().auto_shrink([false, false]),
-            |area, ui| {
-                area.show(ui, |ui| {
-                    // Everything on one row: the groups and the buttons are all
-                    // short and stacking them full width leaves most of the
-                    // window empty.
-                    let widths =
-                        share_row_width(ui.available_width(), &self.scan_content, SECTION_GAP);
-                    let mut measured = self.scan_content.clone();
-                    // The three boxes end level with each other, at the height of
-                    // whichever holds the most. Nothing is a fixed height, so
-                    // taking a control out takes its space with it.
-                    let mut tallest = 0.0_f32;
-                    ui.horizontal_top(|ui| {
-                        let folder = self.folder_section(ui, widths[0]);
-                        ui.add_space(SECTION_GAP);
-                        let matching = self.matching_section(ui, widths[1]);
-                        ui.add_space(SECTION_GAP);
-                        let run = self.run_section(ui, widths[2]);
-                        measured = vec![folder.x, matching.x, run.x];
-                        tallest = folder.y.max(matching.y).max(run.y);
-                    });
-                    self.scan_content = measured;
-                    self.scan_row = tallest;
-                    self.progress_section(ui);
-                    self.lamps(ui);
-                })
-            },
+            |area, ui| area.show(ui, |ui| self.lamps(ui)),
         );
     }
 
@@ -1700,7 +1710,6 @@ impl App {
 
         const GREY: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
 
-        ui.add_space(SECTION_GAP);
         let dot = |ui: &mut egui::Ui, state: Went| {
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2(DOT * 3.0, ui.spacing().interact_size.y),
@@ -6811,6 +6820,48 @@ mod tests {
 
         page(&mut app, "cleanup", View::Cleanup);
         println!("the manual's pictures are in {}", folder.display());
+    }
+
+    /// Draw the scan page into a picture file, so what it looks like can be
+    /// looked at. Names the file it wrote.
+    ///
+    /// Not a check of anything: it is the window, on paper, for whoever is
+    /// changing the layout. Ignored unless it is asked for by name.
+    #[test]
+    #[ignore = "writes a picture of the scan page instead of checking anything"]
+    fn a_picture_of_the_scan_page() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        app.view = View::Scan;
+        app.keep_index = true;
+
+        let ctx = window();
+        ctx.set_visuals(egui::Visuals::light());
+        // Short, so the lamps are more than the room left for them and the bar
+        // beside the lamps is drawn.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 560.0));
+        let at = std::env::var_os("IMGDEDUPE_SHOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("scan.png"));
+        let mut camera = crate::shot::Camera::default();
+        for _ in 0..6 {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let drawing = &mut app;
+            camera.shoot(
+                &ctx,
+                input,
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::symmetric(16.0, 12.0)),
+                        )
+                        .show(ctx, |ui| drawing.scan_view(ui));
+                },
+                &at,
+            );
+        }
+        println!("the scan page is at {}", at.display());
     }
 
     /// Draw the review page into a picture file, so what it looks like can be

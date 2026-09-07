@@ -75,7 +75,15 @@ struct Frame {
 
 impl Drop for Camera {
     fn drop(&mut self) {
-        self.develop();
+        // A picture is wanted when a check goes wrong. Filling one in is a
+        // window's worth of triangles in a build with no optimisation, and the
+        // suite runs a hundred checks beside each other, so a check that passed
+        // leaves its frame unfilled: with every check filling one in, the checks
+        // that wait on a thread of their own started timing out. Set
+        // `IMGDEDUPE_SHOT_ALWAYS` to have every check leave a picture.
+        if std::thread::panicking() || std::env::var_os("IMGDEDUPE_SHOT_ALWAYS").is_some() {
+            self.develop();
+        }
     }
 }
 

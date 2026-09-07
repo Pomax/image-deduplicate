@@ -29,13 +29,20 @@ rem is open is left alone and the build goes beside it under its own name.
 set "out=imgdedupe.exe"
 tasklist /fi "imagename eq imgdedupe.exe" /nh 2>nul | find /i "imgdedupe.exe" >nul
 if errorlevel 1 (
-    if exist "imgdedupe.exe" del "imgdedupe.exe"
+    if exist "imgdedupe.exe" del "imgdedupe.exe" 2>nul
 ) else (
     set "out=imgdedupe-new.exe"
 )
-if exist "%out%" del "%out%"
+
+rem The task list is not the last word: a name it does not report can still be
+rem held open, and asking the file itself is what the rule against touching a
+rem running program forbids. So the delete above is allowed to fail, and a name
+rem that is still there afterwards is a name this build cannot have. The build
+rem goes beside it rather than stopping.
+if exist "%out%" set "out=imgdedupe-new.exe"
+if exist "%out%" del "%out%" 2>nul
 if exist "%out%" (
-    echo %out% is in use and this build has nowhere to go
+    echo both imgdedupe.exe and imgdedupe-new.exe are held open, so this build has nowhere to go
     exit /b 1
 )
 
