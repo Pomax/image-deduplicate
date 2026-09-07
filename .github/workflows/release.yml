@@ -1,17 +1,13 @@
 name: Release
 
 # Windows, macOS, and Linux build in parallel and their executables go into one
-# release, named after the version in Cargo.toml. A push to main only builds and
-# releases if that version changed since the previous commit. A v* tag always
-# releases, under the tag name. Pull requests build but release nothing.
+# release, named after the version in Cargo.toml and tagged with it. Nothing
+# runs until the version has been compared with the previous commit's: a push to
+# main whose version did not change builds nothing and releases nothing.
 on:
   push:
-    tags:
-      - "v*"
     branches:
       - main
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: write

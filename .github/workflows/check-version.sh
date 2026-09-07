@@ -29,24 +29,14 @@ build=false
 release=false
 tag=""
 
-if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-    # Check that it still compiles, but release nothing.
-    build=true
-elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+previous=$(git show HEAD^:Cargo.toml 2>/dev/null | read_version)
+echo "version in the previous commit: ${previous:-none}"
+if [ "$version" = "$previous" ]; then
+    echo "the version did not change, so there is nothing to build or release"
+else
     build=true
     release=true
-    tag="$GITHUB_REF_NAME"
-else
-    # A push to main, or a manual run. Only a changed version is a new release.
-    previous=$(git show HEAD^:Cargo.toml 2>/dev/null | read_version)
-    echo "version in the previous commit: ${previous:-none}"
-    if [ "$version" = "$previous" ]; then
-        echo "the version did not change, so there is nothing to release"
-    else
-        build=true
-        release=true
-        tag="v$version"
-    fi
+    tag="v$version"
 fi
 
 echo "build=$build" >> "$GITHUB_OUTPUT"
