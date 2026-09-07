@@ -131,6 +131,24 @@ because a migration that lives only in memory is lost the moment it is dropped.
 An index left part way through a write is refused, rather than read as if the
 journal beside it were not there. Nothing is written over it.
 
+### an_index_written_in_nanoseconds_comes_back_in_milliseconds
+
+An index from a build that kept stamps in nanoseconds comes back holding
+milliseconds and no nanosecond column, checked against the file rather than the
+copy handed back. Shown to fail with the carrying step taken out before it was
+claimed to catch anything.
+
+### a_half_converted_index_is_finished_rather_than_converted_twice
+
+A run killed after the stamps were carried across and before the old column was
+dropped. The next open finishes the job and does not divide what it already
+divided, because the old column is what says whether the dividing has happened.
+
+### an_index_given_the_new_column_but_no_values_is_converted
+
+The other half of that: a run killed after the column was added and before the
+stamps were carried. The next open carries them.
+
 ### a_fresh_index_records_its_schema_version
 
 A new index writes down the version it was made with.
@@ -763,6 +781,14 @@ file, because the file is what the next run of the program opens.
 ### a_first_pass_indexes_every_image
 
 A pass over a folder of pictures indexes all of them.
+
+### a_folder_indexed_on_one_machine_is_unchanged_on_another
+
+A folder is indexed, its index is rewritten the way a build keeping nanoseconds
+would have described it, and it is passed over again: nothing is read a second
+time. File systems disagree about the digits below a millisecond for the same
+file, so an index carrying them called every file changed when it was read
+anywhere else, and this is the check that it does not.
 
 ### a_second_pass_over_an_unchanged_folder_reads_nothing
 

@@ -147,7 +147,7 @@ mod tests {
             format: "jpeg".to_string(),
             channels: 3,
             size_bytes: size,
-            mtime_ns: 1,
+            mtime_ms: 1,
             auto_keep: keep,
         }
     }

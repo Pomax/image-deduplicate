@@ -390,6 +390,44 @@ All of it is gone. Opening refuses an index with a hot journal and says so. `-wa
 
 **Rule:** delete machinery for a mode nothing turns on. It is not harmless: it was the reason `.writing` was not on the list of files a scan skips, and a pass counted the manager's own temporary as a picture.
 
+### Nanoseconds, and why the old column outlives the new one
+
+**Asked:** nothing should use nanoseconds. Nanosecond stamps differ between file
+systems for the same file, so an index written on one machine reports every file
+as changed on another.
+
+**What happened:** `files.mtime_ns` became `files.mtime_ms`, the two listing
+paths read `as_millis()`, the search and the tile carry milliseconds, and the run
+log's three timing counters stopped summing nanoseconds. Three places turn
+something into a millisecond stamp and all three truncate; if one of them ever
+rounds instead, every file in every existing index reads as changed once, which
+is the fault this was fixing.
+
+**The part worth keeping:** the migration is add, carry, drop, in that order, and
+`mtime_ns` is not dropped until `mtime_ms` is filled from it.
+
+Every other migration in `db.rs` asks a question the answer to which is the work
+— does `files` have `bytes_hash`, does `fingerprints` have `corners` — so a run
+killed half way through one is finished by the next open. Renaming the column and
+then dividing the values does not have that property: the name changes on the
+first statement and the values on the second, so a run killed in between leaves a
+column called `mtime_ms` holding nanoseconds, and there is nothing left to ask.
+Every later open would call it done and every file would read as changed for
+ever.
+
+Adding a second column, filling it from the first and then dropping the first has
+the property back. The question is "does `files` still have `mtime_ns`", the
+answer is a pure function of a column that is still there, and every interruption
+point converges. Reordering those three steps into a rename looks like tidying
+and is not.
+
+`SCHEMA_VERSION` stayed at 1. The manager refuses an index written under a
+version it does not speak, so bumping it would have turned every existing folder
+into a broken index and re-fingerprinted every collection.
+
+**Rule:** a migration has to be able to ask whether it has already run, and the
+thing it asks about cannot be the thing it changes first.
+
 
 ## The shape of the work so far
 

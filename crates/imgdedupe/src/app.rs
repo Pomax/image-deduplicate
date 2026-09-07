@@ -319,11 +319,11 @@ const SCROLL_BAR: f32 = 12.0;
 
 /// When a file was last written, as `YYYY-MM-DD HH:MM`, in UTC.
 ///
-/// The stamp is nanoseconds since the epoch, which is what the file system
-/// reports and what the index stores. Nothing here reads a date out of the
-/// picture's own metadata: most of the formats this reads do not carry one.
-fn file_date(mtime_ns: i64) -> String {
-    let seconds = mtime_ns.div_euclid(1_000_000_000);
+/// The stamp is milliseconds since the epoch, which is what the index stores.
+/// Nothing here reads a date out of the picture's own metadata: most of the
+/// formats this reads do not carry one.
+fn file_date(mtime_ms: i64) -> String {
+    let seconds = mtime_ms.div_euclid(1_000);
     let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rest / 3600, (rest % 3600) / 60)
@@ -2075,11 +2075,16 @@ impl App {
         let (send, receive) = std::sync::mpsc::channel();
         self.asking = Some(receive);
         let index = self.index.clone();
+        // Whether the folder already had an index is a fact about the moment it
+        // was opened, so it is read here rather than on the thread below. Taking
+        // up a folder with no index makes one, and so does a pass; asked late, on
+        // a busy machine, this answers about a file one of those had already
+        // created and the folder comes up looking as though it was remembered.
+        let there = db_path.is_file();
         std::thread::spawn(move || {
             // Everything below is the manager's work, on this thread rather than
             // the one that draws: for a folder on another machine, taking up an
             // index is a request over the network.
-            let there = db_path.is_file();
             if let Err(err) = index.hold(&db_path) {
                 let _ = send.send(Opened::Failed(format!("{err:#}")));
                 return;
@@ -3797,7 +3802,7 @@ impl App {
                     .weak(),
                     width,
                 );
-                clipped_line_in(ui, egui::RichText::new(file_date(member.mtime_ns)).weak(), width);
+                clipped_line_in(ui, egui::RichText::new(file_date(member.mtime_ms)).weak(), width);
                 clipped_line_in(ui, egui::RichText::new(&member.rel_path).weak(), width);
             });
         });
@@ -4271,7 +4276,7 @@ mod tests {
             format: "jpeg".to_string(),
             channels: 3,
             size_bytes: size,
-            mtime_ns: 1_700_000_000_000_000_000,
+            mtime_ms: 1_700_000_000_000,
             auto_keep: false,
         }
     }
@@ -4281,21 +4286,21 @@ mod tests {
     #[test]
     fn a_file_stamp_becomes_the_date_and_time_it_stands_for() {
         assert_eq!(file_date(0), "1970-01-01 00:00");
-        assert_eq!(file_date(1_000_000_000), "1970-01-01 00:00");
-        assert_eq!(file_date(86_399 * 1_000_000_000), "1970-01-01 23:59");
-        assert_eq!(file_date(86_400 * 1_000_000_000), "1970-01-02 00:00");
+        assert_eq!(file_date(1_000), "1970-01-01 00:00");
+        assert_eq!(file_date(86_399 * 1_000), "1970-01-01 23:59");
+        assert_eq!(file_date(86_400 * 1_000), "1970-01-02 00:00");
 
         // 2024-02-29, a leap day in a year that is a multiple of four.
-        assert_eq!(file_date(1_709_164_800 * 1_000_000_000), "2024-02-29 00:00");
+        assert_eq!(file_date(1_709_164_800 * 1_000), "2024-02-29 00:00");
         // 2000-02-29: a multiple of a hundred that is still a leap year.
-        assert_eq!(file_date(951_782_400 * 1_000_000_000), "2000-02-29 00:00");
+        assert_eq!(file_date(951_782_400 * 1_000), "2000-02-29 00:00");
         // 1900 was not one, being a multiple of a hundred but not four hundred,
         // so the day after the 28th of February is the first of March.
-        assert_eq!(file_date(-2_203_977_600 * 1_000_000_000), "1900-02-28 00:00");
-        assert_eq!(file_date(-2_203_891_200 * 1_000_000_000), "1900-03-01 00:00");
+        assert_eq!(file_date(-2_203_977_600 * 1_000), "1900-02-28 00:00");
+        assert_eq!(file_date(-2_203_891_200 * 1_000), "1900-03-01 00:00");
 
-        assert_eq!(file_date(1_700_000_000 * 1_000_000_000), "2023-11-14 22:13");
-        assert_eq!(file_date(2_000_000_000 * 1_000_000_000), "2033-05-18 03:33");
+        assert_eq!(file_date(1_700_000_000 * 1_000), "2023-11-14 22:13");
+        assert_eq!(file_date(2_000_000_000 * 1_000), "2033-05-18 03:33");
     }
 
     /// The space bar keeps whatever the preview is showing, in whichever set it
@@ -5139,6 +5144,7 @@ mod tests {
         app.remember_disposal();
 
         // Opened again from nothing, as the next run of the window would.
+        closed(&app);
         let mut opened = App::from_settings(crate::settings::Settings::default());
         assert_eq!(opened.destination, Destination::Trash, "the test started from the default");
         opened.open_folder(scanned.path().to_path_buf());
@@ -5172,6 +5178,7 @@ mod tests {
         assert_eq!(app.scan.done, 2, "the pass did not go into the subfolder");
 
         // Opened again from nothing, as the next run of the window would.
+        closed(&app);
         let mut opened = App::from_settings(crate::settings::Settings::default());
         opened.open_folder(dir.path().to_path_buf());
         settle(&mut opened);
@@ -5181,6 +5188,7 @@ mod tests {
         opened.recurse = false;
         opened.start_scan();
         settle(&mut opened);
+        closed(&app);
         let mut again = App::from_settings(crate::settings::Settings::default());
         again.open_folder(dir.path().to_path_buf());
         settle(&mut again);
@@ -5195,6 +5203,7 @@ mod tests {
         app.start_scan();
         settle(&mut app);
 
+        closed(&app);
         let mut opened = App::from_settings(crate::settings::Settings::default());
         opened.open_folder(scanned.path().to_path_buf());
         settle(&mut opened);
@@ -6521,6 +6530,7 @@ mod tests {
         app.multi_select = true;
         app.remember_multi_select();
 
+        closed(&app);
         let again = reviewing(found.path());
         assert!(again.multi_select, "the folder was opened again without the box ticked");
     }
@@ -6687,6 +6697,7 @@ mod tests {
         app.match_corners = false;
         app.remember_ways_of_matching();
 
+        closed(&app);
         let again = reviewing(found.path());
         assert!(again.match_whole_frame, "whole pictures came back switched off");
         assert!(!again.match_corners, "the folder was opened again still matching crops");
@@ -7413,6 +7424,7 @@ mod tests {
         assert!(app.keep.contains_key(&set_id), "an ignored set forgot what it had kept");
 
         // Written down, so the next run knows it too.
+        closed(&app);
         let mut again = App::from_settings(crate::settings::Settings::default());
         again.open_folder(found.path().to_path_buf());
         settle(&mut again);
@@ -7443,6 +7455,7 @@ mod tests {
         let _ = conn.close();
 
         // Opened again from nothing, the set is a set.
+        closed(&app);
         let mut again = App::from_settings(crate::settings::Settings::default());
         again.open_folder(found.path().to_path_buf());
         settle(&mut again);
@@ -7469,6 +7482,7 @@ mod tests {
             folder: Some(found.path().to_path_buf()),
             ..crate::settings::Settings::default()
         };
+        closed(&app);
         let mut again = App::from_settings(saved);
         again.open_what_was_left_open();
         settle(&mut again);
@@ -7682,6 +7696,7 @@ mod tests {
         let app = reviewing(found.path());
         assert!(!app.auto_rescan, "the folder asked to be rescanned on its own");
 
+        closed(&app);
         let mut again = App::from_settings(crate::settings::Settings::default());
         assert!(again.images.is_none(), "a window with no folder open holds pictures");
         again.open_folder(found.path().to_path_buf());
@@ -7728,6 +7743,7 @@ mod tests {
             "the index did not come out of that holding all three"
         );
 
+        closed(&app);
         let mut again = App::from_settings(crate::settings::Settings::default());
         again.open_folder(found.path().to_path_buf());
         settle(&mut again);
@@ -8344,6 +8360,17 @@ mod tests {
         app
     }
 
+    /// The window closing on a folder.
+    ///
+    /// A caller is answered when the manager has its change, not when the disk
+    /// does, so a second window opened on the same folder in the same test can
+    /// otherwise read the file before the first one's writing has landed. Ending
+    /// the process is what waits for that, and this is a test saying the first
+    /// run ended.
+    fn closed(app: &App) {
+        app.index.let_go().expect("write the folder out");
+    }
+
     /// The folder's index as it is on disk, once the file has caught up with
     /// what the window's manager holds. Tests read this rather than the manager
     /// because the file is what the next run of the window opens.
@@ -8580,6 +8607,7 @@ mod tests {
         // Ticked, and now opening it is enough.
         app.auto_rescan = true;
         app.remember_ways_of_matching();
+        closed(&app);
         let mut again = App::from_settings(crate::settings::Settings::default());
         again.open_folder(known.path().to_path_buf());
         let ctx = window();

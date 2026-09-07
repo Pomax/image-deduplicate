@@ -475,7 +475,7 @@ mod tests {
         Record {
             rel_path: rel_path.to_string(),
             size_bytes,
-            mtime_ns: 1,
+            mtime_ms: 1,
             width: 10,
             height: 10,
             format: crate::format::Format::Jpeg,
@@ -550,7 +550,8 @@ mod tests {
     fn a_scan_that_indexed_nothing_still_leaves_the_file_in_step() {
         let (_dir, path) = temp();
 
-        // A folder whose index was made by a build that knew nothing of corners.
+        // A folder whose index was made by a build that knew nothing of corners
+        // and kept its stamps in nanoseconds.
         let older = rusqlite::Connection::open(&path).expect("make an older index");
         older
             .execute_batch(
@@ -561,7 +562,9 @@ mod tests {
                    mtime_ns INTEGER NOT NULL,
                    last_scanned_at INTEGER NOT NULL
                  );
-                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO files(rel_path, size_bytes, mtime_ns, last_scanned_at)
+                 VALUES ('a.jpg', 1, 1700000000123456789, 1);",
             )
             .expect("an older shape");
         drop(older);
@@ -585,6 +588,22 @@ mod tests {
             )
             .expect("looking for the column");
         assert_eq!(corners, 1, "the file was not left in the shape this build reads");
+
+        // And the other thing an index that old needs: the stamp carried into
+        // milliseconds and the nanosecond column gone.
+        let known = db::load_known(&conn).expect("read the file back");
+        assert_eq!(
+            known["a.jpg"].mtime_ms, 1_700_000_000_123,
+            "the stamp was not carried across"
+        );
+        let nanos: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('files') WHERE name = 'mtime_ns'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("looking for the column");
+        assert_eq!(nanos, 0, "the nanosecond column is still there");
     }
 
     /// One of every kind of change, then let go: all of them are in the file.
