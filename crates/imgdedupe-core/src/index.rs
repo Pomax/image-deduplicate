@@ -300,12 +300,23 @@ fn with_mut<T>(held: &mut Option<Held>, work: impl FnOnce(&mut Held) -> Result<T
 
 /// Take up a folder's index: migrate the file, then read it in.
 fn take_up(held: &mut Option<Held>, writer: &Writer, path: &Path) -> Result<()> {
+    // Already holding this one. Putting it down and taking it up again writes
+    // the whole index out, reads it back and writes it out once more, and ends
+    // where it started. The window opens a folder and the pass asks for the
+    // same folder a moment later, so this is the usual case, not a rare one.
+    if held.as_ref().is_some_and(|it| it.path.as_path() == path) {
+        return Ok(());
+    }
     put_down(held, writer)?;
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
     let conn = db::open_and_migrate(path)?;
+    crate::log_line!("  open and migrate: {:.2}s", at.elapsed().as_secs_f64());
     *held = Some(Held { path: path.to_path_buf(), conn });
-    // A folder with no index has one now, and one that was migrated is on disk
-    // in the new shape.
-    sync(held, writer);
+    // Nothing to write. Migrating writes to the file itself, and a folder that
+    // had no index has one on disk by the time it is read in, so what is held
+    // and what is on disk are already the same. Every job that changes what is
+    // held writes it out; opening changes nothing.
     Ok(())
 }
 
