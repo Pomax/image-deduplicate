@@ -381,17 +381,11 @@ fn delete(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result
         None => anyhow::bail!("no folder is open"),
     };
     // Nothing more is written on the way out: the file is going. Whatever is
-    // already on its way has to land first, and the file has to be closed before
-    // it is removed, or what is left behind is a `-journal` beside nothing.
+    // already on its way has to land first, and the file is closed before it is
+    // removed, which is when SQLite takes away whatever it keeps beside it.
     let _ = writer.close();
     *current_open_index = None;
-    let mut gone = 0;
-    for beside in db::files_of_the_index(&path) {
-        if std::fs::remove_file(&beside).is_ok() {
-            gone += 1;
-        }
-    }
-    if gone == 0 {
+    if std::fs::remove_file(&path).is_err() {
         anyhow::bail!("nothing was removed at {}", path.display());
     }
     Ok(rows)

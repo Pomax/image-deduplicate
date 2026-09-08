@@ -126,11 +126,6 @@ Opening brings the file itself to the current shape before anything is served
 from it. Checked against the file on disk, not against what was read out of it,
 because a migration that lives only in memory is lost the moment it is dropped.
 
-### an_index_with_a_hot_journal_is_not_read_as_though_it_were_committed
-
-An index left part way through a write is refused, rather than read as if the
-journal beside it were not there. Nothing is written over it.
-
 ### an_index_written_in_nanoseconds_comes_back_in_milliseconds
 
 An index from a build that kept stamps in nanoseconds comes back holding
@@ -432,6 +427,15 @@ Weighting the signature once when it is loaded gives the same distance as
 weighting it on every comparison.
 
 ## crates/imgdedupe-core/src/format.rs
+
+### every_extension_names_the_format_it_belongs_to
+
+Each extension a format lists is read back as that format, and a name with no
+extension, or one this build does not know, is not read as any of them.
+
+### an_extension_in_capitals_is_the_same_extension
+
+`PICTURE.JPG` claims the same format as `picture.jpg`.
 
 ### detects_each_supported_format
 
@@ -864,8 +868,22 @@ A file whose size or timestamp moved is read again.
 
 ### files_that_are_not_images_are_neither_indexed_nor_failures
 
-A file that is not a picture is counted on its own, as neither indexed nor
-broken.
+A file that claimed a picture format in its name and turned out not to be one is
+counted on its own, as neither indexed nor broken.
+
+### a_file_that_claims_no_format_is_not_read
+
+A folder holding a picture, a four megabyte text file and a four megabyte
+`imgdedupe.sqlite-journal`. Only the picture is indexed, and nothing is reported
+as failing, because neither of the others is read at all: their names claim no
+format this reads. This is why the walk no longer has to be told the index's
+name.
+
+### what_a_file_is_comes_from_its_bytes_not_its_name
+
+A JPEG saved as `liar.png` is read, because the name claims a format, and indexed
+as a JPEG, because its first bytes say so. The name decides what is worth
+reading; the bytes decide what it is.
 
 ### a_malformed_image_is_reported_and_does_not_stop_the_pass
 
@@ -1145,10 +1163,11 @@ index and reports how many rows went.
 
 ### what_was_skipped_and_what_broke_are_not_counted_as_found
 
-A real folder holding two pictures, a text file and a broken PNG, scanned twice.
-The pass looks at all four, counts the text file as ignored and the broken one as
-a failure, and reports two found. The second pass finds nothing new, because what
-was left alone was not read.
+A real folder holding two pictures, a text file, a file named `.png` that is not
+one, and a broken PNG, scanned twice. The pass looks at four of the five — the
+text file claims no format, so it is never read — counts the one that lied about
+its name as ignored and the broken one as a failure, and reports two found. The
+second pass finds nothing new, because what was left alone was not read.
 
 ### a_set_of_portraits_is_not_given_the_width_of_a_landscape
 

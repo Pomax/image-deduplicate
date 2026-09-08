@@ -120,18 +120,8 @@ pub fn open_and_migrate(path: &Path) -> Result<Connection> {
 /// Bring the file itself to the current shape: the schema, the columns an older
 /// build lacks, and the version it is written under.
 ///
-/// This is the only thing that writes the index other than the manager putting
-/// what it holds back, and it happens before anything reads a row.
+/// This happens before anything reads a row.
 fn migrate_the_file(path: &Path) -> Result<()> {
-    if path.exists() {
-        let hot = with_suffix(path, "-journal");
-        if std::fs::metadata(&hot).map(|it| it.len()).unwrap_or(0) > 0 {
-            anyhow::bail!(
-                "{} was left part way through a write and cannot be trusted",
-                path.display()
-            );
-        }
-    }
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     let conn = Connection::open(path)
@@ -163,33 +153,10 @@ fn migrate_the_file(path: &Path) -> Result<()> {
         None => set_meta(&conn, "schema_version", &SCHEMA_VERSION.to_string())?,
     }
     drop(conn);
-    // The rollback journal SQLite keeps beside a file it is writing. Everything
-    // above is committed, so what is left is an empty one.
-    let _ = std::fs::remove_file(with_suffix(path, "-journal"));
     Ok(())
 }
 
 /// Where the index is written before it is moved onto itself.
-pub fn being_written(path: &Path) -> std::path::PathBuf {
-    with_suffix(path, ".writing")
-}
-
-/// Every file the index is made of: the index and anything SQLite or a write
-/// leaves beside it. A scan skips these, and removing an index removes all of
-/// them.
-///
-/// `-wal` and `-shm` are here for an index left behind by a build that wrote in
-/// that mode. Nothing makes them now.
-pub fn files_of_the_index(path: &Path) -> Vec<std::path::PathBuf> {
-    vec![
-        path.to_path_buf(),
-        with_suffix(path, "-journal"),
-        with_suffix(path, "-wal"),
-        with_suffix(path, "-shm"),
-        being_written(path),
-    ]
-}
-
 /// Take the columns nothing reads out of an index written by an older build.
 ///
 /// A file already on disk keeps whatever columns it was made with, and the ones
@@ -273,11 +240,6 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 }
 
 
-fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    std::path::PathBuf::from(name)
-}
 
 
 
@@ -744,21 +706,6 @@ mod tests {
         let rows: i64 =
             file.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
         assert_eq!(rows, 1, "the row was lost");
-    }
-
-    /// An index left part way through a write cannot be trusted, so it is
-    /// refused and nothing is written over it.
-    #[test]
-    fn an_index_with_a_hot_journal_is_not_read_as_though_it_were_committed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("index.sqlite");
-        drop(open_and_migrate(&path).expect("create"));
-        let was = std::fs::read(&path).expect("read");
-        std::fs::write(with_suffix(&path, "-journal"), b"half a transaction").expect("fixture");
-
-        let err = open_and_migrate(&path).expect_err("should refuse");
-        assert!(err.to_string().contains("part way through"), "{err}");
-        assert_eq!(std::fs::read(&path).expect("read"), was, "the index was written to");
     }
 
     /// An index from a build that kept stamps in nanoseconds comes back holding

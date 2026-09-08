@@ -4818,9 +4818,7 @@ mod tests {
 
         let went = discard_index(&app.index);
         assert_eq!(went, 3, "the count of what went is not what the folder held");
-        for beside in db::files_of_the_index(&db_path) {
-            assert!(!beside.exists(), "{} was left behind", beside.display());
-        }
+        assert!(!db_path.exists(), "{} was left behind", db_path.display());
         assert!(
             app.index.open_index_path().is_none(),
             "the manager still has an index open that is gone"
@@ -4930,9 +4928,7 @@ mod tests {
             app.pump_cleanup(&ctx);
         }
 
-        for beside in db::files_of_the_index(&db_path) {
-            assert!(!beside.exists(), "{} was left behind", beside.display());
-        }
+        assert!(!db_path.exists(), "{} was left behind", db_path.display());
 
         // And the window is back on the scan with nothing on it, so the only way
         // on is another folder or another scan.
@@ -4981,6 +4977,9 @@ mod tests {
     /// Files that were not pictures, and files that could not be read, are not
     /// pictures this pass found. A folder whose only unindexed files are of those
     /// two kinds has found nothing, however many times it reads them.
+    ///
+    /// A file whose name claims no picture format is not one of those two: it is
+    /// never looked at, so it is not among the files the pass went through.
     #[test]
     fn what_was_skipped_and_what_broke_are_not_counted_as_found() {
         // A folder of pictures, one of which is not a picture at all, read twice:
@@ -4993,7 +4992,10 @@ mod tests {
             .save_with_format(dir.path().join(name), image::ImageFormat::Png)
             .expect("a fixture");
         }
+        // Named as no format at all: not read, not counted, not anything.
         std::fs::write(dir.path().join("notes.txt"), b"not a picture").expect("a fixture");
+        // Named as a picture and not one: read, and refused by its first bytes.
+        std::fs::write(dir.path().join("pretend.png"), b"not a picture").expect("a fixture");
         std::fs::write(dir.path().join("broken.png"), b"\x89PNG\r\n\x1a\ncut").expect("a fixture");
 
         let mut app = App::from_settings(crate::settings::Settings::default());
@@ -5001,7 +5003,7 @@ mod tests {
         app.start_scan();
         settle(&mut app);
 
-        assert_eq!(app.scan.done, 4, "the pass did not look at every file");
+        assert_eq!(app.scan.done, 4, "the pass looked at a file that claims no format");
         assert_eq!(app.scan.ignored, 1, "the file that is not a picture was not counted");
         assert_eq!(app.scan.failures.len(), 1, "the broken file is its own number");
         assert_eq!(app.scan.found(), 2, "found is the pictures, not the files");
