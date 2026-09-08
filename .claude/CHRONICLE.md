@@ -428,6 +428,30 @@ into a broken index and re-fingerprinted every collection.
 **Rule:** a migration has to be able to ask whether it has already run, and the
 thing it asks about cannot be the thing it changes first.
 
+### The read-ahead budget adds back what it is holding
+
+**Asked:** the read-ahead limit is a hard-coded gigabyte. Make it 90% of however
+much RAM is still available, re-read as the pass runs, because other programs
+might claim memory.
+
+**What happened:** the budget is nine tenths of what the machine says is
+available *plus what the read-ahead is already holding*.
+
+The held bytes are memory this process has allocated, so the machine does not
+count them as available. Nine tenths of the available figure alone falls as the
+read-ahead fills: hold ten gigabytes, ask again, and ten gigabytes have gone from
+the answer. The readers would throttle themselves to a standstill while doing
+exactly what they were told. Adding back what is held gives the same budget
+whether the queue is full or empty, and still drops when something else on the
+machine takes memory, which is the whole point of asking again.
+
+`filling_the_read_ahead_does_not_shrink_the_budget` is the check. Without the
+addition it reads 5.4 gigabytes where it should read 9, and falls further with
+every file.
+
+**Rule:** a limit worked out from a resource the program itself consumes has to
+account for its own consumption, or it eats itself.
+
 
 ## The shape of the work so far
 

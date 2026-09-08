@@ -408,32 +408,73 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
 /// others sat idle with nothing to decode.
 const READERS: usize = 64;
 
-/// How many bytes of already-read files may be waiting to be decoded.
-///
-/// The readers run ahead of the decoders and stop when this much is in hand, so a
-/// folder of large pictures does not pull itself into memory all at once. Small
-/// enough to be nothing on a machine with gigabytes, large enough to keep every
-/// core fed through a slow patch of the network.
-const READ_AHEAD_BYTES: u64 = 1 << 30;
+/// How many bytes of already-read files may be waiting to be decoded when the
+/// machine will not say how much memory it has.
+const FALLBACK_READ_AHEAD: u64 = 1 << 30;
+
+/// How long an answer about available memory is used before it is asked for
+/// again, and how long a waiting reader sleeps before looking at the budget on
+/// its own.
+const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Bytes of read-but-not-yet-decoded files, and the wait for room.
 struct ReadAhead {
     held: std::sync::Mutex<u64>,
     room: std::sync::Condvar,
+    /// How much memory the machine has to spare.
+    available: Box<dyn Fn() -> Option<u64> + Send + Sync>,
+    last: std::sync::Mutex<Option<(std::time::Instant, Option<u64>)>>,
 }
 
 impl ReadAhead {
     fn new() -> Self {
-        ReadAhead { held: std::sync::Mutex::new(0), room: std::sync::Condvar::new() }
+        Self::asking(Box::new(crate::memory::available_bytes))
+    }
+
+    fn asking(available: Box<dyn Fn() -> Option<u64> + Send + Sync>) -> Self {
+        ReadAhead {
+            held: std::sync::Mutex::new(0),
+            room: std::sync::Condvar::new(),
+            available,
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// How much may be in hand: nine tenths of what the machine has to spare
+    /// plus what is already held, which the machine does not count as available.
+    fn budget(&self, held: u64) -> u64 {
+        match self.available_now() {
+            Some(spare) => spare.saturating_add(held) / 10 * 9,
+            None => FALLBACK_READ_AHEAD,
+        }
+    }
+
+    /// The last answer, asked again when it is older than `LOOK_AGAIN`.
+    fn available_now(&self) -> Option<u64> {
+        let mut last = self.last.lock().expect("the read-ahead budget");
+        if let Some((asked, answer)) = *last {
+            if asked.elapsed() < LOOK_AGAIN {
+                return answer;
+            }
+        }
+        let answer = (self.available)();
+        *last = Some((std::time::Instant::now(), answer));
+        answer
     }
 
     /// Wait until this many bytes fit, then claim them. A single file larger than
     /// the whole budget is let through on its own rather than waiting for room
-    /// that will never exist.
+    /// that will never exist. The wait is timed: room also appears when
+    /// something else on the machine gives memory back, which nothing announces.
     fn claim(&self, bytes: u64, cancel: &AtomicBool) {
         let mut held = self.held.lock().expect("the read-ahead budget");
-        while *held > 0 && *held + bytes > READ_AHEAD_BYTES && !cancel.load(Ordering::Relaxed) {
-            held = self.room.wait(held).expect("the read-ahead budget");
+        while *held > 0
+            && *held + bytes > self.budget(*held)
+            && !cancel.load(Ordering::Relaxed)
+        {
+            let (next, _) =
+                self.room.wait_timeout(held, LOOK_AGAIN).expect("the read-ahead budget");
+            held = next;
         }
         *held += bytes;
     }
@@ -1206,6 +1247,95 @@ mod tests {
         assert_eq!(fingerprinted, 12, "rows reached the file without their fingerprints");
         // And how far the pass reached, which the pass writes itself.
         assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("1"));
+    }
+
+    /// A read-ahead told what the machine has to spare.
+    fn read_ahead_with(spare: std::sync::Arc<std::sync::atomic::AtomicU64>) -> ReadAhead {
+        ReadAhead::asking(Box::new(move || Some(spare.load(Ordering::Relaxed))))
+    }
+
+    const GB: u64 = 1 << 30;
+
+    #[test]
+    fn the_budget_is_ninety_percent_of_what_is_available() {
+        let spare = std::sync::Arc::new(AtomicU64::new(10 * GB));
+        let read_ahead = read_ahead_with(spare);
+        assert_eq!(read_ahead.budget(0), 9 * GB);
+    }
+
+    /// The budget is the same whether the read-ahead is empty or holding four
+    /// gigabytes of the memory it is worked out from.
+    #[test]
+    fn filling_the_read_ahead_does_not_shrink_the_budget() {
+        let empty = read_ahead_with(std::sync::Arc::new(AtomicU64::new(10 * GB)));
+        assert_eq!(empty.budget(0), 9 * GB);
+
+        // The same machine with four gigabytes of files read and waiting.
+        let filled = read_ahead_with(std::sync::Arc::new(AtomicU64::new(6 * GB)));
+        assert_eq!(filled.budget(4 * GB), 9 * GB);
+    }
+
+    #[test]
+    fn a_program_taking_memory_takes_the_budget_with_it() {
+        let spare = std::sync::Arc::new(AtomicU64::new(10 * GB));
+        let read_ahead = read_ahead_with(std::sync::Arc::clone(&spare));
+        assert_eq!(read_ahead.budget(0), 9 * GB);
+
+        spare.store(2 * GB, Ordering::Relaxed);
+        std::thread::sleep(LOOK_AGAIN);
+        assert_eq!(read_ahead.budget(0), 2 * GB / 10 * 9);
+    }
+
+    /// A waiting reader takes up memory the machine gave back, with no decode
+    /// having finished and nothing released.
+    #[test]
+    fn a_reader_waits_until_the_budget_grows_rather_than_for_a_release() {
+        let spare = std::sync::Arc::new(AtomicU64::new(GB));
+        let read_ahead = std::sync::Arc::new(read_ahead_with(std::sync::Arc::clone(&spare)));
+        // Something already in hand, so the file that follows waits rather than
+        // being let through as one too big for the budget.
+        read_ahead.claim(GB / 2, &AtomicBool::new(false));
+
+        let waiting = std::sync::Arc::clone(&read_ahead);
+        let claimed = std::thread::spawn(move || {
+            waiting.claim(4 * GB, &AtomicBool::new(false));
+        });
+
+        // Nothing is released. The machine simply has more to spare.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        spare.store(100 * GB, Ordering::Relaxed);
+
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !claimed.is_finished() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(claimed.is_finished(), "the reader slept through the memory it was waiting for");
+        claimed.join().expect("the reader");
+    }
+
+    #[test]
+    fn a_file_larger_than_the_whole_budget_is_let_through() {
+        let spare = std::sync::Arc::new(AtomicU64::new(GB));
+        let read_ahead = read_ahead_with(spare);
+        let cancel = AtomicBool::new(false);
+        read_ahead.claim(8 * GB, &cancel);
+        assert_eq!(*read_ahead.held.lock().expect("held"), 8 * GB);
+    }
+
+    #[test]
+    fn a_machine_that_will_not_say_gets_the_fallback() {
+        let read_ahead = ReadAhead::asking(Box::new(|| None));
+        assert_eq!(read_ahead.budget(0), FALLBACK_READ_AHEAD);
+        assert_eq!(read_ahead.budget(4 * GB), FALLBACK_READ_AHEAD);
+    }
+
+    /// The platform code answers with a believable number on the machine this
+    /// is running on.
+    #[test]
+    fn the_machine_says_how_much_memory_is_available() {
+        let spare = crate::memory::available_bytes().expect("the machine says nothing about memory");
+        assert!(spare > 0, "the machine says it has no memory available");
+        assert!(spare < 1 << 50, "the machine claims a petabyte of memory: {spare}");
     }
 
     #[test]
