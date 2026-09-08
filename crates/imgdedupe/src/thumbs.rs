@@ -184,24 +184,10 @@ const SCREEN_WORKERS: usize = 24;
 /// being decoded that a scroll has to wait behind.
 const BACKGROUND_WORKERS: usize = 4;
 
-/// How a picture is coloured when it is drawn.
-///
-/// Not something the drawing can do for itself: a tint multiplies, and grey is
-/// not a multiple of the colours it came from. So a picture wanted in grey is a
-/// picture of its own, made from the same bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Shade {
-    /// As the file has it.
-    Colour,
-    /// What a set that is going reads as: the picture drained of its colour and
-    /// pushed towards red.
-    RedGrey,
-}
-
-/// A file at one size in one shade. The grid and the pane beside it want
-/// different sizes of the same picture, and those are different pictures as far
-/// as the texture is concerned.
-type Key = (i64, u32, Shade);
+/// A file at one size. The grid and the pane beside it want different sizes of
+/// the same picture, and those are different pictures as far as the texture is
+/// concerned.
+type Key = (i64, u32);
 
 struct Decoded {
     key: Key,
@@ -253,7 +239,7 @@ impl Thumbnails {
                     }
                 };
                 let started = std::time::Instant::now();
-                let image = load(&path, key.1).map(|image| shaded(image, key.2));
+                let image = load(&path, key.1);
                 let took = started.elapsed().as_secs_f64();
                 if result_tx.send(Decoded { key, image, result, took }).is_err() {
                     return;
@@ -350,11 +336,10 @@ impl Thumbnails {
         &mut self,
         file_id: i64,
         edge: u32,
-        shade: Shade,
         root: &Path,
         rel_path: &str,
     ) -> Option<TextureHandle> {
-        let key = (file_id, edge, shade);
+        let key = (file_id, edge);
         if let Some(handle) = self.textures.get(&key).cloned() {
             return Some(handle);
         }
@@ -369,13 +354,13 @@ impl Thumbnails {
     fn upload(&mut self, key: Key) -> Option<TextureHandle> {
         let painter = self.painter.clone()?;
         let image = self.ready.remove(&key)?;
-        let (file_id, edge, shade) = key;
+        let (file_id, edge) = key;
         let at = std::time::Instant::now();
-        let name = match shade {
-            Shade::Colour => format!("preview{edge}-{file_id}"),
-            Shade::RedGrey => format!("preview{edge}-{file_id}-redgrey"),
-        };
-        let handle = painter.load_texture(name, image, TextureOptions::default());
+        let handle = painter.load_texture(
+            format!("preview{edge}-{file_id}"),
+            image,
+            TextureOptions::default(),
+        );
         self.tally.uploading += at.elapsed().as_secs_f64();
         self.textures.insert(key, handle.clone());
         Some(handle)
@@ -392,9 +377,7 @@ impl Thumbnails {
         let lanes = Arc::clone(&self.lanes);
         let mut queues = lanes.queues.lock().expect("the thumbnail queues");
         for (file_id, rel_path) in members {
-            // In colour. A set is only drawn in grey once somebody has said to
-            // clear it out, and that is a picture nobody has asked for yet.
-            let key = (file_id, edge, Shade::Colour);
+            let key = (file_id, edge);
             if self.textures.contains_key(&key) || !self.pending.insert(key) {
                 continue;
             }
@@ -480,29 +463,6 @@ fn load(path: &Path, edge: u32) -> Option<ColorImage> {
     Some(ColorImage::from_rgb(size, upright.as_raw()))
 }
 
-/// The picture as the shade wants it.
-fn shaded(image: ColorImage, shade: Shade) -> ColorImage {
-    match shade {
-        Shade::Colour => image,
-        Shade::RedGrey => red_grey(image),
-    }
-}
-
-/// How much of the grey the red channel gets. Two, so a picture on its way out
-/// reads as red at a glance without any of it going to black.
-const RED_LIFT: u16 = 2;
-
-/// The picture drained to `(R + G + B) / 3` and pushed towards red.
-fn red_grey(mut image: ColorImage) -> ColorImage {
-    for pixel in &mut image.pixels {
-        let grey =
-            (pixel.r() as u16 + pixel.g() as u16 + pixel.b() as u16) / 3;
-        let red = (grey * RED_LIFT).min(255) as u8;
-        *pixel = egui::Color32::from_rgba_premultiplied(red, grey as u8, grey as u8, pixel.a());
-    }
-    image
-}
-
 /// Which way up the file says its picture goes.
 ///
 /// A raw file is shown through the preview inside it, and the preview is written
@@ -571,36 +531,6 @@ mod tests {
     }
 
     #[test]
-    /// What a set on its way out is drawn in: no colour of its own left, and
-    /// what is left pushed towards red.
-    #[test]
-    fn a_picture_drained_to_red_grey_keeps_no_colour_but_red() {
-        let image = ColorImage {
-            size: [3, 1],
-            pixels: vec![
-                egui::Color32::from_rgb(30, 60, 90),
-                egui::Color32::from_rgb(0, 0, 0),
-                egui::Color32::from_rgb(255, 255, 255),
-            ],
-        };
-
-        let out = red_grey(image);
-
-        // (30 + 60 + 90) / 3 is 60, and the red channel is twice that.
-        assert_eq!(out.pixels[0], egui::Color32::from_rgb(120, 60, 60));
-        assert_eq!(out.pixels[1], egui::Color32::from_rgb(0, 0, 0), "black gained something");
-        assert_eq!(
-            out.pixels[2],
-            egui::Color32::from_rgb(255, 255, 255),
-            "white was pushed past what a channel holds"
-        );
-        for pixel in &out.pixels {
-            assert_eq!(pixel.g(), pixel.b(), "a colour survived the draining");
-            assert!(pixel.r() >= pixel.g(), "the red channel was not the lifted one");
-        }
-    }
-
-    #[test]
     fn loading_reduces_to_the_preview_size() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("a.png");
@@ -666,7 +596,7 @@ mod tests {
         let first = &wanted[0];
         while !thumbs.pending.is_empty() {
             thumbs.collect(&ctx);
-            thumbs.get(first.0, THUMB_EDGE, Shade::Colour, dir.path(), &first.1);
+            thumbs.get(first.0, THUMB_EDGE, dir.path(), &first.1);
         }
         assert_eq!(thumbs.textures.len() + thumbs.ready.len(), wanted.len());
         assert_eq!(thumbs.tally.failed, 0);
@@ -721,7 +651,7 @@ mod tests {
         let (_, _) = fill(&mut thumbs, &ctx, dir.path(), std::slice::from_ref(&quick));
         assert_eq!(thumbs.textures.len(), 1);
         thumbs.collect(&ctx);
-        assert!(thumbs.get(slow.0, THUMB_EDGE, Shade::Colour, dir.path(), &slow.1).is_none());
+        assert!(thumbs.get(slow.0, THUMB_EDGE, dir.path(), &slow.1).is_none());
         thumbs.collect(&ctx);
 
         thumbs.forget();
@@ -767,14 +697,14 @@ mod tests {
         let first = &wanted[0];
         while !thumbs.pending.is_empty() {
             thumbs.collect(&ctx);
-            thumbs.get(first.0, THUMB_EDGE, Shade::Colour, dir.path(), &first.1);
+            thumbs.get(first.0, THUMB_EDGE, dir.path(), &first.1);
         }
 
         assert_eq!(thumbs.textures.len(), 1, "a picture nobody drew was uploaded");
         assert_eq!(thumbs.ready.len(), count - 1);
 
         let other = &wanted[5];
-        assert!(thumbs.get(other.0, THUMB_EDGE, Shade::Colour, dir.path(), &other.1).is_some());
+        assert!(thumbs.get(other.0, THUMB_EDGE, dir.path(), &other.1).is_some());
         assert_eq!(thumbs.textures.len(), 2);
     }
 
@@ -801,7 +731,7 @@ mod tests {
         let last = &wanted[count - 1];
         while !thumbs.pending.is_empty() {
             thumbs.collect(&ctx);
-            thumbs.get(last.0, THUMB_EDGE, Shade::Colour, dir.path(), &last.1);
+            thumbs.get(last.0, THUMB_EDGE, dir.path(), &last.1);
         }
 
         assert_eq!(thumbs.textures.len() + thumbs.ready.len(), count);
@@ -824,13 +754,13 @@ mod tests {
         // The frame the big picture is on screen for, and the frame after it has
         // been scrolled past.
         thumbs.collect(&ctx);
-        assert!(thumbs.get(big.0, THUMB_EDGE, Shade::Colour, dir.path(), &big.1).is_none());
+        assert!(thumbs.get(big.0, THUMB_EDGE, dir.path(), &big.1).is_none());
         thumbs.collect(&ctx);
-        assert!(thumbs.get(small.0, THUMB_EDGE, Shade::Colour, dir.path(), &small.1).is_none());
+        assert!(thumbs.get(small.0, THUMB_EDGE, dir.path(), &small.1).is_none());
 
         let (took, _) = fill(&mut thumbs, &ctx, dir.path(), std::slice::from_ref(&small));
         assert!(
-            !thumbs.textures.contains_key(&(big.0, THUMB_EDGE, Shade::Colour)),
+            !thumbs.textures.contains_key(&(big.0, THUMB_EDGE)),
             "the picture on screen only arrived once the one scrolled past had, in {took:.2}s"
         );
     }
@@ -851,9 +781,7 @@ mod tests {
             frames += 1;
             let missing = on_screen
                 .iter()
-                .filter(|(id, path)| {
-                    thumbs.get(*id, THUMB_EDGE, Shade::Colour, root, path).is_none()
-                })
+                .filter(|(id, path)| thumbs.get(*id, THUMB_EDGE, root, path).is_none())
                 .count();
             if missing == 0 {
                 return (started.elapsed().as_secs_f64(), frames);

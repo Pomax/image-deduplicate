@@ -25,7 +25,7 @@ Every rule in the issue follows from these four states.
 - [ ] 4. The buttons under a set
 - [ ] 5. Auto-mark to keep
 - [ ] 6. "automatically mark to keep" on the scan page
-- [ ] 7. A set marked for clearing out is drawn faded and red-grey
+- [ ] 7. A set marked for clearing out is drawn faded
 - [ ] 8. Named tests for each of the above
 - [ ] 9. Update `docs/tests.md`
 - [ ] 10. Run the named tests, then build
@@ -51,8 +51,6 @@ Every rule in the issue follows from these four states.
   nothing writes to it afterwards.
 - Members are sorted by `mtime_ms`, oldest first, with `rel_path` breaking a tie,
   rather than by the best candidate and then the path.
-- `DuplicateSet::recoverable_bytes` counts everything but the keeper, which is
-  not a rule any more, and nothing outside its own test calls it. It goes.
 
 ## 3. Toggling a mark, and the end of multi-select
 
@@ -64,6 +62,9 @@ Every rule in the issue follows from these four states.
 - `keep_selected` always toggles: marked becomes unmarked, unmarked becomes
   marked, and marking one never unmarks another. The branch on `multi_select`
   goes with it.
+- Shift with either of them says which picture instead of toggling one:
+  `keep_only_selected` makes the selected picture the one thing its set marks,
+  and pressing it again leaves that mark alone.
 - `Keep::All` goes. `Keep::One` and `Keep::Several` stay, and a set keeping
   nothing has no entry, as now.
 - The `multi_select` field, its checkbox and `remember_multi_select` go, and
@@ -77,10 +78,15 @@ Every rule in the issue follows from these four states.
   the window beside the ignored ones. Not written to the index: the issue calls
   it an internal flag, and it is a decision about one sitting.
 - `SetAction::KeepAll` clears the set's marks.
-- `SetAction::KeepNone` turns the flag on and off. Its button reads "undo" while
-  the flag is on.
-- Every button under a flagged set stays usable, unlike an ignored one.
-- `SetAction::Ignore` on a flagged set clears the flag as it ignores the set.
+- `SetAction::KeepNone` turns the flag on and off. Its button reads "keeping
+  none" while the flag is on, and the pictures of the set are each crossed off
+  with a red X at full strength over the faded picture.
+- A flagged set answers to that one button only, the way an ignored set answers
+  only to "ignored". Each button is drawn to the widest word it can ever say, so
+  a label changing does not move the buttons beside it.
+- `SetAction::Ignore` on a flagged set clears the flag as it ignores the set. The
+  buttons make that unreachable, but the two states are exclusive wherever they
+  are set.
 - `build_plan` hands each set its `Fate` instead of writing `auto_keep` onto its
   members.
 
@@ -104,17 +110,12 @@ Every rule in the issue follows from these four states.
   unticked by the person, while it is on.
 - When it is on, the end of a scan does what the button does.
 
-## 7. A set marked for clearing out is drawn faded and red-grey
+## 7. A set marked for clearing out is drawn faded
 
-`crates/imgdedupe/src/thumbs.rs`, `crates/imgdedupe/src/app.rs`
+`crates/imgdedupe/src/app.rs`
 
-- The pictures of a flagged set are drawn at 25% opacity, the way an ignored
-  set's are.
-- They are also drawn in red-grey: `(R + G + B) / 3`, with red at twice that, to
-  start with. A tint cannot do this — drawing multiplies, and grey is not a
-  multiple of the colours — so it is a texture of its own, made in the loading
-  path from the same reduced picture and held under a key that says which of the
-  two it is. Nothing asks for it until a set is flagged.
+- The pictures of a flagged set are drawn at 25% opacity, exactly the way an
+  ignored set's are, and nothing else about them changes.
 
 ## 8. Named tests for each of the above
 
@@ -122,12 +123,15 @@ Every rule in the issue follows from these four states.
 - Members of a set come back oldest first.
 - Space toggles the selected picture's mark on, and off again.
 - Marking a second picture keeps both.
+- Shift and space leaves the selected picture as the only thing its set marks,
+  and pressing it again leaves that mark alone.
 - A cleanup takes nothing from a set with no marks, everything but the marks
   from a set with some, everything from a flagged set, and nothing from an
   ignored one.
 - "keep all" leaves the set with no marks.
-- "keep none" reads "undo" while the flag is on, and every button under the set
-  is usable; only "unignore" is usable under an ignored one.
+- "keep none" reads "keeping none" while the flag is on, and it is the only
+  button a flagged set answers to; only "ignored" is usable under an ignored one.
+- A button changing its word does not move the buttons beside it.
 - "ignore" on a flagged set leaves it ignored and not flagged.
 - "auto-mark to keep" marks the best candidate in a set with nothing marked, and
   adds it to a set that marks something else without disturbing that.
@@ -136,7 +140,7 @@ Every rule in the issue follows from these four states.
   usable when it is on, and comes back from the index when the folder is opened
   again.
 - A scan with it on leaves every set marking its best candidate.
-- A flagged set's pictures are drawn faded and red-grey.
+- A flagged set's pictures are drawn faded and its buttons are not.
 
 ## 9. Update `docs/tests.md`
 

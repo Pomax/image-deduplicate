@@ -113,31 +113,18 @@ fn move_to(path: &Path, rel_path: &str, target: &Path) -> std::result::Result<()
     }
 }
 
-/// What a review says is to happen to one set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fate<'a> {
-    /// The pictures marked to keep. Everything else in the set goes, and a set
-    /// that marks nothing is a set nobody has reached yet, so none of it does.
-    Keeping(&'a [i64]),
-    /// Every picture in the set goes, marks or no marks.
-    CleanAll,
-}
-
-/// Build a plan from what a review says about each set.
+/// Build a plan from each set and the pictures in it marked to keep.
 ///
-/// A set nobody says anything about is not passed in at all, which is what
-/// happens to one that has been ignored. The count is on the button that carries
-/// the plan out.
+/// What is marked is kept and everything else goes, including every picture of a
+/// set that marks nothing. A set nobody says anything about is not passed in at
+/// all, which is what happens to one that has been ignored. The count is on the
+/// button that carries the plan out.
 pub fn plan_from_sets<'a>(
-    sets: impl IntoIterator<Item = (&'a [crate::matching::Member], Fate<'a>)>,
+    sets: impl IntoIterator<Item = (&'a [crate::matching::Member], &'a [i64])>,
 ) -> Plan {
     let mut plan = Plan::default();
-    for (members, fate) in sets {
-        let goes = |member: &crate::matching::Member| match fate {
-            Fate::Keeping(kept) => !kept.is_empty() && !kept.contains(&member.file_id),
-            Fate::CleanAll => true,
-        };
-        for member in members.iter().filter(|member| goes(member)) {
+    for (members, kept) in sets {
+        for member in members.iter().filter(|member| !kept.contains(&member.file_id)) {
             plan.removals.push(Removal {
                 file_id: member.file_id,
                 rel_path: member.rel_path.clone(),
@@ -153,7 +140,7 @@ mod tests {
     use super::*;
     use crate::matching::Member;
 
-    fn member(id: i64, path: &str, size: i64, best: bool) -> Member {
+    fn member(id: i64, path: &str, size: i64, auto_keep: bool) -> Member {
         Member {
             file_id: id,
             rel_path: path.to_string(),
@@ -163,7 +150,7 @@ mod tests {
             channels: 3,
             size_bytes: size,
             mtime_ms: 1,
-            best,
+            auto_keep,
         }
     }
 
@@ -196,36 +183,26 @@ mod tests {
             member(2, "drop.jpg", 300, false),
             member(3, "drop2.jpg", 200, false),
         ];
-        let plan = plan_from_sets([(members.as_slice(), Fate::Keeping(&[1]))]);
+        let plan = plan_from_sets([(members.as_slice(), [1].as_slice())]);
         assert_eq!(plan.files(), 2);
         assert_eq!(plan.bytes(), 500);
         assert!(!plan.to_text().contains("keep.jpg"));
     }
 
-    /// A set nobody has marked is a set nobody has reached, and a review that is
-    /// half done does not delete the half that was not looked at.
+    /// What is marked is kept, so a set that marks nothing keeps nothing and
+    /// every picture in it goes.
     #[test]
-    fn a_set_with_nothing_marked_loses_none_of_it() {
+    fn a_set_with_nothing_marked_loses_all_of_it() {
         let members = vec![member(1, "a.jpg", 100, false), member(2, "b.jpg", 100, false)];
-        let plan = plan_from_sets([(members.as_slice(), Fate::Keeping(&[]))]);
-        assert_eq!(plan.files(), 0);
-        assert_eq!(plan.bytes(), 0);
+        let plan = plan_from_sets([(members.as_slice(), [].as_slice())]);
+        assert_eq!(plan.files(), 2);
+        assert_eq!(plan.bytes(), 200);
     }
 
     #[test]
     fn a_set_with_everything_marked_loses_none_of_it() {
         let members = vec![member(1, "a.jpg", 100, true), member(2, "b.jpg", 100, true)];
-        assert_eq!(plan_from_sets([(members.as_slice(), Fate::Keeping(&[1, 2]))]).files(), 0);
-    }
-
-    /// The one way to clear a whole set out, which a person says with a button
-    /// rather than by leaving the set alone.
-    #[test]
-    fn a_set_marked_to_be_cleared_out_loses_all_of_it() {
-        let members = vec![member(1, "a.jpg", 100, true), member(2, "b.jpg", 100, false)];
-        let plan = plan_from_sets([(members.as_slice(), Fate::CleanAll)]);
-        assert_eq!(plan.files(), 2);
-        assert_eq!(plan.bytes(), 200);
+        assert_eq!(plan_from_sets([(members.as_slice(), [1, 2].as_slice())]).files(), 0);
     }
 
     /// The window shows a bar while files are going, so the removal has to count

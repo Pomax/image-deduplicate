@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use eframe::egui;
-use imgdedupe_core::cleanup::{self, Disposal, Fate, Plan};
+use imgdedupe_core::cleanup::{self, Disposal, Plan};
 use imgdedupe_core::db;
 use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
 use imgdedupe_core::scan;
@@ -637,6 +637,9 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
 /// the row lays them out with.
 const BUTTON_ROW_GAP: f32 = 2.0;
 
+/// How far in from the left edge of the box the row of buttons starts.
+const BUTTON_ROW_INSET: f32 = 5.0;
+
 /// The band those buttons sit on.
 const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
 
@@ -745,11 +748,10 @@ const STRIP_TO_BAR: f32 = 6.0;
 /// Kept between one set and the next.
 const BETWEEN_BOXES: f32 = 12.0;
 
-/// How much of a set that has been answered is drawn: the pictures and every
-/// line of writing under them, but not the row of buttons, which is how the
-/// answer is taken back. A set nobody calls a set of copies, and a set said to
-/// be cleared out entirely, are both answered.
-const ANSWERED_OPACITY: f32 = 0.25;
+/// How much of a set nobody calls a set of copies is drawn: the pictures and
+/// every line of writing under them, but not the row of buttons, which is how it
+/// stops being ignored.
+const IGNORED_OPACITY: f32 = 0.25;
 
 /// The line the box is drawn with, on each side.
 const BOX_EDGE: f32 = 1.0;
@@ -1271,10 +1273,6 @@ pub struct App {
     /// The keep marks per set, held here and not in the index: a review session
     /// is not a fact about a file on disk.
     keep: HashMap<i64, Keep>,
-    /// The sets somebody has said to clear out entirely. Held here beside the
-    /// marks, and for the same reason: it is something said while reviewing, not
-    /// a fact about the files.
-    clean_all: std::collections::HashSet<i64>,
 
     destination: Destination,
     move_dir: String,
@@ -1396,7 +1394,6 @@ impl App {
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sets: Vec::new(),
             keep: HashMap::new(),
-            clean_all: std::collections::HashSet::new(),
             destination: Destination::Trash,
             move_dir: String::new(),
             removing: None,
@@ -2676,7 +2673,6 @@ impl App {
     fn accept_sets(&mut self, sets: Vec<DuplicateSet>) {
         runlog::log_line!("found {} duplicate sets", sets.len());
         self.keep.clear();
-        self.clean_all.clear();
         self.selected = None;
         self.showing = None;
         // The pictures were read against the index as it stood for the last
@@ -2801,7 +2797,11 @@ impl App {
             }
         }
         if ui.input(|input| input.key_pressed(egui::Key::Space)) {
-            self.keep_selected();
+            if ui.input(|input| input.modifiers.shift) {
+                self.keep_only_selected();
+            } else {
+                self.keep_selected();
+            }
         }
 
         self.preview_pane(ui, &root);
@@ -2891,10 +2891,6 @@ impl App {
         };
         let pairs: Vec<(i64, i64)> = pairs_of(set).collect();
         self.ignored.extend(pairs.iter().copied());
-        // Saying it is not a set of copies at all outranks saying to clear it
-        // out: nothing goes from a set nobody calls a set, so the two cannot
-        // both stand.
-        self.clean_all.remove(&set_id);
         // What the set kept stays with it, and so does where the preview was.
         // Neither is acted on while it is ignored: nothing goes from a set that
         // is not a set of copies, and no ring is drawn round a picture in one.
@@ -3063,15 +3059,15 @@ impl App {
     ///
     /// It only ever adds. A set that already marks something keeps that and
     /// gains the best copy as well, unless that is what it already marks. A set
-    /// nobody calls a set of copies, and a set said to be cleared out, are both
-    /// answers already given, so neither gets a mark.
+    /// nobody calls a set of copies is an answer already given, so it gets no
+    /// mark.
     fn auto_mark_to_keep(&mut self) {
         let best: Vec<(i64, i64)> = self
             .sets
             .iter()
-            .filter(|set| !self.is_ignored(set) && !self.clean_all.contains(&set.set_id))
+            .filter(|set| !self.is_ignored(set))
             .filter_map(|set| {
-                let best = set.members.iter().find(|member| member.best)?;
+                let best = set.members.iter().find(|member| member.auto_keep)?;
                 Some((set.set_id, best.file_id))
             })
             .collect();
@@ -3120,6 +3116,29 @@ impl App {
             Some(keep) => self.keep.insert(set_id, keep),
             None => self.keep.remove(&set_id),
         };
+    }
+
+    /// Make the picture the preview is showing the one thing its set keeps,
+    /// which is what shift and the space bar, or shift and a double click, do.
+    ///
+    /// Not a toggle. It says which picture, so pressing it on the one already
+    /// marked leaves it marked, and every other mark in that set comes off.
+    fn keep_only_selected(&mut self) {
+        let Some(file_id) = self.selected else {
+            return;
+        };
+        let Some(set) =
+            self.sets.iter().find(|set| set.members.iter().any(|member| member.file_id == file_id))
+        else {
+            return;
+        };
+        // As with the toggle: a set nobody calls a set of copies keeps nothing
+        // and loses nothing, and what it kept is left as it was.
+        if self.is_ignored(set) {
+            return;
+        }
+        let set_id = set.set_id;
+        self.keep.insert(set_id, Keep::One(file_id));
     }
 
     /// Where the preview is in the list on screen, as a set and a place in it.
@@ -3269,13 +3288,8 @@ impl App {
                 // about itself takes the rest, so there is always a picture and
                 // always somewhere for the words to go.
                 let room = egui::vec2(ui.available_width(), ui.available_height() * 0.62);
-                let wanted = self.thumbs.get(
-                    member.file_id,
-                    thumbs::LARGE_EDGE,
-                    thumbs::Shade::Colour,
-                    root,
-                    &member.rel_path,
-                );
+                let wanted =
+                    self.thumbs.get(member.file_id, thumbs::LARGE_EDGE, root, &member.rel_path);
                 if wanted.is_some() {
                     self.showing = self.selected;
                 }
@@ -3283,13 +3297,7 @@ impl App {
                 // stays there. Asking for it again is what keeps it alive.
                 let drawing = wanted.or_else(|| {
                     let (_, held) = held?;
-                    self.thumbs.get(
-                        held.file_id,
-                        thumbs::LARGE_EDGE,
-                        thumbs::Shade::Colour,
-                        root,
-                        &held.rel_path,
-                    )
+                    self.thumbs.get(held.file_id, thumbs::LARGE_EDGE, root, &held.rel_path)
                 });
 
                 ui.allocate_ui(room, |ui| {
@@ -3479,8 +3487,7 @@ impl App {
 
         let screen = ctx.screen_rect();
         let edge = (screen.width().max(screen.height()) * ctx.pixels_per_point()) as u32;
-        let picture =
-            self.thumbs.get(file_id, edge, thumbs::Shade::Colour, &root, &member.rel_path);
+        let picture = self.thumbs.get(file_id, edge, &root, &member.rel_path);
 
         egui::Area::new(egui::Id::new("filling the window"))
             .order(egui::Order::Foreground)
@@ -3532,7 +3539,6 @@ impl App {
         // as far from the list's scroll bar as it begins from the window's edge.
         let size = egui::vec2(width.max(0.0), set_row_height(ui));
         let ignored = self.is_ignored(&self.sets[index]);
-        let clean_all = self.clean_all.contains(&self.sets[index].set_id);
         // The row is the box and the space kept under it. The box is the top of
         // the row; the space below it is what separates one set from the next.
         let room = egui::Rect::from_min_size(ui.next_widget_position(), size);
@@ -3579,13 +3585,13 @@ impl App {
                 let bar = egui::Id::new(("set bar", set_id));
                 let (_, offset, viewport) = ui
                     .allocate_new_ui(egui::UiBuilder::new().max_rect(strip), |ui| {
-                        // A set that has been answered is barely there:
+                        // A set nobody calls a set of copies is barely there:
                         // everything above the buttons, the pictures and every
                         // line of writing under them, at a quarter of its
-                        // opacity. The buttons are how the answer is taken back,
-                        // so they are not faded with the rest of it.
-                        if ignored || clean_all {
-                            ui.set_opacity(ANSWERED_OPACITY);
+                        // opacity. The buttons are how it stops being ignored, so
+                        // they are not faded with the rest of it.
+                        if ignored {
+                            ui.set_opacity(IGNORED_OPACITY);
                         }
                         scrolled(
                             ui,
@@ -3614,11 +3620,6 @@ impl App {
                                                 root,
                                                 width,
                                                 ignored,
-                                                if clean_all {
-                                                    thumbs::Shade::RedGrey
-                                                } else {
-                                                    thumbs::Shade::Colour
-                                                },
                                             );
                                         }
                                     });
@@ -3669,7 +3670,9 @@ impl App {
                 let mut pressed = None;
                 ui.allocate_new_ui(
                     egui::UiBuilder::new()
-                        .max_rect(band)
+                        // In from the left edge of the box, so the line round the
+                        // first button is drawn rather than clipped away by it.
+                        .max_rect(band.with_min_x(band.left() + BUTTON_ROW_INSET))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
                         // The presets under the slider are a row of buttons the
@@ -3679,25 +3682,17 @@ impl App {
                         ui.spacing_mut().button_padding = PRESET_PADDING;
                         for (label, what, says) in [
                             ("keep all", SetAction::KeepAll, ["keep all"; 2]),
-                            // The second one undoes itself too, and says so: a
-                            // set being cleared out is one press away from being
-                            // an ordinary set again.
-                            (
-                                if clean_all { "undo" } else { "keep none" },
-                                SetAction::KeepNone,
-                                ["keep none", "undo"],
-                            ),
+                            ("keep none", SetAction::KeepNone, ["keep none"; 2]),
                             // The third one undoes itself: a set that has been
                             // ignored is one press away from being a set again.
                             (
-                                if ignored { "unignore" } else { "ignore" },
+                                if ignored { "ignored" } else { "ignore" },
                                 if ignored { SetAction::Unignore } else { SetAction::Ignore },
-                                ["ignore", "unignore"],
+                                ["ignore", "ignored"],
                             ),
                         ] {
                             // An ignored set keeps nothing, so the two about
-                            // keeping mean nothing until it is a set again. A set
-                            // being cleared out still answers to all three.
+                            // keeping mean nothing until it is a set again.
                             let usable = !ignored || what == SetAction::Unignore;
                             // As wide as the widest thing it can ever say. A
                             // button that fits its current word changes width
@@ -3713,15 +3708,22 @@ impl App {
                     },
                 );
                 match pressed {
-                    // Marked with nothing is a set nobody has reached, which is
-                    // a set nothing happens to.
+                    // Every picture in the set marked, and shown as marked. A
+                    // cleanup takes nothing from it, the same as a set nobody has
+                    // reached, but the set says so rather than looking untouched.
                     Some(SetAction::KeepAll) => {
-                        self.keep.remove(&set_id);
+                        let all: Vec<i64> =
+                            members.iter().map(|member| member.file_id).collect();
+                        match as_keep(all) {
+                            Some(keep) => self.keep.insert(set_id, keep),
+                            None => self.keep.remove(&set_id),
+                        };
                     }
+                    // Nothing in the set is marked to keep any more. By the rule
+                    // above that leaves the set losing nothing, the same as one
+                    // nobody has reached.
                     Some(SetAction::KeepNone) => {
-                        if !self.clean_all.remove(&set_id) {
-                            self.clean_all.insert(set_id);
-                        }
+                        self.keep.remove(&set_id);
                     }
                     Some(SetAction::Ignore) => self.ignore_set(set_id),
                     Some(SetAction::Unignore) => self.unignore_set(set_id),
@@ -3775,7 +3777,6 @@ impl App {
         root: &std::path::Path,
         width: f32,
         ignored: bool,
-        shade: thumbs::Shade,
     ) {
         // A set nobody calls a set of copies keeps nothing and shows nothing as
         // kept: no border and no ring. Half showing is the strip's business and
@@ -3811,16 +3812,12 @@ impl App {
 
                 let framed = frame.show(ui, |ui| {
                     // The same picture whether or not the set is ignored, which
-                    // is drawn at half its opacity rather than read again. A set
-                    // being cleared out is the one thing that needs a picture of
-                    // its own, because no amount of drawing turns a colour into
-                    // a grey.
+                    // is drawn at half its opacity rather than read again.
                     let picture = on_screen
                         .then(|| {
                             self.thumbs.get(
                                 member.file_id,
                                 thumbs::THUMB_EDGE,
-                                shade,
                                 root,
                                 &member.rel_path,
                             )
@@ -3858,10 +3855,15 @@ impl App {
                     self.selected = Some(member.file_id);
                 }
                 // Twice on a picture keeps it, which is the space bar on the one
-                // being shown, including that it takes the mark off again.
+                // being shown, including that it takes the mark off again and
+                // that holding shift marks it and nothing else.
                 if picked.double_clicked() {
                     self.selected = Some(member.file_id);
-                    self.keep_selected();
+                    if ui.input(|input| input.modifiers.shift) {
+                        self.keep_only_selected();
+                    } else {
+                        self.keep_selected();
+                    }
                 }
 
                 // Centred on the picture this tile is about. The picture sits in
@@ -4106,13 +4108,12 @@ impl App {
     /// always the count of what the button does.
     ///
     /// What is marked is kept and everything else in that set goes. A set marked
-    /// with nothing is a set nobody has reached, and none of it goes. A set said
-    /// to be cleared out goes entirely.
+    /// with nothing is a set nobody has reached, and none of it goes.
     fn build_plan(&self) -> Plan {
         // A set nobody calls a set of copies is a set nothing happens to: not
         // kept, not removed, not counted. The marks are spelled out here so each
         // list outlives the plan built from borrows of it.
-        let said: Vec<(&[imgdedupe_core::matching::Member], Vec<i64>, bool)> = self
+        let said: Vec<(&[imgdedupe_core::matching::Member], Vec<i64>)> = self
             .sets
             .iter()
             .filter(|set| !self.is_ignored(set))
@@ -4120,13 +4121,12 @@ impl App {
                 (
                     set.members.as_slice(),
                     self.keep.get(&set.set_id).map(Keep::marked).unwrap_or_default(),
-                    self.clean_all.contains(&set.set_id),
                 )
             })
             .collect();
-        cleanup::plan_from_sets(said.iter().map(|(members, marks, clean_all)| {
-            (*members, if *clean_all { Fate::CleanAll } else { Fate::Keeping(marks) })
-        }))
+        cleanup::plan_from_sets(
+            said.iter().map(|(members, marks)| (*members, marks.as_slice())),
+        )
     }
 
     /// Start removing. It runs on its own thread and says how far it has got,
@@ -4373,7 +4373,7 @@ mod tests {
             channels: 3,
             size_bytes: size,
             mtime_ms: 1_700_000_000_000,
-            best: false,
+            auto_keep: false,
         }
     }
 
@@ -5057,8 +5057,10 @@ mod tests {
                 .map(|member| member.size_bytes)
                 .sum()
         };
-        // Four pictures and nothing marked, so nothing is going.
-        assert_eq!(app.selected_for_removal(), (0, 0), "an untouched review would remove files");
+        // Four pictures and nothing marked, so all four are going.
+        let (going, bytes) = app.selected_for_removal();
+        assert_eq!(going, 4, "an untouched review was keeping something");
+        assert_eq!(bytes, bytes_of(&app, 0, -1) + bytes_of(&app, 1, -1));
 
         // One marked in each set leaves the other picture of each going.
         let kept_first = app.sets[0].members[0].file_id;
@@ -5069,14 +5071,8 @@ mod tests {
         assert_eq!(going, 2);
         assert_eq!(bytes, bytes_of(&app, 0, kept_first) + bytes_of(&app, 1, kept_second));
 
-        // Taking one set's marks off takes the whole set out of the tally.
+        // Taking one set's marks off puts the whole set back in the tally.
         app.keep.remove(&second);
-        let (going, bytes) = app.selected_for_removal();
-        assert_eq!(going, 1);
-        assert_eq!(bytes, bytes_of(&app, 0, kept_first));
-
-        // And saying to clear that set out puts both of its pictures in.
-        app.clean_all.insert(second);
         let (going, bytes) = app.selected_for_removal();
         assert_eq!(going, 3);
         assert_eq!(bytes, bytes_of(&app, 0, kept_first) + bytes_of(&app, 1, -1));
@@ -6259,8 +6255,8 @@ mod tests {
         let before = buttons(&draw(&mut app));
         assert_eq!(before.len(), 3, "three buttons were not drawn: {before:?}");
 
-        // "keep none" becomes "undo", which is five characters shorter.
-        app.clean_all.insert(set_id);
+        // "ignore" becomes "ignored", which is a character longer.
+        app.ignore_set(set_id);
         draw(&mut app);
         let after = buttons(&draw(&mut app));
 
@@ -6332,6 +6328,28 @@ mod tests {
             found
         };
         assert_eq!(boxes.len(), 3, "three buttons were not drawn: {boxes:?}");
+        // Inside the box, not against it. A button drawn hard against the box's
+        // edge has the line round it drawn half outside, and the clip along that
+        // edge takes that half away, so the button looks cut off down its side.
+        let box_rect = drawn
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.stroke.width > 0.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the set was not drawn in a box");
+        assert!(
+            boxes[0].left() > box_rect.left() + 2.0,
+            "the first button starts at {} inside a box that starts at {}",
+            boxes[0].left(),
+            box_rect.left()
+        );
         let first = boxes[1].left() - boxes[0].right();
         let second = boxes[2].left() - boxes[1].right();
         assert!(
@@ -6916,7 +6934,7 @@ mod tests {
 
         assert_eq!(app.sets.len(), 2, "the two pairs were not found again");
         for set in &app.sets {
-            let best = set.members.iter().find(|member| member.best).expect("a best copy");
+            let best = set.members.iter().find(|member| member.auto_keep).expect("a best copy");
             let keeping = app.keep.get(&set.set_id).expect("a set came back unmarked");
             assert!(keeping.keeps(best.file_id), "the best copy of a set was not marked");
         }
@@ -7065,200 +7083,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Every page of the window, drawn into picture files for the manual.
-    ///
-    /// A real folder, really scanned and really searched, so what the manual
-    /// shows is the window rather than a drawing of it. Ignored unless it is
-    /// asked for by name; the pictures go where `IMGDEDUPE_SHOT_DIR` says, or to
-    /// the temporary folder.
-    #[test]
-    #[ignore = "writes the pictures the manual is built from"]
-    fn the_pictures_for_the_manual() {
-        let found = folder_with_two_sets();
-        let mut app = reviewing(found.path());
-        app.keep_index = true;
-        app.recurse = true;
-        app.selected = app.sets[0].members.first().map(|member| member.file_id);
-
-        let ctx = window();
-        // The window as it ships, not the toolkit's own dark.
-        ctx.set_visuals(egui::Visuals::light());
-        // Wide enough for the whole of the scan page, which is three boxes in a
-        // row and a run of lamps under them.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 720.0));
-        let mut camera = crate::shot::Camera::default();
-        let folder = crate::shot::folder();
-
-        // Each page, drawn the way the window draws it: the tabs across the top
-        // and the page under them. Several frames each, because the pictures and
-        // the panel beside them arrive over a few.
-        let mut page = |app: &mut App, name: &str, view: View| {
-            app.view = view;
-            for _ in 0..10 {
-                let drawing = &mut *app;
-                camera.shoot(
-                    &ctx,
-                    egui::RawInput { screen_rect: Some(screen), ..Default::default() },
-                    |ctx| {
-                        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                for (label, on) in [
-                                    ("1  Scan", drawing.view == View::Scan),
-                                    ("2  Review", drawing.view == View::Review),
-                                    ("3  Clean up", drawing.view == View::Cleanup),
-                                ] {
-                                    ui.add(egui::SelectableLabel::new(on, label));
-                                }
-                            });
-                            ui.add_space(6.0);
-                        });
-                        let margin = match drawing.view {
-                            View::Cleanup | View::Review => egui::Margin::ZERO,
-                            _ => egui::Margin::symmetric(16.0, 12.0),
-                        };
-                        egui::CentralPanel::default()
-                            .frame(
-                                egui::Frame::central_panel(&ctx.style()).inner_margin(margin),
-                            )
-                            .show(ctx, |ui| match drawing.view {
-                                View::Scan => drawing.scan_view(ui),
-                                View::Review => drawing.review_view(ui),
-                                View::Cleanup => drawing.cleanup_view(ui),
-                            });
-                    },
-                    &folder.join(format!("manual-{name}.png")),
-                );
-                app.thumbs.collect(&ctx);
-            }
-        };
-
-        // The scan page is the one page that writes the folder's path on itself,
-        // in the folder row and in the first lamp. What is drawn there is a
-        // folder anybody could have, not the temporary one this ran against and
-        // not the name of whoever ran it. Nothing is pressed while it is set, so
-        // nothing goes looking for it.
-        let real = app.folder.clone();
-        app.folder = Some(PathBuf::from("D:\\Photos\\2026"));
-        page(&mut app, "scan", View::Scan);
-        app.folder = real;
-
-        page(&mut app, "review", View::Review);
-
-        // The same review with a set nobody calls a set of copies.
-        let second = app.sets[1].set_id;
-        app.ignore_set(second);
-        page(&mut app, "ignored", View::Review);
-        app.unignore_set(second);
-
-        page(&mut app, "cleanup", View::Cleanup);
-        println!("the manual's pictures are in {}", folder.display());
-    }
-
-    /// Draw the scan page into a picture file, so what it looks like can be
-    /// looked at. Names the file it wrote.
-    ///
-    /// Not a check of anything: it is the window, on paper, for whoever is
-    /// changing the layout. Ignored unless it is asked for by name.
-    #[test]
-    #[ignore = "writes a picture of the scan page instead of checking anything"]
-    fn a_picture_of_the_scan_page() {
-        let found = folder_with_two_sets();
-        let mut app = reviewing(found.path());
-        app.view = View::Scan;
-        app.keep_index = true;
-
-        let ctx = window();
-        ctx.set_visuals(egui::Visuals::light());
-        // Short, so the lamps are more than the room left for them and the bar
-        // beside the lamps is drawn.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 560.0));
-        let at = std::env::var_os("IMGDEDUPE_SHOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("scan.png"));
-        let mut camera = crate::shot::Camera::default();
-        for _ in 0..6 {
-            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-            let drawing = &mut app;
-            camera.shoot(
-                &ctx,
-                input,
-                |ctx| {
-                    egui::CentralPanel::default()
-                        .frame(
-                            egui::Frame::central_panel(&ctx.style())
-                                .inner_margin(egui::Margin::symmetric(16.0, 12.0)),
-                        )
-                        .show(ctx, |ui| drawing.scan_view(ui));
-                },
-                &at,
-            );
-        }
-        println!("the scan page is at {}", at.display());
-    }
-
-    /// Draw the review page into a picture file, so what it looks like can be
-    /// looked at. Names the file it wrote.
-    ///
-    /// Not a check of anything: it is the window, on paper, for whoever is
-    /// changing the layout. Ignored unless it is asked for by name.
-    #[test]
-    #[ignore = "writes a picture of the review page instead of checking anything"]
-    fn a_picture_of_the_review_page() {
-        let found = folder_with_two_sets();
-        let mut app = reviewing(found.path());
-        app.selected = app.sets[0].members.first().map(|member| member.file_id);
-        // A set wider than the box, so its own scroll bar is in the picture, and
-        // a set nobody calls a set of copies, so the faded look is in it too.
-        let held: Vec<_> = app.sets[0].members.clone();
-        app.sets[0].members = (0..12)
-            .map(|at| {
-                let mut member = held[at % held.len()].clone();
-                member.file_id = 100 + at as i64;
-                member
-            })
-            .collect();
-        if app.sets.len() > 1 {
-            let second = app.sets[1].clone();
-            for pair in pairs_of(&second) {
-                app.ignored.insert(pair);
-            }
-        }
-
-        let ctx = window();
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
-        // The picture is for looking at, so it is drawn the way the window is
-        // rather than in whatever the toolkit ships as its default.
-        ctx.set_visuals(egui::Visuals::light());
-        let mut camera = crate::shot::Camera::default();
-        let at = std::env::var_os("IMGDEDUPE_SHOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("review.png"));
-        // The pictures arrive over a few frames, and the panel settles on its
-        // width over one or two, so the frame worth looking at is not the first.
-        for _ in 0..8 {
-            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-            let drawing = &mut app;
-            camera.shoot(&ctx, input, |ctx| {
-                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("1  Scan");
-                        ui.label("2  Review");
-                    });
-                    ui.add_space(6.0);
-                });
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO),
-                    )
-                    .show(ctx, |ui| drawing.review_view(ui));
-            }, &at);
-            app.thumbs.collect(&ctx);
-        }
-        println!("the review page is at {}", at.display());
     }
 
     /// A set's own scroll bar runs the width of the box, edge to edge inside the
@@ -7567,71 +7391,113 @@ mod tests {
         );
     }
 
-    /// A set said to be cleared out is drawn the way an ignored one is — barely
-    /// there — and its buttons stay as they were, because all three of them are
-    /// still worth pressing.
+    /// Every line of a given colour drawn round something, however faded.
+    ///
+    /// A faded set is drawn at a quarter, and fading multiplies every channel of
+    /// a colour, alpha included. So the colour looked for is faded the same way
+    /// before it is compared, by however much the painted one was: an exact
+    /// comparison against the unfaded colour matches a set at full strength and
+    /// misses the faded one, which is an assertion that cannot fail.
+    fn outlined(drawn: &[egui::epaint::ClippedShape], colour: egui::Color32) -> usize {
+        let near = |painted: egui::Color32| {
+            let faded = colour.gamma_multiply(f32::from(painted.a()) / f32::from(colour.a()));
+            let (painted, faded) = (painted.to_array(), faded.to_array());
+            (0..3).all(|channel| painted[channel].abs_diff(faded[channel]) <= 2)
+        };
+        drawn
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.stroke.width >= 2.0 => near(rect.stroke.color),
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Draw one set over a really scanned folder, twice, and hand back the second
+    /// frame: what a picture shows takes a frame to settle.
+    fn set_frames(app: &mut App, ctx: &egui::Context, root: &std::path::Path) -> Vec<egui::epaint::ClippedShape> {
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let mut draw = || {
+            crate::shot::frame(
+                "a_set_drawn_for_what_it_shows",
+                ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| app.set_row(ui, 0, root, ui.available_width()));
+                },
+            )
+        };
+        draw();
+        draw()
+    }
+
+    /// Keeping a picture is two things on screen: a green border round it and
+    /// the word KEEP under it. A set that marks nothing draws neither, and the
+    /// marks are what decides it.
     #[test]
-    fn a_set_being_cleared_out_is_drawn_faded_and_its_buttons_are_not() {
+    fn a_marked_picture_is_drawn_with_a_border_and_an_unmarked_one_is_not() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
         let set_id = app.sets[0].set_id;
 
+        let root = found.path().to_path_buf();
         let ctx = window();
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
-        let draw = |app: &mut App| {
-            crate::shot::frame(
-                "a_set_being_cleared_out_is_drawn_faded_and_its_buttons_are_not",
-                &ctx,
-                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
-                |ctx| {
-                    egui::CentralPanel::default()
-                        .frame(
-                            egui::Frame::central_panel(&ctx.style())
-                                .inner_margin(egui::Margin::ZERO),
-                        )
-                        .show(ctx, |ui| app.review_view(ui));
-                },
-            )
-        };
+        let keep_colour = egui::Color32::from_rgb(90, 180, 110);
 
-        draw(&mut app);
-        let plain = draw(&mut app);
-        // Only what is in the list: the pane beside it names the same file and is
-        // not part of any set.
-        let list_ends = screen.right() - app.preview_width.expect("the preview pane was not drawn");
-        let alpha_of = |drawn: &[egui::epaint::ClippedShape], words: &str| -> Option<u8> {
-            drawn.iter().find_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text)
-                    if text.pos.x < list_ends && text.galley.text().contains(words) =>
-                {
-                    Some(text.fallback_color.a())
-                }
-                _ => None,
-            })
-        };
-        let strip = alpha_of(&plain, "one.png").expect("no file name was drawn under a picture");
-        let buttons = alpha_of(&plain, "keep all").expect("no buttons were drawn under the set");
+        // A review arrives marking nothing.
+        let plain = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&plain, keep_colour), 0, "something was drawn as kept already");
+        assert!(label_rects(&plain, "KEEP").is_empty(), "something said KEEP already");
 
-        app.clean_all.insert(set_id);
-        draw(&mut app);
-        let faded = draw(&mut app);
+        app.keep.insert(set_id, Keep::One(app.sets[0].members[0].file_id));
+        let marked = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&marked, keep_colour), 1, "the marked picture had no border");
+        assert_eq!(label_rects(&marked, "KEEP").len(), 1, "nothing said KEEP");
 
-        let now =
-            alpha_of(&faded, "one.png").expect("the file name went when the set was cleared out");
-        let wanted = f32::from(strip) * ANSWERED_OPACITY;
-        assert!(
-            (f32::from(now) - wanted).abs() <= 2.0,
-            "the writing under the pictures went from {strip} to {now}, and not to {wanted}"
-        );
-        assert_eq!(
-            alpha_of(&faded, "keep all"),
-            Some(buttons),
-            "the buttons under a set being cleared out were faded with the rest of it"
-        );
+        // Which is what keep none takes off again.
+        app.keep.remove(&set_id);
+        let cleared = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&cleared, keep_colour), 0, "the border stayed on an unmarked picture");
+        assert!(label_rects(&cleared, "KEEP").is_empty(), "an unmarked picture said KEEP");
+    }
+
+    /// The ring round the picture the preview is on says where the cursor keys
+    /// are and nothing about what the set keeps: a picture can have one, the
+    /// other, both or neither. Taking the marks off leaves the ring where it is.
+    #[test]
+    fn the_ring_round_the_picture_shown_is_not_the_keep_border() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+        let first = app.sets[0].members[0].file_id;
+        app.selected = Some(first);
+
+        let root = found.path().to_path_buf();
+        let ctx = window();
+        let ring_colour = ctx.style().visuals.selection.bg_fill;
+        let keep_colour = egui::Color32::from_rgb(90, 180, 110);
+
+        // Shown and not marked: a ring and no border.
+        let showing = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&showing, ring_colour), 1, "the picture shown had no ring");
+        assert_eq!(outlined(&showing, keep_colour), 0, "an unmarked picture had a keep border");
+
+        // Marked as well: both, on the same picture.
+        app.keep.insert(set_id, Keep::One(first));
+        let both = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&both, ring_colour), 1, "the ring went when the picture was marked");
+        assert_eq!(outlined(&both, keep_colour), 1, "the marked picture had no border");
+
+        // Marks off: the ring stays, because it was never about the marks.
+        app.keep.remove(&set_id);
+        let after = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&after, ring_colour), 1, "taking the marks off took the ring with them");
+        assert_eq!(outlined(&after, keep_colour), 0, "the border stayed on an unmarked picture");
     }
 
     /// A set nobody calls a set of copies is barely drawn: the pictures and every
-    /// line of writing under them at `ANSWERED_OPACITY`. The buttons are not,
+    /// line of writing under them at `IGNORED_OPACITY`. The buttons are not,
     /// because they are how it stops being ignored.
     #[test]
     fn an_ignored_set_is_drawn_faded_and_its_buttons_are_not() {
@@ -7689,7 +7555,7 @@ mod tests {
         let faded = draw(&mut app);
 
         let now = alpha_of(&faded, "one.png").expect("the file name went when the set was ignored");
-        let wanted = f32::from(strip) * ANSWERED_OPACITY;
+        let wanted = f32::from(strip) * IGNORED_OPACITY;
         assert!(
             (f32::from(now) - wanted).abs() <= 2.0,
             "the writing under the pictures went from {strip} to {now}, and not to {wanted}"
@@ -8058,6 +7924,39 @@ mod tests {
         assert!(again.auto_rescan, "the folder came back without running on opening");
     }
 
+    /// Shift says which picture rather than toggling one: whatever the set was
+    /// marking, afterwards it marks that one and nothing else. Pressed again on
+    /// the same picture it stays marked, because it is not a toggle.
+    #[test]
+    fn shift_marks_the_selected_picture_and_unmarks_the_rest() {
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![
+                member(1, "a.jpg", 500),
+                member(2, "b.jpg", 400),
+                member(3, "c.jpg", 300),
+            ],
+        }];
+        let set_id = app.sets[0].set_id;
+        app.keep.insert(set_id, Keep::Several(vec![1, 2]));
+
+        app.selected = Some(3);
+        app.keep_only_selected();
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::One(3)),
+            "the other marks were left where they were"
+        );
+
+        app.keep_only_selected();
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::One(3)),
+            "a second press took the mark off, which is what the toggle does"
+        );
+    }
+
     /// A mark says to keep one picture and says nothing about any other, so
     /// marks add up. Taking them off again one at a time can leave the set
     /// marked with nothing at all, which is where it started.
@@ -8214,27 +8113,24 @@ mod tests {
             .expect("no keep all button was drawn on the set")
             .center();
 
-        // Keep all clears the marks, which leaves the set marked with nothing
-        // and so takes all of it back out of the plan.
+        // Keep all marks every picture in the set, which takes all of it out of
+        // the plan.
         frame(&mut app, Some(all_at), None);
         frame(&mut app, Some(all_at), Some(true));
         frame(&mut app, Some(all_at), Some(false));
+        let keeping = app.keep.get(&app.sets[0].set_id).expect("keep all marked nothing");
+        for member in &app.sets[0].members {
+            assert!(keeping.keeps(member.file_id), "keep all left {} unmarked", member.rel_path);
+        }
         assert_eq!(app.build_plan().files(), 0, "keep all still gave the set up");
 
-        // Keep none says to clear the whole set out, marks or no marks.
+        // Keep none takes every mark off, which puts every picture of the set
+        // into the plan.
         frame(&mut app, Some(none_at), None);
         frame(&mut app, Some(none_at), Some(true));
         frame(&mut app, Some(none_at), Some(false));
+        assert_eq!(app.keep.get(&app.sets[0].set_id), None, "keep none left a mark behind");
         assert_eq!(app.build_plan().files(), 2, "keep none left a picture behind");
-
-        // And it now reads "undo", which puts the set back the way it was.
-        let drawn = frame(&mut app, None, None);
-        let undo_at = label_rect(&drawn, "undo")
-            .expect("keep none did not become undo")
-            .center();
-        frame(&mut app, Some(undo_at), Some(true));
-        frame(&mut app, Some(undo_at), Some(false));
-        assert_eq!(app.build_plan().files(), 0, "undo left the set being cleared out");
     }
 
     /// Auto-marking only ever adds. A set with nothing marked gets the best
@@ -8246,7 +8142,12 @@ mod tests {
         assert_eq!(app.sets.len(), 2, "the two pairs were not found");
         let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
         let best_of = |app: &App, set: usize| {
-            app.sets[set].members.iter().find(|member| member.best).expect("a best copy").file_id
+            app.sets[set]
+                .members
+                .iter()
+                .find(|member| member.auto_keep)
+                .expect("a best copy")
+                .file_id
         };
         let (best_first, best_second) = (best_of(&app, 0), best_of(&app, 1));
 
@@ -8267,64 +8168,33 @@ mod tests {
         assert!(keeping.keeps(best_second), "the best copy was not added beside it");
     }
 
-    /// Both are answers already given, and auto-marking does not answer again.
+    /// A set nobody calls a set of copies is an answer already given, and
+    /// auto-marking does not answer again.
     #[test]
-    fn auto_marking_leaves_ignored_and_cleared_out_sets_alone() {
+    fn auto_marking_leaves_ignored_sets_alone() {
         let found = folder_with_two_sets();
         let mut app = reviewing(found.path());
-        let (ignored, clearing) = (app.sets[0].set_id, app.sets[1].set_id);
+        let ignored = app.sets[0].set_id;
         app.ignore_set(ignored);
-        app.clean_all.insert(clearing);
 
         app.auto_mark_to_keep();
 
         assert_eq!(app.keep.get(&ignored), None, "an ignored set was marked");
-        assert_eq!(app.keep.get(&clearing), None, "a set being cleared out was marked");
     }
 
-    /// Saying a set is not a set of copies at all outranks saying to clear it
-    /// out, so the flag comes off as the set is ignored.
+    /// What is marked is kept, so a set that marks nothing keeps nothing and all
+    /// of it is there to be cleaned up. A review arrives marking nothing, so
+    /// that is every picture of every set it found.
     #[test]
-    fn ignoring_a_set_being_cleared_out_leaves_it_ignored_and_not_cleared() {
-        let found = folder_with_a_duplicate();
-        let mut app = reviewing(found.path());
-        let set_id = app.sets[0].set_id;
-        app.clean_all.insert(set_id);
-
-        app.ignore_set(set_id);
-
-        assert!(app.is_ignored(&app.sets[0]), "the set was not ignored");
-        assert!(!app.clean_all.contains(&set_id), "it is still being cleared out as well");
-        assert_eq!(app.build_plan().files(), 0, "an ignored set was still going to lose files");
-    }
-
-    /// A set nobody has marked is a set nobody has reached, and a review left
-    /// half done does not delete the half that was never looked at.
-    #[test]
-    fn a_set_marked_with_nothing_loses_none_of_it() {
+    fn a_set_marked_with_nothing_loses_all_of_it() {
         let found = folder_with_a_duplicate();
         let app = reviewing(found.path());
         assert!(app.keep.is_empty(), "the search marked something on its own");
-        assert_eq!(app.build_plan().files(), 0, "an untouched set was going to be cleaned up");
-    }
-
-    /// The one way to clear a whole set out. What it takes is the set entire,
-    /// marks or no marks.
-    #[test]
-    fn a_set_told_to_clean_all_of_it_loses_every_picture() {
-        let found = folder_with_a_duplicate();
-        let mut app = reviewing(found.path());
-        app.keep.insert(app.sets[0].set_id, Keep::One(app.sets[0].members[0].file_id));
-        app.clean_all.insert(app.sets[0].set_id);
-
-        let plan = app.build_plan();
-        let mut going: Vec<&str> =
-            plan.removals.iter().map(|removal| removal.rel_path.as_str()).collect();
-        going.sort();
-        let mut all: Vec<&str> =
-            app.sets[0].members.iter().map(|member| member.rel_path.as_str()).collect();
-        all.sort();
-        assert_eq!(going, all, "the mark held a picture back from a set being cleared out");
+        assert_eq!(
+            app.build_plan().files(),
+            app.sets[0].members.len(),
+            "a set marking nothing was not all going"
+        );
     }
 
     #[test]

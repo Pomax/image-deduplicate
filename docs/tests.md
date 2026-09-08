@@ -572,7 +572,7 @@ duplicate would be rejected before its hash was looked at.
 Three copies written at different times come back in the order the files
 appeared, whatever order the search met them in.
 
-### the_bigger_image_is_the_best_candidate
+### the_bigger_image_is_marked_to_keep
 
 The picture a set offers as its best copy is the one the score picks. Nothing is
 kept or removed on account of it: it is what "auto-mark to keep" marks.
@@ -1070,6 +1070,13 @@ outcome and the error from the last one.
 A real folder of two different pictures, searched at the narrowest setting, finds
 nothing: the window stays on the scan, the tabs stay shut and it says so.
 
+### the_preview_does_not_open_inside_an_ignored_set
+
+Two sets with the first one ignored. The review opens in the second, on what that
+set marks once it marks something, and on nothing at all when every set is
+ignored. A set nobody calls a set of copies is not somewhere to start: it keeps
+nothing and the cursor keys would only step out of it.
+
 ### the_first_sets_keeper_is_what_the_preview_starts_on
 
 A review arrives with nothing marked, so the preview opens on the first picture
@@ -1243,7 +1250,9 @@ set instead of riding up under the unmarked one.
 Draws a set from a really scanned folder, finds the keep all and keep none
 buttons by their labels in what was painted, and really presses them. Keep all
 clears the marks, which takes the set out of the plan; keep none puts every
-picture of it in; and the button then reads "undo", which puts it back.
+picture of it in; keep all then does nothing, because a set being cleared out
+answers to one button only; and that button reads "keeping none", which puts it
+back.
 
 ### a_set_marked_with_nothing_loses_none_of_it
 
@@ -1273,8 +1282,8 @@ comes off, and the set loses nothing.
 ### a_set_being_cleared_out_is_drawn_faded_and_its_buttons_are_not
 
 A set flagged "clean all files" is drawn at a quarter of its opacity, the way an
-ignored one is, and its buttons are not faded, because all three are still worth
-pressing.
+ignored one is, and its buttons are not faded, because one of them is how the
+flag comes off again.
 
 ### the_review_state_is_not_written_to_the_index
 
@@ -1385,6 +1394,13 @@ bar, and the pictures in a box start as far inside it as they end.
 Draws a set from a really scanned folder and reads where its three buttons
 landed: keep all, then keep none, then ignore, left to right with space between
 them, on one row, below the lowest line of text under the pictures.
+
+### a_button_that_changes_its_word_does_not_move_the_ones_beside_it
+
+Two of the buttons change what they say. Each is drawn to the widest thing it can
+ever say, so flagging a set turns "keep none" into "keeping none" and every
+button stays exactly where and as wide as it was. Fails against a button sized to
+its current words, which changes width and drags "ignore" along with it.
 
 ### a_set_box_is_not_taller_than_the_tiles_in_it
 
@@ -1512,6 +1528,12 @@ A folder that has been scanned before is opened again with the rescan box off.
 No pass runs, and the index is still read into memory: the pictures are there,
 the lamp for it is lit, and Find duplicates finds the copies without a pass
 having read a single file.
+
+### shift_marks_the_selected_picture_and_unmarks_the_rest
+
+Shift with the space bar, or with a double click, says which picture rather than
+toggling one: a set marking two ends up marking only the one the preview is on,
+and pressing it again leaves that mark where it is rather than taking it off.
 
 ### marks_add_up_and_come_off_one_at_a_time
 
@@ -1855,12 +1877,6 @@ executable.
 A wide picture with a segment saying to stand it on its end, read the way the
 tiles and the preview read every picture. It comes back on its end. Both of them
 come through this one function, so this is where the turn belongs.
-
-### a_picture_drained_to_red_grey_keeps_no_colour_but_red
-
-What a set on its way out is drawn in. Green and blue come out equal, so no
-colour of the picture's own is left, and red is twice that, clamped rather than
-wrapped: black stays black and white stays white.
 
 ### loading_reduces_to_the_preview_size
 

@@ -123,7 +123,7 @@ pub struct Member {
     /// The one the search would keep if it were choosing: the largest, least
     /// re-encoded copy in the set. Nothing is kept or removed on account of it.
     /// It is what "auto-mark to keep" marks.
-    pub best: bool,
+    pub auto_keep: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +137,7 @@ impl DuplicateSet {
     /// reports and sorts by: it has nobody to mark anything, so what the search
     /// would keep is what it keeps.
     pub fn recoverable_bytes(&self) -> i64 {
-        self.members.iter().filter(|m| !m.best).map(|m| m.size_bytes).sum()
+        self.members.iter().filter(|m| !m.auto_keep).map(|m| m.size_bytes).sum()
     }
 }
 
@@ -1004,7 +1004,7 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
                         channels: image.channels,
                         size_bytes: image.size_bytes,
                         mtime_ms: image.mtime_ms,
-                        best: *position == keeper,
+                        auto_keep: *position == keeper,
                     }
                 })
                 .collect();
@@ -1404,12 +1404,12 @@ mod tests {
     }
 
     #[test]
-    fn the_bigger_image_is_the_best_candidate() {
+    fn the_bigger_image_is_marked_to_keep() {
         let mut conn = open();
         insert(&mut conn, "small.jpg", 0x1234, 400, 300, 20_000, ring(0.5));
         insert(&mut conn, "big.jpg", 0x1234, 1600, 1200, 300_000, ring(0.5));
         let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
-        let kept: Vec<&Member> = sets[0].members.iter().filter(|m| m.best).collect();
+        let kept: Vec<&Member> = sets[0].members.iter().filter(|m| m.auto_keep).collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].rel_path, "big.jpg");
     }

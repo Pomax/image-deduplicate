@@ -93,26 +93,14 @@ struct Held {
 }
 
 impl Camera {
-    /// Take one frame of a window and write it to `path` as a PNG.
+    /// Take one frame of a window, keeping the shapes: what a check measures and
+    /// what the picture shows are then the same frame, and not two frames that
+    /// happen to look alike.
     ///
     /// `run` is what draws the frame: whatever the test would pass to
     /// `Context::run`. Everything the frame changed about its textures is kept,
     /// because a frame only sends what is new and the atlas of letters arrives a
     /// patch at a time.
-    pub fn shoot(
-        &mut self,
-        ctx: &egui::Context,
-        input: egui::RawInput,
-        run: impl FnMut(&egui::Context),
-        path: &Path,
-    ) {
-        let _ = self.draw(ctx, input, run, path);
-        self.develop();
-    }
-
-    /// The same, keeping the shapes: what a check measures and what the picture
-    /// shows are then the same frame, and not two frames that happen to look
-    /// alike.
     pub fn frame(
         &mut self,
         name: &str,
