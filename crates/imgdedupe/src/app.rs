@@ -2114,7 +2114,7 @@ impl App {
             // Everything below is the manager's work, on this thread rather than
             // the one that draws: for a folder on another machine, taking up an
             // index is a request over the network.
-            if let Err(err) = index.hold(&db_path) {
+            if let Err(err) = index.open(&db_path) {
                 let _ = send.send(Opened::Failed(format!("{err:#}")));
                 return;
             }
@@ -4821,7 +4821,10 @@ mod tests {
         for beside in db::files_of_the_index(&db_path) {
             assert!(!beside.exists(), "{} was left behind", beside.display());
         }
-        assert!(app.index.holding().is_none(), "the manager still holds an index that is gone");
+        assert!(
+            app.index.open_index_path().is_none(),
+            "the manager still has an index open that is gone"
+        );
     }
 
     /// A folder whose index cannot be read stops there: the lamp for reading the
@@ -4867,7 +4870,7 @@ mod tests {
             let scanned = reviewing(found.path());
             scanned.index.synced().expect("wait for the file");
             assert_eq!(scanned.sets.len(), 1, "the fixture found nothing to begin with");
-            scanned.index.let_go().expect("let the folder go");
+            scanned.index.close().expect("close the index");
         }
 
         // The index as an older build left it.
@@ -8572,7 +8575,7 @@ mod tests {
     /// the process is what waits for that, and this is a test saying the first
     /// run ended.
     fn closed(app: &App) {
-        app.index.let_go().expect("write the folder out");
+        app.index.close().expect("close the index");
     }
 
     /// The folder's index as it is on disk, once the file has caught up with

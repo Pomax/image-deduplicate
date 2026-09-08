@@ -1039,7 +1039,7 @@ mod tests {
         // say they were fingerprinted by the version before this one. Written
         // into the file for the manager to pick up, because that is where a file
         // from an older build comes from.
-        fx.index.let_go().expect("let the folder go");
+        fx.index.close().expect("let the folder go");
         let older = rusqlite::Connection::open(&fx.options.db_path).expect("the index file");
         older
             .execute_batch(
@@ -1050,7 +1050,7 @@ mod tests {
             .expect("making an older index");
         drop(older);
 
-        fx.index.hold(&fx.options.db_path).expect("take the older index up");
+        fx.index.open(&fx.options.db_path).expect("take the older index up");
         let conn = on_disk(&fx);
         let corners: i64 = conn
             .query_row(
@@ -1086,7 +1086,7 @@ mod tests {
         let db_path = root.join(db::INDEX_FILENAME);
         let options = Options { root, db_path, recurse: true };
         let index = crate::index::Index::start();
-        index.hold(&options.db_path).expect("hold the index");
+        index.open(&options.db_path).expect("hold the index");
         Fixture { dir, options, index }
     }
 
@@ -1362,7 +1362,7 @@ mod tests {
         assert_eq!(first.indexed, 5, "the folder was not indexed to begin with");
 
         // The same index as written by a build that kept nanoseconds.
-        fx.index.let_go().expect("let the folder go");
+        fx.index.close().expect("let the folder go");
         let other = rusqlite::Connection::open(&fx.options.db_path).expect("the index file");
         other
             .execute_batch(
@@ -1372,7 +1372,7 @@ mod tests {
             )
             .expect("an index in nanoseconds");
         drop(other);
-        fx.index.hold(&fx.options.db_path).expect("take it up again");
+        fx.index.open(&fx.options.db_path).expect("take it up again");
 
         let (again, _) = scan(&fx);
         assert_eq!(again.indexed, 0, "every file was read again on the other machine");
@@ -1516,7 +1516,7 @@ mod tests {
         let options = Options { root: root.clone(), db_path: db_path.clone(), recurse: true };
 
         let index = crate::index::Index::start();
-        index.hold(&db_path).expect("hold the index");
+        index.open(&db_path).expect("hold the index");
         let cancel = AtomicBool::new(false);
         let (summary, _) = run(&index, &options, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1, "the folder it was pointed at was skipped");

@@ -27,9 +27,9 @@ use crate::matching::{self, DuplicateSet, Image, Progress, Thresholds};
 
 /// What a caller asks of the manager. Every one carries the way back.
 enum Job {
-    Hold(PathBuf, Sender<Result<()>>),
-    LetGo(Sender<Result<()>>),
-    Held(Sender<Option<PathBuf>>),
+    Open(PathBuf, Sender<Result<()>>),
+    Close(Sender<Result<()>>),
+    OpenIndexPath(Sender<Option<PathBuf>>),
     Images(Arc<AtomicBool>, Reporter, Sender<Result<Option<Vec<Image>>>>),
     FindSets(Thresholds, Arc<AtomicBool>, Reporter, Sender<Result<Option<Vec<DuplicateSet>>>>),
     Known(Sender<Result<std::collections::HashMap<String, Known>>>),
@@ -59,15 +59,15 @@ pub struct Index {
 
 impl std::fmt::Debug for Index {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.holding() {
-            Some(path) => write!(out, "index holding {}", path.display()),
-            None => write!(out, "index holding nothing"),
+        match self.open_index_path() {
+            Some(path) => write!(out, "index open on {}", path.display()),
+            None => write!(out, "no index open"),
         }
     }
 }
 
-/// What the manager is holding.
-struct Held {
+/// The index the manager has open.
+struct OpenIndex {
     path: PathBuf,
     conn: Connection,
 }
@@ -92,20 +92,20 @@ impl Index {
         answer.recv().map_err(|_| anyhow::anyhow!("the index manager gave no answer"))
     }
 
-    /// Take up a folder's index: open the file, bring it to the current shape on
+    /// Open a folder's index: open the file, bring it to the current shape on
     /// disk, and read it in. A folder with no index gets a new one.
-    pub fn hold(&self, path: &Path) -> Result<()> {
-        self.ask(|back| Job::Hold(path.to_path_buf(), back))?
+    pub fn open(&self, path: &Path) -> Result<()> {
+        self.ask(|back| Job::Open(path.to_path_buf(), back))?
     }
 
-    /// Let the folder go, once everything it changed is on disk.
-    pub fn let_go(&self) -> Result<()> {
-        self.ask(Job::LetGo)?
+    /// Close it, once everything it changed is on disk.
+    pub fn close(&self) -> Result<()> {
+        self.ask(Job::Close)?
     }
 
-    /// Which folder's index is held, if any.
-    pub fn holding(&self) -> Option<PathBuf> {
-        self.ask(Job::Held).unwrap_or(None)
+    /// Which folder's index is open, if any.
+    pub fn open_index_path(&self) -> Option<PathBuf> {
+        self.ask(Job::OpenIndexPath).unwrap_or(None)
     }
 
     /// Every picture in the index, as the search wants them.
@@ -187,64 +187,64 @@ impl Index {
 
 /// The manager's own loop. Owns the connection and the path; neither leaves it.
 fn serve(jobs: Receiver<Job>) {
-    let mut held: Option<Held> = None;
+    let mut current_open_index: Option<OpenIndex> = None;
     let writer = Writer::start();
 
     while let Ok(job) = jobs.recv() {
         match job {
-            Job::Hold(path, back) => {
-                let outcome = take_up(&mut held, &writer, &path);
+            Job::Open(path, back) => {
+                let outcome = open_index(&mut current_open_index, &writer, &path);
                 let _ = back.send(outcome);
             }
-            Job::LetGo(back) => {
-                let _ = back.send(put_down(&mut held, &writer));
+            Job::Close(back) => {
+                let _ = back.send(close_index(&mut current_open_index, &writer));
             }
-            Job::Held(back) => {
-                let _ = back.send(held.as_ref().map(|it| it.path.clone()));
+            Job::OpenIndexPath(back) => {
+                let _ = back.send(current_open_index.as_ref().map(|it| it.path.clone()));
             }
             Job::Images(cancel, report, back) => {
-                let _ = back.send(with(&held, |it| {
+                let _ = back.send(with(&current_open_index, |it| {
                     matching::load_images(&it.conn, &cancel, &|progress| report(progress))
                 }));
             }
             Job::FindSets(thresholds, cancel, report, back) => {
-                let _ = back.send(with(&held, |it| {
+                let _ = back.send(with(&current_open_index, |it| {
                     matching::find_sets_cancellable(&it.conn, thresholds, &cancel, &|progress| {
                         report(progress)
                     })
                 }));
             }
             Job::Known(back) => {
-                let _ = back.send(with(&held, |it| db::load_known(&it.conn)));
+                let _ = back.send(with(&current_open_index, |it| db::load_known(&it.conn)));
             }
             Job::Ignored(back) => {
-                let _ = back.send(with(&held, |it| db::ignored(&it.conn)));
+                let _ = back.send(with(&current_open_index, |it| db::ignored(&it.conn)));
             }
             Job::Meta(key, back) => {
-                let _ = back.send(with(&held, |it| db::get_meta(&it.conn, &key)));
+                let _ = back.send(with(&current_open_index, |it| db::get_meta(&it.conn, &key)));
             }
             Job::SetMeta(key, value, back) => {
-                let done = with(&held, |it| db::set_meta(&it.conn, &key, &value));
+                let done = with(&current_open_index, |it| db::set_meta(&it.conn, &key, &value));
                 let _ = back.send(done);
-                sync(&held, &writer);
+                writer.apply(Box::new(move |file| db::set_meta(file, &key, &value)));
             }
             Job::ForgetMeta(key, back) => {
-                let done = with(&held, |it| db::forget_meta(&it.conn, &key));
+                let done = with(&current_open_index, |it| db::forget_meta(&it.conn, &key));
                 let _ = back.send(done);
-                sync(&held, &writer);
+                writer.apply(Box::new(move |file| db::forget_meta(file, &key)));
             }
             Job::Ignore(pairs, back) => {
-                let done = with(&held, |it| db::ignore(&it.conn, &pairs));
+                let done = with(&current_open_index, |it| db::ignore(&it.conn, &pairs));
                 let _ = back.send(done);
-                sync(&held, &writer);
+                writer.apply(Box::new(move |file| db::ignore(file, &pairs)));
             }
             Job::Unignore(pairs, back) => {
-                let done = with(&held, |it| db::unignore(&it.conn, &pairs));
+                let done = with(&current_open_index, |it| db::unignore(&it.conn, &pairs));
                 let _ = back.send(done);
-                sync(&held, &writer);
+                writer.apply(Box::new(move |file| db::unignore(file, &pairs)));
             }
             Job::Upsert(records, scanned_at, back) => {
-                let done = with_mut(&mut held, |it| {
+                let done = with_mut(&mut current_open_index, |it| {
                     let tx = it.conn.transaction()?;
                     for record in &records {
                         db::upsert(&tx, record, scanned_at)?;
@@ -253,26 +253,40 @@ fn serve(jobs: Receiver<Job>) {
                     Ok(())
                 });
                 let _ = back.send(done);
-                sync(&held, &writer);
+                // A pass sends thousands of records through here. They go to the
+                // file in one transaction, so it gets one commit rather than one
+                // per picture.
+                writer.apply(Box::new(move |file| {
+                    let tx = file.unchecked_transaction()?;
+                    for record in &records {
+                        db::upsert(&tx, record, scanned_at)?;
+                    }
+                    tx.commit()?;
+                    Ok(())
+                }));
             }
             Job::DeletePaths(paths, back) => {
-                let done = with_mut(&mut held, |it| {
+                let done = with_mut(&mut current_open_index, |it| {
                     let tx = it.conn.transaction()?;
                     let gone = db::delete_paths(&tx, &paths)?;
                     tx.commit()?;
                     Ok(gone)
                 });
                 let _ = back.send(done);
-                sync(&held, &writer);
+                writer.apply(Box::new(move |file| {
+                    let tx = file.unchecked_transaction()?;
+                    db::delete_paths(&tx, &paths)?;
+                    tx.commit()?;
+                    Ok(())
+                }));
             }
             Job::Compact(back) => {
-                let _ = back.send(compact(&mut held, &writer));
+                let _ = back.send(compact(&mut current_open_index, &writer));
             }
             Job::Delete(back) => {
-                let _ = back.send(delete(&mut held, &writer));
+                let _ = back.send(delete(&mut current_open_index, &writer));
             }
             Job::Synced(back) => {
-                sync(&held, &writer);
                 let _ = back.send(writer.drain());
             }
         }
@@ -280,87 +294,83 @@ fn serve(jobs: Receiver<Job>) {
 
     // The last way to ask has gone. Whatever is held goes to disk before the
     // thread does.
-    let _ = put_down(&mut held, &writer);
+    let _ = close_index(&mut current_open_index, &writer);
 }
 
-/// Do something with what is held, or say that nothing is.
-fn with<T>(held: &Option<Held>, work: impl FnOnce(&Held) -> Result<T>) -> Result<T> {
-    match held {
+/// Do something with the open index, or say that none is open.
+fn with<T>(
+    current_open_index: &Option<OpenIndex>,
+    work: impl FnOnce(&OpenIndex) -> Result<T>,
+) -> Result<T> {
+    match current_open_index {
         Some(it) => work(it),
         None => anyhow::bail!("no folder is open"),
     }
 }
 
-fn with_mut<T>(held: &mut Option<Held>, work: impl FnOnce(&mut Held) -> Result<T>) -> Result<T> {
-    match held {
+fn with_mut<T>(
+    current_open_index: &mut Option<OpenIndex>,
+    work: impl FnOnce(&mut OpenIndex) -> Result<T>,
+) -> Result<T> {
+    match current_open_index {
         Some(it) => work(it),
         None => anyhow::bail!("no folder is open"),
     }
 }
 
-/// Take up a folder's index: migrate the file, then read it in.
-fn take_up(held: &mut Option<Held>, writer: &Writer, path: &Path) -> Result<()> {
-    // Already holding this one. Putting it down and taking it up again writes
-    // the whole index out, reads it back and writes it out once more, and ends
-    // where it started. The window opens a folder and the pass asks for the
+/// Open a folder's index: migrate the file, then read it in.
+fn open_index(
+    current_open_index: &mut Option<OpenIndex>,
+    writer: &Writer,
+    path: &Path,
+) -> Result<()> {
+    // Already open on this one. Closing it and opening it again reads the whole
+    // file back for nothing. The window opens a folder and the pass asks for the
     // same folder a moment later, so this is the usual case, not a rare one.
-    if held.as_ref().is_some_and(|it| it.path.as_path() == path) {
+    if current_open_index.as_ref().is_some_and(|it| it.path.as_path() == path) {
         return Ok(());
     }
-    put_down(held, writer)?;
+    close_index(current_open_index, writer)?;
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     let conn = db::open_and_migrate(path)?;
     crate::log_line!("  open and migrate: {:.2}s", at.elapsed().as_secs_f64());
-    *held = Some(Held { path: path.to_path_buf(), conn });
-    // Nothing to write. Migrating writes to the file itself, and a folder that
-    // had no index has one on disk by the time it is read in, so what is held
-    // and what is on disk are already the same. Every job that changes what is
-    // held writes it out; opening changes nothing.
+    // The file, for the thread that writes to it. Opening it is waited for: an
+    // index that cannot be written to is a broken index and the caller is told
+    // now rather than at the first change.
+    writer.open(path)?;
+    *current_open_index = Some(OpenIndex { path: path.to_path_buf(), conn });
     Ok(())
 }
 
-/// Let go of the folder, once the file has caught up with what is held.
-fn put_down(held: &mut Option<Held>, writer: &Writer) -> Result<()> {
-    if held.is_none() {
+/// Close the index, once the file has caught up with what was changed in it.
+fn close_index(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result<()> {
+    if current_open_index.is_none() {
         return Ok(());
     }
-    sync(held, writer);
-    let caught_up = writer.drain();
-    // Let go either way: holding on to an index whose file cannot be written
+    // Nothing to write out first: every change was written when it was made.
+    let caught_up = writer.close();
+    // Close it either way: keeping an index open whose file cannot be written
     // gains nothing. The caller is told what went wrong.
-    *held = None;
+    *current_open_index = None;
     caught_up
 }
 
-/// Hand the writer the whole of what is held. The writer does the file work, so
-/// the manager is free for the next job.
-fn sync(held: &Option<Held>, writer: &Writer) {
-    let Some(it) = held else {
-        return;
-    };
-    match it.conn.serialize(rusqlite::DatabaseName::Main) {
-        Ok(data) => writer.put(it.path.clone(), data.to_vec()),
-        Err(err) => {
-            let _ = &err;
-            crate::log_line!("the index could not be taken out of memory: {err}");
-        }
-    }
-}
-
-fn compact(held: &mut Option<Held>, writer: &Writer) -> Result<()> {
-    with_mut(held, |it| {
+fn compact(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result<()> {
+    with_mut(current_open_index, |it| {
         it.conn.execute_batch("VACUUM").context("giving back the space of deleted rows")
     })?;
-    // A rebuilt index is a smaller file, and that is the point of asking, so the
-    // file is brought up to date here rather than whenever the writer gets to it.
-    sync(held, writer);
+    // A VACUUM in memory does not change the size of the file, and a smaller
+    // file is what the caller asked for.
+    writer.apply(Box::new(|file| {
+        file.execute_batch("VACUUM").context("giving back the space of deleted rows")
+    }));
     writer.drain()
 }
 
-/// Remove the index from the folder and let it go.
-fn delete(held: &mut Option<Held>, writer: &Writer) -> Result<usize> {
-    let (path, rows) = match held {
+/// Remove the index from the folder and close it.
+fn delete(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result<usize> {
+    let (path, rows) = match current_open_index {
         Some(it) => {
             let rows: i64 = it
                 .conn
@@ -371,9 +381,10 @@ fn delete(held: &mut Option<Held>, writer: &Writer) -> Result<usize> {
         None => anyhow::bail!("no folder is open"),
     };
     // Nothing more is written on the way out: the file is going. Whatever is
-    // already on its way has to land first, or it lands on the empty space.
-    let _ = writer.drain();
-    *held = None;
+    // already on its way has to land first, and the file has to be closed before
+    // it is removed, or what is left behind is a `-journal` beside nothing.
+    let _ = writer.close();
+    *current_open_index = None;
     let mut gone = 0;
     for beside in db::files_of_the_index(&path) {
         if std::fs::remove_file(&beside).is_ok() {
@@ -386,17 +397,25 @@ fn delete(held: &mut Option<Held>, writer: &Writer) -> Result<usize> {
     Ok(rows)
 }
 
-/// The thread that puts what the manager holds on disk.
+/// The thread that makes on disk the changes the manager has made in memory.
 ///
-/// It is given the whole of the index each time. A newer copy arriving while one
-/// is being written replaces whatever was waiting, so a run of changes costs one
-/// write of the last of them rather than one write each.
+/// It holds a connection to the index file and applies each change with a
+/// statement, so a change of one row writes one row. The manager is free for the
+/// next job as soon as it has sent the change.
 struct Writer {
     to: Sender<Errand>,
 }
 
+/// One change to make to the file, as the call that made it in memory.
+type Change = Box<dyn FnOnce(&Connection) -> Result<()> + Send>;
+
 enum Errand {
-    Put(PathBuf, Vec<u8>),
+    /// Open the file, ready to be written to.
+    Open(PathBuf, Sender<Option<String>>),
+    /// Close it. Nothing is written on the way out: everything was written as it
+    /// was made.
+    Close(Sender<Option<String>>),
+    Do(Change),
     /// Answered when everything sent before it has been written, with whatever
     /// went wrong writing it.
     Drained(Sender<Option<String>>),
@@ -408,33 +427,47 @@ impl Writer {
         std::thread::Builder::new()
             .name(String::from("index writer"))
             .spawn(move || {
+                // The index file, once the manager has opened one.
+                let mut file: Option<Connection> = None;
                 // What went wrong since anything last asked. A caller waiting on
-                // the file is told, so a folder is never let go of in the belief
-                // that its index reached the disk.
+                // the file is told, so an index is never closed in the belief
+                // that what was written to it reached the disk.
                 let mut trouble: Option<String> = None;
-                while let Ok(first) = errands.recv() {
-                    // Take everything that is already waiting. Only the last copy
-                    // of the index is worth writing, so a run of changes costs
-                    // one write rather than one write each.
-                    let mut latest: Option<(PathBuf, Vec<u8>)> = None;
-                    let mut waiting: Vec<Sender<Option<String>>> = Vec::new();
-                    let mut errand = Some(first);
-                    while let Some(next) = errand {
-                        match next {
-                            Errand::Put(path, bytes) => latest = Some((path, bytes)),
-                            Errand::Drained(back) => waiting.push(back),
+                while let Ok(errand) = errands.recv() {
+                    match errand {
+                        Errand::Open(path, back) => {
+                            let opened = open_the_file(&path);
+                            let answer = match opened {
+                                Ok(conn) => {
+                                    file = Some(conn);
+                                    None
+                                }
+                                Err(err) => {
+                                    file = None;
+                                    Some(err)
+                                }
+                            };
+                            let _ = back.send(answer);
                         }
-                        errand = errands.try_recv().ok();
-                    }
-                    if let Some((path, bytes)) = latest {
-                        if let Err(err) = write_file(&path, &bytes) {
-                            crate::log_line!("{err}");
-                            trouble = Some(err);
+                        Errand::Close(back) => {
+                            file = None;
+                            let _ = back.send(trouble.take());
                         }
-                    }
-                    // Everything sent before these is on disk now.
-                    for back in waiting {
-                        let _ = back.send(trouble.take());
+                        Errand::Do(change) => {
+                            let done = match &file {
+                                Some(conn) => change(conn).map_err(|err| format!("{err:#}")),
+                                None => Err(String::from("no index is open to write to")),
+                            };
+                            if let Err(err) = done {
+                                crate::log_line!("{err}");
+                                trouble = Some(err);
+                            }
+                        }
+                        // Everything sent before this has been applied, because
+                        // this thread takes them one at a time in order.
+                        Errand::Drained(back) => {
+                            let _ = back.send(trouble.take());
+                        }
                     }
                 }
             })
@@ -442,15 +475,34 @@ impl Writer {
         Writer { to }
     }
 
-    fn put(&self, path: PathBuf, bytes: Vec<u8>) {
-        let _ = self.to.send(Errand::Put(path, bytes));
+    /// Open the file this index lives in, and say if it could not be opened.
+    fn open(&self, path: &Path) -> Result<()> {
+        let path = path.to_path_buf();
+        self.wait_on(|back| Errand::Open(path, back))
+    }
+
+    /// Send a change to make to the file. Nothing waits for it: the caller is
+    /// answered when the manager has the change, and `drain` is what waits for
+    /// the disk.
+    fn apply(&self, change: Change) {
+        let _ = self.to.send(Errand::Do(change));
+    }
+
+    /// Close the file, once everything sent has been written to it.
+    fn close(&self) -> Result<()> {
+        self.wait_on(Errand::Close)
     }
 
     /// Wait until everything sent so far is on disk, and say what stopped any of
     /// it getting there.
     fn drain(&self) -> Result<()> {
+        self.wait_on(Errand::Drained)
+    }
+
+    /// Send an errand that answers, and wait for the answer.
+    fn wait_on(&self, errand: impl FnOnce(Sender<Option<String>>) -> Errand) -> Result<()> {
         let (back, done) = channel();
-        if self.to.send(Errand::Drained(back)).is_err() {
+        if self.to.send(errand(back)).is_err() {
             anyhow::bail!("the thread that writes the index has stopped");
         }
         match done.recv() {
@@ -461,18 +513,15 @@ impl Writer {
     }
 }
 
-/// One sequential write beside the index, then a rename onto it, so a run that
-/// dies half way leaves the old index rather than half of a new one.
-fn write_file(path: &Path, bytes: &[u8]) -> std::result::Result<(), String> {
-    let beside = db::being_written(path);
-    if let Err(err) = std::fs::write(&beside, bytes) {
-        return Err(format!("the index could not be written to {}: {err}", beside.display()));
-    }
-    if let Err(err) = std::fs::rename(&beside, path) {
-        let _ = std::fs::remove_file(&beside);
-        return Err(format!("the index could not be moved onto {}: {err}", path.display()));
-    }
-    Ok(())
+/// The index file, as the thread that writes to it holds it.
+fn open_the_file(path: &Path) -> std::result::Result<Connection, String> {
+    let conn = Connection::open(path)
+        .map_err(|err| format!("the index at {} could not be opened: {err}", path.display()))?;
+    // The same as the copy in memory is opened with. Without it, deleting a file
+    // takes its rows elsewhere with it in memory and leaves them in the file.
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|err| format!("the index at {} refused a setting: {err}", path.display()))?;
+    Ok(conn)
 }
 
 #[cfg(test)]
@@ -520,12 +569,12 @@ mod tests {
         let (_dir, path) = temp();
         let index = Index::start();
 
-        assert!(index.holding().is_none(), "a manager that was told nothing holds something");
+        assert!(index.open_index_path().is_none(), "a manager that was told nothing holds something");
         let too_soon = index.known().expect_err("a read before a folder was given");
         assert!(too_soon.to_string().contains("no folder is open"), "{too_soon}");
 
-        index.hold(&path).expect("hold");
-        assert_eq!(index.holding().as_deref(), Some(path.as_path()));
+        index.open(&path).expect("hold");
+        assert_eq!(index.open_index_path().as_deref(), Some(path.as_path()));
 
         index.upsert(vec![row("a.jpg", 10)], 1).expect("a write");
         let known = index.known().expect("a read");
@@ -538,12 +587,12 @@ mod tests {
     fn letting_go_of_a_folder_waits_for_the_file_to_catch_up() {
         let (_dir, path) = temp();
         let index = Index::start();
-        index.hold(&path).expect("hold");
+        index.open(&path).expect("hold");
         index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("write");
         index.set_meta("recurse", "1").expect("write");
 
-        index.let_go().expect("let go");
-        assert!(index.holding().is_none(), "the folder was not let go of");
+        index.close().expect("let go");
+        assert!(index.open_index_path().is_none(), "the folder was not let go of");
 
         let conn = on_disk(&path);
         let rows: i64 =
@@ -581,9 +630,9 @@ mod tests {
         drop(older);
 
         let index = Index::start();
-        index.hold(&path).expect("hold");
+        index.open(&path).expect("hold");
         // Nothing at all happens to it: no pass, no row, no setting.
-        index.let_go().expect("let go");
+        index.close().expect("let go");
 
         let conn = on_disk(&path);
         assert_eq!(
@@ -622,7 +671,7 @@ mod tests {
     fn every_change_reaches_the_file() {
         let (_dir, path) = temp();
         let index = Index::start();
-        index.hold(&path).expect("hold");
+        index.open(&path).expect("hold");
 
         index
             .upsert(vec![row("a.jpg", 10), row("b.jpg", 20), row("gone.jpg", 30)], 1)
@@ -640,7 +689,7 @@ mod tests {
         index.set_meta("to be forgotten", "here").expect("set_meta");
         index.forget_meta("to be forgotten").expect("forget_meta");
 
-        index.let_go().expect("let go");
+        index.close().expect("let go");
 
         let conn = on_disk(&path);
         let paths: Vec<String> = conn
@@ -656,8 +705,91 @@ mod tests {
         assert_eq!(db::ignored(&conn).expect("ignored"), vec![(ids[0], ids[1])]);
     }
 
-    /// The three ways an index is broken. Each is refused, each leaves the file
-    /// exactly as it was, and the manager is left holding nothing.
+    /// A change is on the disk once the writing has been waited for, without the
+    /// index being closed first.
+    #[test]
+    fn a_change_is_in_the_file_once_the_writing_is_waited_for() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+
+        index.set_meta("disposal", "delete").expect("set_meta");
+        index.synced().expect("wait for the disk");
+
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        assert_eq!(db::get_meta(&conn, "disposal").expect("meta").as_deref(), Some("delete"));
+    }
+
+    /// A change is written into the file. It used to be written beside it and
+    /// renamed over it, which left a different file each time.
+    #[test]
+    fn a_change_does_not_replace_the_file() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        index.synced().expect("wait for the disk");
+        let was = std::fs::metadata(&path).expect("the index").created().expect("when it was made");
+
+        index.upsert(vec![row("a.jpg", 10)], 1).expect("upsert");
+        index.set_meta("disposal", "delete").expect("set_meta");
+        index.synced().expect("wait for the disk");
+
+        let now = std::fs::metadata(&path).expect("the index").created().expect("when it was made");
+        assert_eq!(was, now, "the index was replaced rather than written to");
+    }
+
+    /// The rows that follow a file are the file's: they go when it does, on the
+    /// disk as well as in memory. This is what the writer's own connection needs
+    /// `foreign_keys` on for.
+    #[test]
+    fn deleting_a_file_takes_its_ignored_pairs_out_of_the_file() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("upsert");
+        let ids: Vec<i64> = {
+            let known = index.known().expect("known");
+            let mut ids: Vec<i64> = ["a.jpg", "b.jpg"].iter().map(|path| known[*path].id).collect();
+            ids.sort();
+            ids
+        };
+        index.ignore(&[db::pair(ids[0], ids[1])]).expect("ignore");
+        index.synced().expect("wait for the disk");
+
+        index.delete_paths(vec![String::from("a.jpg")]).expect("delete");
+        index.synced().expect("wait for the disk");
+
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        assert!(
+            db::ignored(&conn).expect("ignored").is_empty(),
+            "the pair outlived its picture in the file"
+        );
+    }
+
+    /// Giving back the space of deleted rows is asked for to make the file
+    /// smaller, so it has to make the file smaller.
+    #[test]
+    fn compacting_makes_the_file_smaller() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        let rows: Vec<Record> =
+            (0..400).map(|at| row(&format!("{at}.jpg"), at as i64)).collect();
+        index.upsert(rows, 1).expect("upsert");
+        index.synced().expect("wait for the disk");
+
+        let paths: Vec<String> = (0..400).map(|at| format!("{at}.jpg")).collect();
+        index.delete_paths(paths).expect("delete");
+        index.synced().expect("wait for the disk");
+        let full = std::fs::metadata(&path).expect("the index").len();
+
+        index.compact().expect("compact");
+        let after = std::fs::metadata(&path).expect("the index").len();
+        assert!(after < full, "the file was {full} bytes and is {after} after compacting");
+    }
+
+    /// The two ways an index cannot be read. Each is refused, each leaves the
+    /// file exactly as it was, and no index is left open.
     #[test]
     fn a_broken_index_stops_the_manager_and_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -674,54 +806,16 @@ mod tests {
         db::set_meta(&conn, "schema_version", "99").expect("move it on");
         drop(conn);
 
-        // One that cannot be written to, because the name a write needs is taken
-        // by something that is not a file.
-        let blocked = dir.path().join("blocked.sqlite");
-        drop(db::open_and_migrate(&blocked).expect("make one"));
-        std::fs::create_dir(db::being_written(&blocked)).expect("take the name");
-
-        for (path, why) in [
-            (&rubbish, "not a database"),
-            (&ahead, "another schema version"),
-            (&blocked, "a name a write needs"),
-        ] {
+        for (path, why) in [(&rubbish, "not a database"), (&ahead, "another schema version")] {
             let was = std::fs::read(path).expect("read what is there");
             let index = Index::start();
-            let refused = match index.hold(path) {
-                Err(err) => err.to_string(),
-                // An index that reads and cannot be written is found out when
-                // the writing is waited for, which is where it is said.
-                Ok(()) => index.let_go().expect_err("this was not refused").to_string(),
-            };
+            let refused = index.open(path).expect_err("this was not refused").to_string();
             assert!(!refused.is_empty(), "{why} was refused without saying why");
-            assert!(index.holding().is_none(), "{why} left the manager holding something");
+            assert!(index.open_index_path().is_none(), "{why} left an index open");
             assert_eq!(std::fs::read(path).expect("read"), was, "{why} was written over: {refused}");
         }
     }
 
-    /// A compaction whose write cannot finish leaves the index where it was
-    /// rather than half of a new one or none of it.
-    #[test]
-    fn a_compaction_that_cannot_finish_leaves_the_index_where_it_was() {
-        let (_dir, path) = temp();
-        let index = Index::start();
-        index.hold(&path).expect("hold");
-        index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("upsert");
-        index.synced().expect("write it out");
-        let was = std::fs::read(&path).expect("read the index");
-
-        // The name a write goes to first, taken by something that is not a file,
-        // so nothing can be written there.
-        std::fs::create_dir(db::being_written(&path)).expect("take the name");
-
-        let err = index.compact().expect_err("a compaction that cannot be written");
-        assert!(err.to_string().contains("could not be written"), "{err}");
-        assert_eq!(
-            std::fs::read(&path).expect("read the index"),
-            was,
-            "a compaction that could not be written left the index changed"
-        );
-    }
 
     /// Nothing outside the manager opens a database.
     ///

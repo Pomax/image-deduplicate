@@ -108,7 +108,7 @@ pub fn start(
         say(scan::Step::StartedOpeningTheIndexForWriting);
         #[cfg(feature = "logging")]
         let opening = std::time::Instant::now();
-        let outcome = index.hold(&options.db_path).and_then(|()| {
+        let outcome = index.open(&options.db_path).and_then(|()| {
             runlog::log_line!(
                 "  open the index for writing: {:.2}s",
                 opening.elapsed().as_secs_f64()

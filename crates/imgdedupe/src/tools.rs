@@ -310,7 +310,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
         let index = imgdedupe_core::index::Index::start();
-        index.hold(&db_path).expect("an index");
+        index.open(&db_path).expect("an index");
         for path in ["big.jpg", "small, odd.jpg", "elsewhere.jpg"] {
             index
                 .upsert(vec![row(path)], 1)
@@ -359,7 +359,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
         let index = imgdedupe_core::index::Index::start();
-        index.hold(&db_path).expect("an index");
+        index.open(&db_path).expect("an index");
         assert_eq!(forget(&index, &[]).expect("forget"), 0);
     }
 

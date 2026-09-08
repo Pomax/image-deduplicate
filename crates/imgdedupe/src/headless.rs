@@ -14,7 +14,7 @@ pub fn open_index(db_path: &Path) -> Result<imgdedupe_core::index::Index> {
         anyhow::bail!("no index at {}. Scan the folder first.", db_path.display());
     }
     let index = imgdedupe_core::index::Index::start();
-    index.hold(db_path)?;
+    index.open(db_path)?;
     Ok(index)
 }
 

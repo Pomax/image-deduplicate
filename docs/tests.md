@@ -36,15 +36,10 @@ is what the toolbar and the cleanup page show before anything is touched.
 
 A set puts every picture in the plan except the ones marked to keep.
 
-### a_set_with_nothing_marked_loses_none_of_it
+### a_set_with_nothing_marked_loses_all_of_it
 
-A set nobody has marked is a set nobody has reached, so none of it goes. This is
-the rule a half-finished review depends on.
-
-### a_set_marked_to_be_cleared_out_loses_all_of_it
-
-The one way to lose a whole set: the flag "keep none" puts on, which takes every
-picture whether or not any of them are marked.
+What is marked is kept, so a set that marks nothing keeps nothing and every
+picture in it goes.
 
 ### a_set_with_everything_marked_loses_none_of_it
 
@@ -171,8 +166,8 @@ read failed, and it went on to be written over the real index.
 
 ### letting_go_of_a_folder_waits_for_the_file_to_catch_up
 
-The manager holds the data and the file is a copy of it. Letting go answers only
-once the file holds everything the manager did.
+Closing an index answers only once the file holds every change made through the
+manager.
 
 ### a_scan_that_indexed_nothing_still_leaves_the_file_in_step
 
@@ -184,20 +179,37 @@ next run migrated it again.
 ### every_change_reaches_the_file
 
 One of every kind of change — rows written, rows deleted, a setting set, a
-setting forgotten, a pair marked, a compaction — then let go, and all of them are
-in the file.
+setting forgotten, a pair marked, a compaction — then the index is closed, and
+all of them are in the file.
+
+### a_change_is_in_the_file_once_the_writing_is_waited_for
+
+The same, without closing the index first: a setting is set, the writing is
+waited for, and a second connection to the file reads it back.
+
+### a_change_does_not_replace_the_file
+
+The file's creation time is the same before and after a change. The index used to
+be written beside the file and renamed onto it, which left a different file every
+time; it is now written into.
+
+### deleting_a_file_takes_its_ignored_pairs_out_of_the_file
+
+Two pictures, marked as not copies of each other, then one of them deleted. The
+pair is gone from the file, not only from the copy in memory. This fails if the
+connection the writer holds does not have `foreign_keys` on.
+
+### compacting_makes_the_file_smaller
+
+Four hundred rows written, then deleted, then a compaction: the file is smaller
+afterwards. A `VACUUM` on the copy in memory does not change the size of the file,
+so the file has to get one of its own.
 
 ### a_broken_index_stops_the_manager_and_writes_nothing
 
-The three ways an index is broken: it is not a database, it is written under a
-schema version this build does not speak, or it cannot be written to. Each is
-refused with a reason, each leaves the manager holding nothing, and each leaves
-the file byte for byte what it was.
-
-### a_compaction_that_cannot_finish_leaves_the_index_where_it_was
-
-The rebuilt index is written beside the file and renamed onto it, so a write that
-cannot finish leaves the index where it was rather than half of a new one.
+The two ways an index cannot be read: it is not a database, or it is written
+under a schema version this build does not speak. Each is refused with a reason,
+each leaves no index open, and each leaves the file byte for byte what it was.
 
 ### no_connection_is_made_outside_the_manager
 
@@ -1254,15 +1266,10 @@ picture of it in; keep all then does nothing, because a set being cleared out
 answers to one button only; and that button reads "keeping none", which puts it
 back.
 
-### a_set_marked_with_nothing_loses_none_of_it
+### a_set_marked_with_nothing_loses_all_of_it
 
-A review arrives marking nothing, and a plan built from it is empty. A review
-left half done does not delete the half nobody looked at.
-
-### a_set_told_to_clean_all_of_it_loses_every_picture
-
-A set flagged "clean all files" puts every picture in the plan, including one
-that is marked to keep.
+A review arrives marking nothing, so every picture of every set it found is
+there to be cleaned up.
 
 ### auto_marking_adds_the_best_copy_and_disturbs_nothing
 
@@ -1270,20 +1277,22 @@ On a real result of two sets, one already marking the copy that is not the best
 one. Auto-marking marks the best copy in the untouched set, and adds it to the
 other beside the mark that was already there.
 
-### auto_marking_leaves_ignored_and_cleared_out_sets_alone
+### auto_marking_leaves_ignored_sets_alone
 
-Both are answers already given, so neither gets a mark.
+A set nobody calls a set of copies is an answer already given, so it gets no
+mark.
 
-### ignoring_a_set_being_cleared_out_leaves_it_ignored_and_not_cleared
+### a_marked_picture_is_drawn_with_a_border_and_an_unmarked_one_is_not
 
-Saying a set is not a set of copies outranks saying to clear it out: the flag
-comes off, and the set loses nothing.
+Keeping a picture is two things on screen: a green border round it and the word
+KEEP under it. A review arrives with neither drawn, marking one draws both, and
+taking the mark off takes both away.
 
-### a_set_being_cleared_out_is_drawn_faded_and_its_buttons_are_not
+### the_ring_round_the_picture_shown_is_not_the_keep_border
 
-A set flagged "clean all files" is drawn at a quarter of its opacity, the way an
-ignored one is, and its buttons are not faded, because one of them is how the
-flag comes off again.
+The ring says where the cursor keys are and the border says what is kept, so a
+picture can have one, the other, both or neither. Taking the marks off leaves the
+ring where it is.
 
 ### the_review_state_is_not_written_to_the_index
 
@@ -1358,15 +1367,6 @@ Draws a really scanned set before and after it is ignored and reads the colour
 the writing was drawn in. The file names under the pictures come out at a quarter
 of the alpha they had; the row of buttons under them comes out unchanged, because
 the buttons are how a set stops being ignored.
-
-### a_picture_of_the_review_page
-
-Ignored unless it is asked for by name, and checks nothing. Draws the review page
-into a PNG — `IMGDEDUPE_SHOT` says where, otherwise the temporary folder — so what
-a change did to the window can be looked at instead of guessed at from the
-rectangles it reports. The window is drawn by a graphics card and a test has
-none, so `shot.rs` fills the triangles the toolkit's tessellator produces into a
-buffer of its own.
 
 ### a_sets_bar_runs_the_width_of_the_box_and_the_band_has_a_line_on_it
 
