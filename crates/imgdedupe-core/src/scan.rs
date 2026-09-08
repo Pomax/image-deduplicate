@@ -163,7 +163,6 @@ fn walk(
     // the size of a tree is as many answers as it has directories, and a total
     // that grows as they are found is a bar that goes backwards.
     let of = if options.recurse { None } else { dirlist::entry_count(&options.root) };
-    let sidecars = db::files_of_the_index(&options.db_path);
     let mut out = Vec::new();
     let mut queue = vec![options.root.clone()];
     let mut first = true;
@@ -203,10 +202,15 @@ fn walk(
             if !entry.is_file {
                 continue;
             }
-            let path = dir.join(&entry.name);
-            if sidecars.iter().any(|sidecar| &path == sidecar) {
+            // What the name claims. A file that claims none of the formats is
+            // not read at all: reading one to find out it is not a picture is
+            // the whole file over the network for an answer its name already
+            // gave. What it turns out to be is still decided by its first bytes,
+            // once there is a reason to have read them.
+            if format::from_extension(&entry.name).is_none() {
                 continue;
             }
+            let path = dir.join(&entry.name);
             let Ok(relative) = path.strip_prefix(&options.root) else {
                 continue;
             };
@@ -1039,7 +1043,7 @@ mod tests {
         // say they were fingerprinted by the version before this one. Written
         // into the file for the manager to pick up, because that is where a file
         // from an older build comes from.
-        fx.index.let_go().expect("let the folder go");
+        fx.index.close().expect("let the folder go");
         let older = rusqlite::Connection::open(&fx.options.db_path).expect("the index file");
         older
             .execute_batch(
@@ -1050,7 +1054,7 @@ mod tests {
             .expect("making an older index");
         drop(older);
 
-        fx.index.hold(&fx.options.db_path).expect("take the older index up");
+        fx.index.open(&fx.options.db_path).expect("take the older index up");
         let conn = on_disk(&fx);
         let corners: i64 = conn
             .query_row(
@@ -1086,7 +1090,7 @@ mod tests {
         let db_path = root.join(db::INDEX_FILENAME);
         let options = Options { root, db_path, recurse: true };
         let index = crate::index::Index::start();
-        index.hold(&options.db_path).expect("hold the index");
+        index.open(&options.db_path).expect("hold the index");
         Fixture { dir, options, index }
     }
 
@@ -1249,6 +1253,54 @@ mod tests {
         assert_eq!(db::get_meta(&conn, "recurse").expect("meta").as_deref(), Some("1"));
     }
 
+    /// A file whose name claims no picture format is never read. The index is
+    /// one of those, and so is everything SQLite keeps beside it, which is why
+    /// the walk no longer has to be told their names.
+    ///
+    /// The proof that it is not read is its size: a file large enough that
+    /// reading it would be noticed, and the pass reports how many bytes it read.
+    #[test]
+    fn a_file_that_claims_no_format_is_not_read() {
+        let fx = fixture();
+        write_image(&fx.dir.path().join("a.png"), 40, 30, 1);
+        let read_me_and_see = vec![b'x'; 4 * 1024 * 1024];
+        std::fs::write(fx.dir.path().join("notes.txt"), &read_me_and_see).expect("a fixture");
+        let beside = format!("{}-journal", db::INDEX_FILENAME);
+        std::fs::write(fx.dir.path().join(beside), &read_me_and_see).expect("a fixture");
+
+        let (summary, _) = scan(&fx);
+
+        assert_eq!(summary.indexed, 1, "the pass indexed something that is not a picture");
+        assert_eq!(summary.failed, 0, "the pass tried to read something it should not have");
+        let conn = on_disk(&fx);
+        let rows: i64 =
+            conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).expect("count");
+        assert_eq!(rows, 1, "the index holds a file that is not a picture");
+    }
+
+    /// The name says whether to read a file. The bytes say what it is. A JPEG
+    /// called `.png` is read because the name claims a format, and indexed as
+    /// the JPEG its first bytes say it is.
+    #[test]
+    fn what_a_file_is_comes_from_its_bytes_not_its_name() {
+        let fx = fixture();
+        let picture = RgbImage::from_fn(40, 30, |x, y| {
+            image::Rgb([(x % 256) as u8, ((y * 3) % 256) as u8, 90])
+        });
+        DynamicImage::ImageRgb8(picture)
+            .save_with_format(fx.dir.path().join("liar.png"), image::ImageFormat::Jpeg)
+            .expect("writing a fixture");
+
+        let (summary, _) = scan(&fx);
+
+        assert_eq!(summary.indexed, 1, "the pass did not index it");
+        let conn = on_disk(&fx);
+        let format: String = conn
+            .query_row("SELECT format FROM images", [], |row| row.get(0))
+            .expect("the row it indexed");
+        assert_eq!(format, "jpeg", "it was indexed as what it was called");
+    }
+
     /// A read-ahead told what the machine has to spare.
     fn read_ahead_with(spare: std::sync::Arc<std::sync::atomic::AtomicU64>) -> ReadAhead {
         ReadAhead::asking(Box::new(move || Some(spare.load(Ordering::Relaxed))))
@@ -1362,7 +1414,7 @@ mod tests {
         assert_eq!(first.indexed, 5, "the folder was not indexed to begin with");
 
         // The same index as written by a build that kept nanoseconds.
-        fx.index.let_go().expect("let the folder go");
+        fx.index.close().expect("let the folder go");
         let other = rusqlite::Connection::open(&fx.options.db_path).expect("the index file");
         other
             .execute_batch(
@@ -1372,7 +1424,7 @@ mod tests {
             )
             .expect("an index in nanoseconds");
         drop(other);
-        fx.index.hold(&fx.options.db_path).expect("take it up again");
+        fx.index.open(&fx.options.db_path).expect("take it up again");
 
         let (again, _) = scan(&fx);
         assert_eq!(again.indexed, 0, "every file was read again on the other machine");
@@ -1439,15 +1491,15 @@ mod tests {
         assert_eq!(width, 100);
     }
 
-    /// A file that is not a picture gets no row, so every later pass reads it
-    /// again. The pass says how many of those it read, so they are not mistaken
-    /// for work that produced something.
+    /// A file that claimed a format and turned out not to be one gets no row, so
+    /// every later pass reads it again. The pass says how many of those it read,
+    /// so they are not mistaken for work that produced something.
     #[test]
     fn files_that_are_not_images_are_neither_indexed_nor_failures() {
         let fx = fixture();
         write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
-        std::fs::write(fx.dir.path().join("notes.txt"), b"just some text").expect("write");
-        std::fs::write(fx.dir.path().join("archive.zip"), b"PK\x03\x04rest").expect("write");
+        std::fs::write(fx.dir.path().join("notes.png"), b"just some text").expect("write");
+        std::fs::write(fx.dir.path().join("archive.png"), b"PK\x03\x04rest").expect("write");
         let (summary, events) = scan(&fx);
         assert_eq!(summary.indexed, 1);
         assert_eq!(summary.failed, 0);
@@ -1516,7 +1568,7 @@ mod tests {
         let options = Options { root: root.clone(), db_path: db_path.clone(), recurse: true };
 
         let index = crate::index::Index::start();
-        index.hold(&db_path).expect("hold the index");
+        index.open(&db_path).expect("hold the index");
         let cancel = AtomicBool::new(false);
         let (summary, _) = run(&index, &options, &cancel, &|_| {}).expect("scan");
         assert_eq!(summary.indexed, 1, "the folder it was pointed at was skipped");

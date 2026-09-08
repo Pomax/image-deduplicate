@@ -38,6 +38,45 @@ impl Format {
         }
     }
 
+    /// The extensions this format is written under, lower case and without the
+    /// dot.
+    ///
+    /// A name is what a walk has before it has read anything, so it is what
+    /// decides whether a file is worth reading at all. What the file turns out
+    /// to be is still `detect`'s answer, from the bytes.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Format::Jpeg => &["jpg", "jpeg", "jpe", "jfif"],
+            Format::Png => &["png"],
+            Format::Gif => &["gif"],
+            Format::WebP => &["webp"],
+            Format::Tiff => &["tif", "tiff"],
+            Format::Heic => &["heic", "heif"],
+            Format::Cr2 => &["cr2"],
+            Format::Cr3 => &["cr3"],
+            Format::Nef => &["nef"],
+            Format::Arw => &["arw"],
+            Format::Rw2 => &["rw2"],
+        }
+    }
+
+    /// Every format, for anything that has to go through all of them.
+    pub fn every() -> &'static [Format] {
+        &[
+            Format::Jpeg,
+            Format::Png,
+            Format::Gif,
+            Format::WebP,
+            Format::Tiff,
+            Format::Heic,
+            Format::Cr2,
+            Format::Cr3,
+            Format::Nef,
+            Format::Arw,
+            Format::Rw2,
+        ]
+    }
+
     /// Whether the encoding discards information. Used by the keep score.
     ///
     /// A raw file is what the sensor recorded, so it counts as lossless however
@@ -59,6 +98,19 @@ impl fmt::Display for Format {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// The format a name claims, or nothing if the name claims none of them.
+///
+/// What a file is called, not what it is: this is the shortlist a walk draws up
+/// before it reads anything, and `detect` is what then confirms or refuses it.
+pub fn from_extension(name: &str) -> Option<Format> {
+    let dot = name.rfind('.')?;
+    let extension = name[dot + 1..].to_ascii_lowercase();
+    Format::every()
+        .iter()
+        .copied()
+        .find(|format| format.extensions().contains(&extension.as_str()))
 }
 
 /// How many bytes `detect` needs to reach a verdict on every supported format.
@@ -151,6 +203,33 @@ mod tests {
         out.extend_from_slice(maker.as_bytes());
         out.push(0);
         out
+    }
+
+    /// The shortlist a walk draws up from names alone. Every format is reachable
+    /// by each of the extensions it is written under, and a name that claims
+    /// none of them claims nothing.
+    #[test]
+    fn every_extension_names_the_format_it_belongs_to() {
+        for format in Format::every() {
+            for extension in format.extensions() {
+                assert_eq!(
+                    from_extension(&format!("holiday.{extension}")),
+                    Some(*format),
+                    "{extension} did not name {format}"
+                );
+            }
+        }
+        for name in ["notes.txt", "imgdedupe.sqlite", "imgdedupe.sqlite-journal", "README"] {
+            assert_eq!(from_extension(name), None, "{name} was taken for a picture");
+        }
+    }
+
+    /// A name is a name however it is typed.
+    #[test]
+    fn an_extension_in_capitals_is_the_same_extension() {
+        assert_eq!(from_extension("HOLIDAY.JPG"), Some(Format::Jpeg));
+        assert_eq!(from_extension("holiday.JpEg"), Some(Format::Jpeg));
+        assert_eq!(from_extension("raw.CR2"), Some(Format::Cr2));
     }
 
     #[test]

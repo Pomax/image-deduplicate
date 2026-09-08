@@ -178,7 +178,17 @@ fn csv_field(value: &str) -> String {
 
 /// Everything the automatic pick would remove, across every set.
 fn plan_from(sets: &[DuplicateSet]) -> Plan {
-    cleanup::plan_from_sets(sets.iter().map(|set| set.members.as_slice()))
+    // Nobody is here to mark anything, so what the search would keep is what is
+    // kept: the best copy in each set, and the rest of the set goes.
+    let kept: Vec<Vec<i64>> = sets
+        .iter()
+        .map(|set| set.members.iter().filter(|m| m.auto_keep).map(|m| m.file_id).collect())
+        .collect();
+    cleanup::plan_from_sets(
+        sets.iter()
+            .zip(&kept)
+            .map(|(set, kept)| (set.members.as_slice(), kept.as_slice())),
+    )
 }
 
 fn describe(plan: &Plan) -> String {
@@ -242,7 +252,7 @@ mod tests {
     use super::*;
     use imgdedupe_core::matching::Member;
 
-    fn member(id: i64, path: &str, keep: bool, size: i64) -> Member {
+    fn member(id: i64, path: &str, auto_keep: bool, size: i64) -> Member {
         Member {
             file_id: id,
             rel_path: path.to_string(),
@@ -252,7 +262,7 @@ mod tests {
             channels: 3,
             size_bytes: size,
             mtime_ms: 1,
-            auto_keep: keep,
+            auto_keep,
         }
     }
 
@@ -300,7 +310,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
         let index = imgdedupe_core::index::Index::start();
-        index.hold(&db_path).expect("an index");
+        index.open(&db_path).expect("an index");
         for path in ["big.jpg", "small, odd.jpg", "elsewhere.jpg"] {
             index
                 .upsert(vec![row(path)], 1)
@@ -349,7 +359,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("index.sqlite");
         let index = imgdedupe_core::index::Index::start();
-        index.hold(&db_path).expect("an index");
+        index.open(&db_path).expect("an index");
         assert_eq!(forget(&index, &[]).expect("forget"), 0);
     }
 

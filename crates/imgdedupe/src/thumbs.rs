@@ -356,8 +356,11 @@ impl Thumbnails {
         let image = self.ready.remove(&key)?;
         let (file_id, edge) = key;
         let at = std::time::Instant::now();
-        let handle =
-            painter.load_texture(format!("preview{edge}-{file_id}"), image, TextureOptions::default());
+        let handle = painter.load_texture(
+            format!("preview{edge}-{file_id}"),
+            image,
+            TextureOptions::default(),
+        );
         self.tally.uploading += at.elapsed().as_secs_f64();
         self.textures.insert(key, handle.clone());
         Some(handle)

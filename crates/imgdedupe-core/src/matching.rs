@@ -120,6 +120,9 @@ pub struct Member {
     /// When the file was last written, as milliseconds since the epoch. Nothing
     /// here reads a date out of the file's own metadata.
     pub mtime_ms: i64,
+    /// The one the search would keep if it were choosing: the largest, least
+    /// re-encoded copy in the set. Nothing is kept or removed on account of it.
+    /// It is what "auto-mark to keep" marks.
     pub auto_keep: bool,
 }
 
@@ -130,7 +133,9 @@ pub struct DuplicateSet {
 }
 
 impl DuplicateSet {
-    /// Bytes freed by keeping only the marked member.
+    /// Bytes freed by keeping the best copy and no other. What the command line
+    /// reports and sorts by: it has nobody to mark anything, so what the search
+    /// would keep is what it keeps.
     pub fn recoverable_bytes(&self) -> i64 {
         self.members.iter().filter(|m| !m.auto_keep).map(|m| m.size_bytes).sum()
     }
@@ -1003,9 +1008,11 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
                     }
                 })
                 .collect();
-            members.sort_by(|a, b| {
-                b.auto_keep.cmp(&a.auto_keep).then(a.rel_path.cmp(&b.rel_path))
-            });
+            // Oldest first: a duplicate is usually a copy made after the picture
+            // it came from, so the set reads left to right in the order the
+            // files appeared. The path settles two written in the same
+            // millisecond, so a set comes back in the same order every time.
+            members.sort_by(|a, b| a.mtime_ms.cmp(&b.mtime_ms).then(a.rel_path.cmp(&b.rel_path)));
             DuplicateSet { set_id: images[root as usize].file_id, members }
         })
         .collect()
@@ -1066,11 +1073,25 @@ mod tests {
     }
 
     fn insert(conn: &mut Connection, path: &str, seed: u64, width: u32, height: u32, size: i64, ring: Vec<u8>) {
+        insert_written_at(conn, path, seed, width, height, size, ring, 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_written_at(
+        conn: &mut Connection,
+        path: &str,
+        seed: u64,
+        width: u32,
+        height: u32,
+        size: i64,
+        ring: Vec<u8>,
+        mtime_ms: i64,
+    ) {
         let hash = hash_seeded(seed);
         let record = db::Record {
             rel_path: path.to_string(),
             size_bytes: size,
-            mtime_ms: 1,
+            mtime_ms,
             width,
             height,
             format: Format::Jpeg,
@@ -1364,6 +1385,22 @@ mod tests {
         assert!(aspect_ok(1600.0, 1200.0, 1200.0, 1600.0));
         assert!(aspect_ok(1600.0, 1200.0, 800.0, 600.0));
         assert!(!aspect_ok(1600.0, 1200.0, 1600.0, 400.0));
+    }
+
+    /// A duplicate is usually a copy made after the picture it came from, so a
+    /// set reads left to right in the order the files appeared, whatever order
+    /// the search happened to come across them in.
+    #[test]
+    fn a_set_comes_back_oldest_first() {
+        let mut conn = open();
+        insert_written_at(&mut conn, "later.jpg", 0x1234, 1600, 1200, 300_000, ring(0.5), 3_000);
+        insert_written_at(&mut conn, "earlier.jpg", 0x1234, 400, 300, 20_000, ring(0.5), 1_000);
+        insert_written_at(&mut conn, "between.jpg", 0x1234, 800, 600, 90_000, ring(0.5), 2_000);
+
+        let sets = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
+        let order: Vec<&str> =
+            sets[0].members.iter().map(|member| member.rel_path.as_str()).collect();
+        assert_eq!(order, ["earlier.jpg", "between.jpg", "later.jpg"]);
     }
 
     #[test]

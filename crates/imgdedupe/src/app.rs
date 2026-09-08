@@ -201,16 +201,14 @@ fn scroll_to_show(
     ((wanted - offset).abs() > 0.5).then_some(wanted)
 }
 
-/// What a set is keeping. A set with no entry at all is keeping nothing, and
-/// every picture in it goes: what is marked is what is kept.
+/// What a set is keeping. A set with no entry at all has been marked with
+/// nothing, which is a set nobody has reached: it keeps everything it has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Keep {
     One(i64),
-    /// More than one picture, which is what marking a second one does while
-    /// "allow multi-select" is on. Never one and never none: one picture is `One`
-    /// and no picture is no entry at all.
+    /// More than one picture. Never one and never none: one picture is `One` and
+    /// no picture is no entry at all.
     Several(Vec<i64>),
-    All,
 }
 
 impl Keep {
@@ -218,7 +216,14 @@ impl Keep {
         match self {
             Keep::One(kept) => *kept == file_id,
             Keep::Several(kept) => kept.contains(&file_id),
-            Keep::All => true,
+        }
+    }
+
+    /// The pictures marked, for the cleanup to read.
+    fn marked(&self) -> Vec<i64> {
+        match self {
+            Keep::One(kept) => vec![*kept],
+            Keep::Several(kept) => kept.clone(),
         }
     }
 }
@@ -229,28 +234,18 @@ fn keeps(keeping: Option<&Keep>, file_id: i64) -> bool {
 }
 
 /// What a set keeps once one more picture is marked, and once one is unmarked.
-/// A set that ends up keeping nothing has no entry, which is what `None` says.
-fn marked(keeping: Option<&Keep>, members: &[i64], file_id: i64) -> Option<Keep> {
-    let mut kept = spelled_out(keeping, members);
+/// A set that ends up marked with nothing has no entry, which is what `None`
+/// says.
+fn marked(keeping: Option<&Keep>, file_id: i64) -> Option<Keep> {
+    let mut kept = keeping.map(Keep::marked).unwrap_or_default();
     kept.push(file_id);
     as_keep(kept)
 }
 
-fn unmarked(keeping: Option<&Keep>, members: &[i64], file_id: i64) -> Option<Keep> {
-    let mut kept = spelled_out(keeping, members);
+fn unmarked(keeping: Option<&Keep>, file_id: i64) -> Option<Keep> {
+    let mut kept = keeping.map(Keep::marked).unwrap_or_default();
     kept.retain(|id| *id != file_id);
     as_keep(kept)
-}
-
-/// Every picture a set keeps, by name. `All` is the set itself, so it is written
-/// out here before one of them can be taken off it.
-fn spelled_out(keeping: Option<&Keep>, members: &[i64]) -> Vec<i64> {
-    match keeping {
-        Some(Keep::One(kept)) => vec![*kept],
-        Some(Keep::Several(kept)) => kept.clone(),
-        Some(Keep::All) => members.to_vec(),
-        None => Vec::new(),
-    }
 }
 
 fn as_keep(kept: Vec<i64>) -> Option<Keep> {
@@ -642,6 +637,9 @@ fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
 /// the row lays them out with.
 const BUTTON_ROW_GAP: f32 = 2.0;
 
+/// How far in from the left edge of the box the row of buttons starts.
+const BUTTON_ROW_INSET: f32 = 5.0;
+
 /// The band those buttons sit on.
 const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
 
@@ -761,6 +759,24 @@ const BOX_EDGE: f32 = 1.0;
 /// What a box keeps between its edge and the pictures in it. The band of
 /// buttons keeps none: it is the bottom of the box.
 const BOX_PADDING: f32 = 6.0;
+
+/// What a button has to be to hold any of the words it can say, with the padding
+/// around them.
+fn button_width(ui: &egui::Ui, says: &[&str]) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let widest = says
+        .iter()
+        .map(|words| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap((*words).to_string(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+        })
+        .fold(0.0_f32, f32::max);
+    widest + 2.0 * PRESET_PADDING.x
+}
 
 /// The row of buttons along the bottom of a set, with the space above it.
 fn button_row_height(ui: &egui::Ui) -> f32 {
@@ -1221,10 +1237,28 @@ pub struct App {
     /// and kept in the index, which is also the thing it depends on: a folder
     /// with no index has nothing to run on opening.
     auto_rescan: bool,
+    /// Whether a pass that has run on opening goes on to mark the best copy in
+    /// each set, so a folder can be opened with the obvious answers already
+    /// filled in. Kept in the index, and depends on the box above it: there is
+    /// nowhere for this to happen if no pass runs.
+    auto_mark: bool,
+    /// Whether the sets the search is about to hand over are the ones a pass
+    /// asked to have marked. Set when that pass finishes and read when they
+    /// arrive, since there is nothing to mark until then.
+    mark_on_arrival: bool,
     /// The index being read, on a thread of its own. The folder can be on
     /// another machine, and this is a file opened across the network before
     /// anything has been drawn.
     asking: Option<std::sync::mpsc::Receiver<Opened>>,
+    /// Whether a pass has started since the folder was asked about itself.
+    ///
+    /// The pictures read on opening describe the folder as it was before the
+    /// pass, and the pass hands over its own, newer copy. Which of the two
+    /// arrives first is a race: both are answered by the one thing that owns the
+    /// index, and on a busy machine the read from opening can come back after
+    /// the pass has already finished. This says the older copy is not to be
+    /// taken, however late it turns up.
+    scanned_since_asking: bool,
     /// The one thing that owns the folder's index. Everything that reads or
     /// writes it asks this.
     index: imgdedupe_core::index::Index,
@@ -1248,10 +1282,6 @@ pub struct App {
     /// The keep marks per set, held here and not in the index: a review session
     /// is not a fact about a file on disk.
     keep: HashMap<i64, Keep>,
-    /// Whether marking a picture adds to what its set keeps instead of taking
-    /// the place of what is marked. A fact about reviewing this folder, so it is
-    /// kept in the folder's index beside where a cleanup sends what it removes.
-    multi_select: bool,
 
     destination: Destination,
     move_dir: String,
@@ -1358,7 +1388,10 @@ impl App {
             within_a_folder: false,
             ignored: std::collections::HashSet::new(),
             auto_rescan: false,
+            auto_mark: false,
+            mark_on_arrival: false,
             asking: None,
+            scanned_since_asking: false,
             index: imgdedupe_core::index::Index::start(),
             noted: false,
             // What counts as a duplicate is a decision about the pictures in
@@ -1371,7 +1404,6 @@ impl App {
             search_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sets: Vec::new(),
             keep: HashMap::new(),
-            multi_select: false,
             destination: Destination::Trash,
             move_dir: String::new(),
             removing: None,
@@ -1646,7 +1678,12 @@ impl App {
                         // Searching an empty folder lights two more lamps and
                         // fills a bar for work that cannot have happened.
                         None if self.scan.total == 0 => {}
-                        None => self.load_sets(),
+                        None => {
+                            // The marking happens to the sets, which do not
+                            // exist until the search this starts comes back.
+                            self.mark_on_arrival = self.auto_mark;
+                            self.load_sets();
+                        }
                     }
                     return;
                 }
@@ -1842,6 +1879,13 @@ impl App {
                     "Automatically rescan when opening this index",
                 ),
             );
+            // Under the box about rescanning and about it: marking on its own
+            // happens at the end of a pass, so with no pass running on opening
+            // there is nothing for it to happen at the end of.
+            let on_marking = ui.add_enabled(
+                !busy && self.keep_index && self.auto_rescan,
+                egui::Checkbox::new(&mut self.auto_mark, "Automatically mark to keep"),
+            );
             if remember.changed() && !self.keep_index {
                 // The index is what remembering a folder amounts to, so taking
                 // the tick off takes the index with it. On its own thread: this
@@ -1870,11 +1914,11 @@ impl App {
             // A box that has just lost what it depends on comes off, and is
             // written out that way rather than left ticked in the index for the
             // next run to read back.
-            let depended_on = subfolders.changed() || remember.changed();
+            let depended_on = subfolders.changed() || remember.changed() || on_opening.changed();
             if depended_on {
                 self.settle_the_boxes();
             }
-            if apart.changed() || on_opening.changed() || depended_on {
+            if apart.changed() || on_opening.changed() || on_marking.changed() || depended_on {
                 self.remember_ways_of_matching();
             }
             if subfolders.changed() || remember.changed() || apart.changed() {
@@ -2056,6 +2100,7 @@ impl App {
     /// answers a folder gives until another folder gives its own.
     fn ask_the_index(&mut self) {
         self.asking = None;
+        self.scanned_since_asking = false;
         // Whatever the last folder said is not true of this one. What this one
         // says arrives with its index.
         self.ignored.clear();
@@ -2080,7 +2125,7 @@ impl App {
             // Everything below is the manager's work, on this thread rather than
             // the one that draws: for a folder on another machine, taking up an
             // index is a request over the network.
-            if let Err(err) = index.hold(&db_path) {
+            if let Err(err) = index.open(&db_path) {
                 let _ = send.send(Opened::Failed(format!("{err:#}")));
                 return;
             }
@@ -2169,8 +2214,9 @@ impl App {
                 Opened::Index(images) => {
                     self.light(Lamp::LoadedIndexIntoMemory);
                     // A pass that started in the meantime is reading the same
-                    // folder and will hand over its own, newer copy.
-                    if self.running.is_none() {
+                    // folder and hands over its own, newer copy, whether it is
+                    // still running or has already finished.
+                    if !self.scanned_since_asking {
                         self.images = Some(images);
                     }
                     self.search = SearchState::default();
@@ -2501,6 +2547,8 @@ impl App {
         // that came out of it: the sets, what was marked to keep in them, what is
         // selected, and the pictures loaded for them.
         self.images = None;
+        // Including the ones the opening read is still on its way back with.
+        self.scanned_since_asking = true;
         self.sets.clear();
         self.keep.clear();
         self.selected = None;
@@ -2660,12 +2708,10 @@ impl App {
             return;
         }
 
-        for set in &sets {
-            if let Some(member) = set.members.iter().find(|member| member.auto_keep) {
-                self.keep.insert(set.set_id, Keep::One(member.file_id));
-            }
-        }
         self.sets = sets;
+        if std::mem::take(&mut self.mark_on_arrival) {
+            self.auto_mark_to_keep();
+        }
         self.preselect_first_keeper();
         if let Some(root) = self.folder.clone() {
             // The picture the pane opens on is asked for before the thumbnails,
@@ -2723,8 +2769,8 @@ impl App {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            if left.checkbox(&mut self.multi_select, "allow multi-select").changed() {
-                self.remember_multi_select();
+            if left.button("auto-mark to keep").clicked() {
+                self.auto_mark_to_keep();
             }
 
             let mut middle = ui.new_child(
@@ -2765,7 +2811,11 @@ impl App {
             }
         }
         if ui.input(|input| input.key_pressed(egui::Key::Space)) {
-            self.keep_selected();
+            if ui.input(|input| input.modifiers.shift) {
+                self.keep_only_selected();
+            } else {
+                self.keep_selected();
+            }
         }
 
         self.preview_pane(ui, &root);
@@ -2833,20 +2883,6 @@ impl App {
 
     /// Whether marking a picture adds to what its set keeps. This belongs to the
     /// folder as well: a folder reviewed one picture at a time is reviewed that
-    /// way again the next time it is opened.
-    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
-    fn remember_multi_select(&self) {
-        let Some(db_path) = &self.db_path else {
-            return;
-        };
-        let _ = db_path;
-        let stored = if self.multi_select { "1" } else { "0" };
-        let result = self.index.set_meta("multi_select", stored);
-        if let Err(err) = result {
-            runlog::log_line!("the multi-select choice could not be written: {err:#}");
-        }
-    }
-
     /// Whether every picture in a set has been said not to be a copy of every
     /// other picture in it. A set like that is shown, so it can be seen and
     /// changed back, and nothing else in the program acts on it.
@@ -2923,9 +2959,6 @@ impl App {
         if let Some(folder) = notes.move_dir {
             self.move_dir = folder;
         }
-        if let Some(setting) = notes.multi_select {
-            self.multi_select = setting;
-        }
         if let Some(setting) = notes.match_whole_frame {
             self.match_whole_frame = setting;
         }
@@ -2938,8 +2971,11 @@ impl App {
         if let Some(setting) = notes.auto_rescan {
             self.auto_rescan = setting;
         }
-        // Neither box means anything without the one above it, and a box that
-        // means nothing is not left ticked.
+        if let Some(setting) = notes.auto_mark {
+            self.auto_mark = setting;
+        }
+        // None of these boxes means anything without the one above it, and a box
+        // that means nothing is not left ticked.
         self.settle_the_boxes();
     }
 
@@ -2953,6 +2989,9 @@ impl App {
         if !self.keep_index {
             self.auto_rescan = false;
         }
+        if !self.auto_rescan {
+            self.auto_mark = false;
+        }
     }
 
     /// Which ways of matching this folder is searched with. A fact about the
@@ -2964,13 +3003,16 @@ impl App {
             return;
         };
         let _ = db_path;
-        use crate::notes::{mark, MATCH_CORNERS, MATCH_WHOLE_FRAME, AUTO_RESCAN, WITHIN_A_FOLDER};
+        use crate::notes::{
+            mark, AUTO_MARK, AUTO_RESCAN, MATCH_CORNERS, MATCH_WHOLE_FRAME, WITHIN_A_FOLDER,
+        };
         let result = self
             .index
             .set_meta(MATCH_WHOLE_FRAME, mark(self.match_whole_frame))
             .and_then(|()| self.index.set_meta(MATCH_CORNERS, mark(self.match_corners)))
             .and_then(|()| self.index.set_meta(WITHIN_A_FOLDER, mark(self.within_a_folder)))
-            .and_then(|()| self.index.set_meta(AUTO_RESCAN, mark(self.auto_rescan)));
+            .and_then(|()| self.index.set_meta(AUTO_RESCAN, mark(self.auto_rescan)))
+            .and_then(|()| self.index.set_meta(AUTO_MARK, mark(self.auto_mark)));
         if let Err(err) = result {
             runlog::log_line!("the ways of matching could not be written: {err:#}");
         }
@@ -3026,12 +3068,39 @@ impl App {
         self.show_selected = true;
     }
 
+    /// Mark the best copy in every set that has not been dealt with, leaving
+    /// every other mark where it is.
+    ///
+    /// It only ever adds. A set that already marks something keeps that and
+    /// gains the best copy as well, unless that is what it already marks. A set
+    /// nobody calls a set of copies is an answer already given, so it gets no
+    /// mark.
+    fn auto_mark_to_keep(&mut self) {
+        let best: Vec<(i64, i64)> = self
+            .sets
+            .iter()
+            .filter(|set| !self.is_ignored(set))
+            .filter_map(|set| {
+                let best = set.members.iter().find(|member| member.auto_keep)?;
+                Some((set.set_id, best.file_id))
+            })
+            .collect();
+        for (set_id, file_id) in best {
+            let keeping = self.keep.get(&set_id);
+            if keeps(keeping, file_id) {
+                continue;
+            }
+            if let Some(now) = marked(keeping, file_id) {
+                self.keep.insert(set_id, now);
+            }
+        }
+    }
+
     /// Mark or unmark the picture the preview is showing, which is what the space
     /// bar and a double click both do.
     ///
-    /// One already marked comes off, and a set can end up keeping nothing. One
-    /// that is not marked goes on: on its own while "allow multi-select" is off, and
-    /// beside whatever the set already keeps while it is on.
+    /// One already marked comes off, and a set can end up marked with nothing.
+    /// One that is not marked goes on, beside whatever the set already marks.
     fn keep_selected(&mut self) {
         let Some(file_id) = self.selected else {
             return;
@@ -3048,20 +3117,42 @@ impl App {
             return;
         }
         let set_id = set.set_id;
-        let members: Vec<i64> = set.members.iter().map(|member| member.file_id).collect();
-
         let keeping = self.keep.get(&set_id);
+        // A mark says to keep this picture and says nothing about any other, so
+        // marking one never unmarks another. This is the only way a mark is put
+        // on or taken off.
         let now = if keeps(keeping, file_id) {
-            unmarked(keeping, &members, file_id)
-        } else if self.multi_select {
-            marked(keeping, &members, file_id)
+            unmarked(keeping, file_id)
         } else {
-            Some(Keep::One(file_id))
+            marked(keeping, file_id)
         };
         match now {
             Some(keep) => self.keep.insert(set_id, keep),
             None => self.keep.remove(&set_id),
         };
+    }
+
+    /// Make the picture the preview is showing the one thing its set keeps,
+    /// which is what shift and the space bar, or shift and a double click, do.
+    ///
+    /// Not a toggle. It says which picture, so pressing it on the one already
+    /// marked leaves it marked, and every other mark in that set comes off.
+    fn keep_only_selected(&mut self) {
+        let Some(file_id) = self.selected else {
+            return;
+        };
+        let Some(set) =
+            self.sets.iter().find(|set| set.members.iter().any(|member| member.file_id == file_id))
+        else {
+            return;
+        };
+        // As with the toggle: a set nobody calls a set of copies keeps nothing
+        // and loses nothing, and what it kept is left as it was.
+        if self.is_ignored(set) {
+            return;
+        }
+        let set_id = set.set_id;
+        self.keep.insert(set_id, Keep::One(file_id));
     }
 
     /// Where the preview is in the list on screen, as a set and a place in it.
@@ -3081,22 +3172,11 @@ impl App {
     /// How many pictures are not marked to keep, and how many bytes they are.
     /// That is what a cleanup would take, so it is what the toolbar counts.
     fn selected_for_removal(&self) -> (usize, i64) {
-        let mut count = 0usize;
-        let mut bytes = 0i64;
-        for set in &self.sets {
-            // Nothing goes from a set that is not a set of copies.
-            if self.is_ignored(set) {
-                continue;
-            }
-            let keeping = self.keep.get(&set.set_id);
-            for member in &set.members {
-                if !keeps(keeping, member.file_id) {
-                    count += 1;
-                    bytes += member.size_bytes;
-                }
-            }
-        }
-        (count, bytes)
+        // Asked of the plan rather than worked out again here. What a cleanup
+        // takes is one rule, and a count that reads the marks its own way is a
+        // second copy of it that can disagree with the button.
+        let plan = self.build_plan();
+        (plan.files(), plan.bytes())
     }
 
     /// The first set that is a set of copies, not simply the first set. A set
@@ -3604,7 +3684,9 @@ impl App {
                 let mut pressed = None;
                 ui.allocate_new_ui(
                     egui::UiBuilder::new()
-                        .max_rect(band)
+                        // In from the left edge of the box, so the line round the
+                        // first button is drawn rather than clipped away by it.
+                        .max_rect(band.with_min_x(band.left() + BUTTON_ROW_INSET))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
                         // The presets under the slider are a row of buttons the
@@ -3612,21 +3694,27 @@ impl App {
                         // one that is on drawn as pressed. These are the same,
                         // because they are the same kind of thing.
                         ui.spacing_mut().button_padding = PRESET_PADDING;
-                        for (label, what) in [
-                            ("keep all", SetAction::KeepAll),
-                            ("keep none", SetAction::KeepNone),
+                        for (label, what, says) in [
+                            ("keep all", SetAction::KeepAll, ["keep all"; 2]),
+                            ("keep none", SetAction::KeepNone, ["keep none"; 2]),
                             // The third one undoes itself: a set that has been
                             // ignored is one press away from being a set again.
                             (
-                                if ignored { "unignore" } else { "ignore" },
+                                if ignored { "ignored" } else { "ignore" },
                                 if ignored { SetAction::Unignore } else { SetAction::Ignore },
+                                ["ignore", "ignored"],
                             ),
                         ] {
                             // An ignored set keeps nothing, so the two about
                             // keeping mean nothing until it is a set again.
                             let usable = !ignored || what == SetAction::Unignore;
-                            let button =
-                                egui::Button::new(label).wrap_mode(egui::TextWrapMode::Extend);
+                            // As wide as the widest thing it can ever say. A
+                            // button that fits its current word changes width
+                            // when the word changes, and takes every button to
+                            // the right of it along with it.
+                            let button = egui::Button::new(label)
+                                .wrap_mode(egui::TextWrapMode::Extend)
+                                .min_size(egui::vec2(button_width(ui, &says), 0.0));
                             if ui.add_enabled(usable, button).clicked() {
                                 pressed = Some(what);
                             }
@@ -3634,10 +3722,20 @@ impl App {
                     },
                 );
                 match pressed {
+                    // Every picture in the set marked, and shown as marked. A
+                    // cleanup takes nothing from it, the same as a set nobody has
+                    // reached, but the set says so rather than looking untouched.
                     Some(SetAction::KeepAll) => {
-                        self.keep.insert(set_id, Keep::All);
+                        let all: Vec<i64> =
+                            members.iter().map(|member| member.file_id).collect();
+                        match as_keep(all) {
+                            Some(keep) => self.keep.insert(set_id, keep),
+                            None => self.keep.remove(&set_id),
+                        };
                     }
-                    // Nothing marked is nothing kept, so the whole set goes.
+                    // Nothing in the set is marked to keep any more. By the rule
+                    // above that leaves the set losing nothing, the same as one
+                    // nobody has reached.
                     Some(SetAction::KeepNone) => {
                         self.keep.remove(&set_id);
                     }
@@ -3727,10 +3825,8 @@ impl App {
                     .outer_margin(egui::Margin::symmetric(TILE_RING, 0.0));
 
                 let framed = frame.show(ui, |ui| {
-                    // The same picture whether or not the set is ignored. There
-                    // is one of each, read once: a second copy of every picture
-                    // would be a second read and a second wait, and ignoring a
-                    // set has to show the moment it is clicked.
+                    // The same picture whether or not the set is ignored, which
+                    // is drawn at half its opacity rather than read again.
                     let picture = on_screen
                         .then(|| {
                             self.thumbs.get(
@@ -3773,10 +3869,15 @@ impl App {
                     self.selected = Some(member.file_id);
                 }
                 // Twice on a picture keeps it, which is the space bar on the one
-                // being shown, including that it takes the mark off again.
+                // being shown, including that it takes the mark off again and
+                // that holding shift marks it and nothing else.
                 if picked.double_clicked() {
                     self.selected = Some(member.file_id);
-                    self.keep_selected();
+                    if ui.input(|input| input.modifiers.shift) {
+                        self.keep_only_selected();
+                    } else {
+                        self.keep_selected();
+                    }
                 }
 
                 // Centred on the picture this tile is about. The picture sits in
@@ -4017,30 +4118,29 @@ impl App {
         }
     }
 
-    /// What the keep marks imply. Rebuilt every frame so the count on the button
-    /// is always the count of what the button does. What is marked is kept and
-    /// everything else goes, including all of a set that is keeping nothing.
+    /// What the marks imply. Rebuilt every frame so the count on the button is
+    /// always the count of what the button does.
+    ///
+    /// What is marked is kept and everything else in that set goes. A set marked
+    /// with nothing is a set nobody has reached, and none of it goes.
     fn build_plan(&self) -> Plan {
-        let mut sets: Vec<Vec<imgdedupe_core::matching::Member>> = Vec::new();
-        for set in &self.sets {
-            // A set nobody calls a set of copies is a set nothing happens to:
-            // not kept, not removed, not counted.
-            if self.is_ignored(set) {
-                continue;
-            }
-            let keeping = self.keep.get(&set.set_id);
-            let members = set
-                .members
-                .iter()
-                .map(|member| {
-                    let mut member = member.clone();
-                    member.auto_keep = keeps(keeping, member.file_id);
-                    member
-                })
-                .collect();
-            sets.push(members);
-        }
-        cleanup::plan_from_sets(sets.iter().map(|members| members.as_slice()))
+        // A set nobody calls a set of copies is a set nothing happens to: not
+        // kept, not removed, not counted. The marks are spelled out here so each
+        // list outlives the plan built from borrows of it.
+        let said: Vec<(&[imgdedupe_core::matching::Member], Vec<i64>)> = self
+            .sets
+            .iter()
+            .filter(|set| !self.is_ignored(set))
+            .map(|set| {
+                (
+                    set.members.as_slice(),
+                    self.keep.get(&set.set_id).map(Keep::marked).unwrap_or_default(),
+                )
+            })
+            .collect();
+        cleanup::plan_from_sets(
+            said.iter().map(|(members, marks)| (*members, marks.as_slice())),
+        )
     }
 
     /// Start removing. It runs on its own thread and says how far it has got,
@@ -4322,21 +4422,16 @@ mod tests {
         assert_eq!(app.sets.len(), 2, "the two pairs were not found");
 
         let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
-        let opened = match app.keep.get(&first) {
-            Some(Keep::One(file_id)) => *file_id,
-            other => panic!("the search gave the first set no keeper: {other:?}"),
-        };
-        let other_in_first = app.sets[0]
-            .members
-            .iter()
-            .map(|member| member.file_id)
-            .find(|file_id| *file_id != opened)
-            .expect("the set holds two pictures");
+        let other_in_first = app.sets[0].members[1].file_id;
         let one_in_second = app.sets[1].members[1].file_id;
 
         app.selected = Some(other_in_first);
         app.keep_selected();
-        assert_eq!(app.keep.get(&first), Some(&Keep::One(other_in_first)), "the keeper did not move");
+        assert_eq!(
+            app.keep.get(&first),
+            Some(&Keep::One(other_in_first)),
+            "the picture the preview was on was not marked"
+        );
 
         app.selected = Some(one_in_second);
         app.keep_selected();
@@ -4414,6 +4509,8 @@ mod tests {
         settle(&mut app);
         app.load_sets();
         settle(&mut app);
+        // Marked, so there is something for the cleanup to fail at.
+        app.auto_mark_to_keep();
         let keeping = app.keep.clone();
 
         // The file the plan is about is taken away before the cleanup runs, so
@@ -4449,6 +4546,8 @@ mod tests {
         settle(&mut app);
         app.load_sets();
         settle(&mut app);
+        // Marked, so there is a cleanup to carry out.
+        app.auto_mark_to_keep();
         assert_eq!(app.sets.len(), 1, "the two copies were not found");
 
         // Delete outright, so the test does not depend on a recycle bin.
@@ -4490,6 +4589,8 @@ mod tests {
         settle(&mut app);
         app.load_sets();
         settle(&mut app);
+        // Marked, so two of the three are going.
+        app.auto_mark_to_keep();
         assert_eq!(app.sets[0].members.len(), 3, "the three copies were not one set");
 
         // One of the two the plan would remove is taken away first, so that one
@@ -4576,25 +4677,28 @@ mod tests {
         );
     }
 
-    /// The preview pane opens on the keeper of the first set, so the review view
-    /// starts on a picture rather than on an empty pane.
+    /// The preview pane opens on a picture of the first set rather than on an
+    /// empty pane: what it marks if it marks anything, and its first picture
+    /// otherwise, which is what a review that has just been found looks like.
     #[test]
     fn the_first_sets_keeper_is_what_the_preview_starts_on() {
         let found = folder_with_two_sets();
         let mut app = reviewing(found.path());
         assert_eq!(app.sets.len(), 2, "the two pairs were not found");
 
-        let keeper = match app.keep.get(&app.sets[0].set_id) {
-            Some(Keep::One(file_id)) => *file_id,
-            other => panic!("the first set was not given a keeper: {other:?}"),
-        };
-        assert_eq!(app.selected, Some(keeper), "the preview did not open on the keeper");
-
-        // With no keeper there is still a picture to show: the first one.
+        // Nothing is marked when a review arrives, so it opens on the first
+        // picture of the first set.
         let first = app.sets[0].members[0].file_id;
+        assert_eq!(app.selected, Some(first), "the preview did not open on a picture");
+
+        let marked = app.sets[0].members[1].file_id;
+        app.keep.insert(app.sets[0].set_id, Keep::One(marked));
+        app.preselect_first_keeper();
+        assert_eq!(app.selected, Some(marked), "the preview passed over the marked picture");
+
         app.keep.remove(&app.sets[0].set_id);
         app.preselect_first_keeper();
-        assert_eq!(app.selected, Some(first), "a first set with no keeper showed nothing");
+        assert_eq!(app.selected, Some(first), "a first set with no mark showed nothing");
 
         app.sets.clear();
         app.preselect_first_keeper();
@@ -4728,10 +4832,11 @@ mod tests {
 
         let went = discard_index(&app.index);
         assert_eq!(went, 3, "the count of what went is not what the folder held");
-        for beside in db::files_of_the_index(&db_path) {
-            assert!(!beside.exists(), "{} was left behind", beside.display());
-        }
-        assert!(app.index.holding().is_none(), "the manager still holds an index that is gone");
+        assert!(!db_path.exists(), "{} was left behind", db_path.display());
+        assert!(
+            app.index.open_index_path().is_none(),
+            "the manager still has an index open that is gone"
+        );
     }
 
     /// A folder whose index cannot be read stops there: the lamp for reading the
@@ -4777,7 +4882,7 @@ mod tests {
             let scanned = reviewing(found.path());
             scanned.index.synced().expect("wait for the file");
             assert_eq!(scanned.sets.len(), 1, "the fixture found nothing to begin with");
-            scanned.index.let_go().expect("let the folder go");
+            scanned.index.close().expect("close the index");
         }
 
         // The index as an older build left it.
@@ -4837,9 +4942,7 @@ mod tests {
             app.pump_cleanup(&ctx);
         }
 
-        for beside in db::files_of_the_index(&db_path) {
-            assert!(!beside.exists(), "{} was left behind", beside.display());
-        }
+        assert!(!db_path.exists(), "{} was left behind", db_path.display());
 
         // And the window is back on the scan with nothing on it, so the only way
         // on is another folder or another scan.
@@ -4857,6 +4960,8 @@ mod tests {
         let scanned = folder_with_a_duplicate();
         let db_path = headless::default_db_path(scanned.path());
         let mut app = reviewing(scanned.path());
+        // Marked, so there is a cleanup to carry out at all.
+        app.auto_mark_to_keep();
         // Kept, so the cleanup drops the rows rather than deleting the index.
         app.keep_index = true;
         app.destination = Destination::Delete;
@@ -4886,6 +4991,9 @@ mod tests {
     /// Files that were not pictures, and files that could not be read, are not
     /// pictures this pass found. A folder whose only unindexed files are of those
     /// two kinds has found nothing, however many times it reads them.
+    ///
+    /// A file whose name claims no picture format is not one of those two: it is
+    /// never looked at, so it is not among the files the pass went through.
     #[test]
     fn what_was_skipped_and_what_broke_are_not_counted_as_found() {
         // A folder of pictures, one of which is not a picture at all, read twice:
@@ -4898,7 +5006,10 @@ mod tests {
             .save_with_format(dir.path().join(name), image::ImageFormat::Png)
             .expect("a fixture");
         }
+        // Named as no format at all: not read, not counted, not anything.
         std::fs::write(dir.path().join("notes.txt"), b"not a picture").expect("a fixture");
+        // Named as a picture and not one: read, and refused by its first bytes.
+        std::fs::write(dir.path().join("pretend.png"), b"not a picture").expect("a fixture");
         std::fs::write(dir.path().join("broken.png"), b"\x89PNG\r\n\x1a\ncut").expect("a fixture");
 
         let mut app = App::from_settings(crate::settings::Settings::default());
@@ -4906,7 +5017,7 @@ mod tests {
         app.start_scan();
         settle(&mut app);
 
-        assert_eq!(app.scan.done, 4, "the pass did not look at every file");
+        assert_eq!(app.scan.done, 4, "the pass looked at a file that claims no format");
         assert_eq!(app.scan.ignored, 1, "the file that is not a picture was not counted");
         assert_eq!(app.scan.failures.len(), 1, "the broken file is its own number");
         assert_eq!(app.scan.found(), 2, "found is the pictures, not the files");
@@ -4949,11 +5060,10 @@ mod tests {
         );
     }
 
-    /// The tally beside the set and duplicate counts: every picture that is not
-    /// marked to keep, which is exactly what a cleanup would take. It follows the
-    /// marks, so it moves as the marks do.
+    /// The tally beside the set and duplicate counts: exactly what a cleanup
+    /// would take. It follows the marks, so it moves as the marks do.
     #[test]
-    fn the_selected_tally_is_every_picture_that_is_not_kept() {
+    fn the_selected_tally_is_every_picture_a_cleanup_would_take() {
         let found = folder_with_two_sets();
         let mut app = reviewing(found.path());
         assert_eq!(app.sets.len(), 2, "the two pairs were not found");
@@ -4966,33 +5076,28 @@ mod tests {
                 .map(|member| member.size_bytes)
                 .sum()
         };
-        let keeper = |app: &App, set_id: i64| match app.keep.get(&set_id) {
-            Some(Keep::One(file_id)) => *file_id,
-            other => panic!("no keeper for {set_id}: {other:?}"),
-        };
+        // Four pictures and nothing marked, so all four are going.
+        let (going, bytes) = app.selected_for_removal();
+        assert_eq!(going, 4, "an untouched review was keeping something");
+        assert_eq!(bytes, bytes_of(&app, 0, -1) + bytes_of(&app, 1, -1));
 
-        // Four pictures, one kept in each set.
+        // One marked in each set leaves the other picture of each going.
+        let kept_first = app.sets[0].members[0].file_id;
+        let kept_second = app.sets[1].members[0].file_id;
+        app.keep.insert(first, Keep::One(kept_first));
+        app.keep.insert(second, Keep::One(kept_second));
         let (going, bytes) = app.selected_for_removal();
         assert_eq!(going, 2);
-        assert_eq!(
-            bytes,
-            bytes_of(&app, 0, keeper(&app, first)) + bytes_of(&app, 1, keeper(&app, second))
-        );
+        assert_eq!(bytes, bytes_of(&app, 0, kept_first) + bytes_of(&app, 1, kept_second));
 
-        // Keeping all of one set takes its picture out of the tally.
-        app.keep.insert(second, Keep::All);
+        // Taking one set's marks off puts the whole set back in the tally.
+        app.keep.remove(&second);
         let (going, bytes) = app.selected_for_removal();
-        assert_eq!(going, 1);
-        assert_eq!(bytes, bytes_of(&app, 0, keeper(&app, first)));
-
-        // Keeping nothing in the other puts both of its pictures in.
-        app.keep.remove(&first);
-        let (going, bytes) = app.selected_for_removal();
-        assert_eq!(going, 2);
-        assert_eq!(bytes, bytes_of(&app, 0, -1), "both pictures should be counted");
+        assert_eq!(going, 3);
+        assert_eq!(bytes, bytes_of(&app, 0, kept_first) + bytes_of(&app, 1, -1));
 
         // And it is the same count the plan carries out.
-        assert_eq!(app.build_plan().files(), 2);
+        assert_eq!(app.build_plan().files(), 3);
     }
 
     /// What the toolbar counts: pictures that would go if every set kept one, not
@@ -5650,16 +5755,13 @@ mod tests {
         assert!(shortest < tallest, "the handle fills the whole track: {shortest} of {tallest}");
     }
 
-    /// The keeper is what puts a set in the plan. There is no second mark to set,
-    /// so a set that was never touched is still cleaned up.
+    /// A mark is what puts the rest of its set in the plan.
     #[test]
-    fn a_set_removes_everything_but_the_kept_file() {
+    fn a_set_removes_everything_but_the_marked_file() {
         let found = folder_with_a_duplicate();
-        let app = reviewing(found.path());
-        let kept = match app.keep.get(&app.sets[0].set_id) {
-            Some(Keep::One(file_id)) => *file_id,
-            other => panic!("the search gave the set no keeper: {other:?}"),
-        };
+        let mut app = reviewing(found.path());
+        let kept = app.sets[0].members[0].file_id;
+        app.keep.insert(app.sets[0].set_id, Keep::One(kept));
         let plan = app.build_plan();
 
         assert_eq!(plan.files(), 1);
@@ -5676,6 +5778,8 @@ mod tests {
     fn moving_the_keep_mark_moves_what_gets_removed() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+        app.keep.insert(set_id, Keep::One(app.sets[0].members[0].file_id));
         let was_going = app.build_plan().removals[0].rel_path.clone();
         let moving_to = app.sets[0]
             .members
@@ -5684,19 +5788,25 @@ mod tests {
             .expect("the plan removes a picture in the set")
             .file_id;
 
+        // Marking the one that was going and unmarking the one that was staying
+        // swaps them over, since a mark now only ever speaks for itself.
         app.selected = Some(moving_to);
+        app.keep_selected();
+        app.selected = Some(app.sets[0].members[0].file_id);
         app.keep_selected();
 
         let plan = app.build_plan();
         assert_eq!(plan.files(), 1);
-        assert_ne!(plan.removals[0].rel_path, was_going, "the keeper did not move");
+        assert_ne!(plan.removals[0].rel_path, was_going, "the mark did not move");
     }
 
     #[test]
     fn keeping_everything_in_a_set_removes_nothing_from_it() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
-        app.keep.insert(app.sets[0].set_id, Keep::All);
+        let members: Vec<i64> =
+            app.sets[0].members.iter().map(|member| member.file_id).collect();
+        app.keep.insert(app.sets[0].set_id, Keep::Several(members));
         assert_eq!(app.build_plan().files(), 0, "a set keeping all of it produced removals");
     }
 
@@ -5781,6 +5891,8 @@ mod tests {
     fn only_the_picture_being_kept_is_labelled_and_the_others_keep_the_space() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
+        // Nothing is labelled until something is marked.
+        app.auto_mark_to_keep();
         let members = &app.sets[0].members;
         assert_eq!(members.len(), 2, "the two copies were not found");
         let size = format!("{}x{}", members[0].width, members[0].height);
@@ -6114,6 +6226,68 @@ mod tests {
         );
     }
 
+    /// Two of the buttons change what they say. Each is drawn to the widest
+    /// thing it can ever say, so the word changes and nothing moves: a button
+    /// sized to its current word takes every button right of it along when that
+    /// word gets shorter.
+    #[test]
+    fn a_button_that_changes_its_word_does_not_move_the_ones_beside_it() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let root = found.path().to_path_buf();
+        let set_id = app.sets[0].set_id;
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let draw = |app: &mut App| {
+            crate::shot::frame(
+                "a_button_that_changes_its_word_does_not_move_the_ones_beside_it",
+                &ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| app.set_row(ui, 0, &root, ui.available_width()));
+                },
+            )
+        };
+        // Every button as it is drawn, by the rounded rectangle under its word
+        // rather than by the word, which is centred in it and moves when the
+        // word changes length even though the button has not.
+        let buttons = |drawn: &[egui::epaint::ClippedShape]| -> Vec<egui::Rect> {
+            let mut found: Vec<egui::Rect> = drawn
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.rect.height() > 8.0
+                            && rect.rect.height() < 40.0
+                            && rect.rect.width() < 120.0 =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            found.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            found
+        };
+
+        let before = buttons(&draw(&mut app));
+        assert_eq!(before.len(), 3, "three buttons were not drawn: {before:?}");
+
+        // "ignore" becomes "ignored", which is a character longer.
+        app.ignore_set(set_id);
+        draw(&mut app);
+        let after = buttons(&draw(&mut app));
+
+        assert_eq!(after.len(), 3, "three buttons were not drawn: {after:?}");
+        for (was, now) in before.iter().zip(&after) {
+            assert!(
+                (was.left() - now.left()).abs() < 0.51 && (was.width() - now.width()).abs() < 0.51,
+                "a button was {was:?} and became {now:?} when one of them changed its word"
+            );
+        }
+    }
+
     /// The three buttons sit in a row along the bottom of a set, in order and
     /// with space between them, under the pictures rather than over them. The
     /// first two decide what the set keeps and the third says it is not a set of
@@ -6152,9 +6326,51 @@ mod tests {
         assert!(all.right() < none.left(), "keep none is not right of keep all");
         assert!(none.right() < ignore.left(), "ignore is not right of keep none");
         assert!(none.left() - all.right() > 4.0, "the buttons are not spaced apart");
-        // The same space after each of them, however long its word is.
-        let first = none.left() - all.right();
-        let second = ignore.left() - none.right();
+        // The same space after each of them. Measured between the buttons rather
+        // than between their words: a button is as wide as the widest thing it
+        // can say, and the word it is saying now sits centred in that.
+        let boxes = {
+            let mut found: Vec<egui::Rect> = drawn
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.rect.height() > 8.0
+                            && rect.rect.height() < 40.0
+                            && rect.rect.width() < 120.0 =>
+                    {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            found.sort_by(|a, b| a.left().total_cmp(&b.left()));
+            found
+        };
+        assert_eq!(boxes.len(), 3, "three buttons were not drawn: {boxes:?}");
+        // Inside the box, not against it. A button drawn hard against the box's
+        // edge has the line round it drawn half outside, and the clip along that
+        // edge takes that half away, so the button looks cut off down its side.
+        let box_rect = drawn
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect)
+                    if rect.stroke.width > 0.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.height() > 100.0 =>
+                {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .expect("the set was not drawn in a box");
+        assert!(
+            boxes[0].left() > box_rect.left() + 2.0,
+            "the first button starts at {} inside a box that starts at {}",
+            boxes[0].left(),
+            box_rect.left()
+        );
+        let first = boxes[1].left() - boxes[0].right();
+        let second = boxes[2].left() - boxes[1].right();
         assert!(
             (first - second).abs() < 2.0,
             "the gaps between the buttons are {first} and {second}"
@@ -6324,12 +6540,14 @@ mod tests {
     }
 
     /// The toolbar over the review holds three things in one row, and each is in
-    /// its own place: the checkbox against the left edge, the counts in the
-    /// middle of the window, and the button against the right edge.
+    /// its own place: the marking button against the left edge, the counts in
+    /// the middle of the window, and the cleanup button against the right edge.
     #[test]
-    fn the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right() {
+    fn the_review_toolbar_holds_marking_left_the_counts_centred_and_cleanup_right() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
+        // Marked, so the counts on the toolbar are counting something.
+        app.auto_mark_to_keep();
 
         let ctx = window();
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
@@ -6353,16 +6571,16 @@ mod tests {
                 .map(|(_, rect)| *rect)
                 .unwrap_or_else(|| panic!("{wanted} was not drawn in the toolbar: {painted:?}"))
         };
-        let box_label = one("allow multi-select");
+        let marking = one("auto-mark to keep");
         let button = one("Clean up");
         let counts = painted
             .iter()
-            .filter(|(text, _)| text != "allow multi-select" && text != "Clean up")
+            .filter(|(text, _)| text != "auto-mark to keep" && text != "Clean up")
             .map(|(_, rect)| *rect)
             .reduce(|all, rect| all.union(rect))
             .expect("no counts were drawn");
 
-        assert!(box_label.left() < 60.0, "the checkbox is not against the left edge: {box_label:?}");
+        assert!(marking.left() < 60.0, "the button is not against the left edge: {marking:?}");
         assert!(
             button.right() > screen.right() - 60.0,
             "the button is not against the right edge: {button:?}"
@@ -6374,7 +6592,7 @@ mod tests {
             screen.center().x
         );
         assert!(
-            counts.left() > box_label.right() && counts.right() < button.left(),
+            counts.left() > marking.right() && counts.right() < button.left(),
             "the counts run into the checkbox or the button: {counts:?}"
         );
     }
@@ -6529,22 +6747,6 @@ mod tests {
         value ^ 0xFFFF_FFFF
     }
 
-    /// The box is off to begin with, and ticking it is a fact about the folder:
-    /// the index keeps it, and opening that folder again comes back with it.
-    #[test]
-    fn the_index_keeps_whether_multi_selected_was_ticked() {
-        let found = folder_with_a_duplicate();
-        let mut app = reviewing(found.path());
-        assert!(!app.multi_select, "multi-select was on before anything ticked it");
-
-        app.multi_select = true;
-        app.remember_multi_select();
-
-        closed(&app);
-        let again = reviewing(found.path());
-        assert!(again.multi_select, "the folder was opened again without the box ticked");
-    }
-
     /// The two ways of matching are on the page, in the box that says what
     /// counts as a duplicate, and clicking one turns it off.
     #[test]
@@ -6651,16 +6853,18 @@ mod tests {
             )
         };
 
-        // Both are ticked, and both lose what they depend on.
+        // All three are ticked, and all three lose what they depend on.
         app.recurse = true;
         app.within_a_folder = true;
         app.keep_index = true;
         app.auto_rescan = true;
+        app.auto_mark = true;
         app.recurse = false;
         app.keep_index = false;
         app.settle_the_boxes();
         assert!(!app.within_a_folder, "matching within folders survived the subfolders going");
         assert!(!app.auto_rescan, "running on opening survived the index going");
+        assert!(!app.auto_mark, "marking on opening survived the rescan going");
 
         // And with what they depend on off, they are drawn but cannot be
         // reached: clicking where they are changes nothing.
@@ -6668,7 +6872,8 @@ mod tests {
         let apart = label_rect(&drawn, "Only match within folders").expect("no box for that");
         let opening =
             label_rect(&drawn, "Automatically rescan when opening this index").expect("no box");
-        for box_at in [apart, opening] {
+        let marking = label_rect(&drawn, "Automatically mark to keep").expect("no box");
+        for box_at in [apart, opening, marking] {
             let at = egui::pos2(box_at.left() - 8.0, box_at.center().y);
             let mut input =
                 egui::RawInput { screen_rect: Some(screen), ..Default::default() };
@@ -6687,11 +6892,71 @@ mod tests {
         }
         assert!(!app.within_a_folder, "a box nobody can reach was ticked");
         assert!(!app.auto_rescan, "a box nobody can reach was ticked");
+        assert!(!app.auto_mark, "a box nobody can reach was ticked");
 
         // And saying yes to keeping an index says yes to rescanning on opening,
         // which is what the box under it is for.
         assert!(ticks_the_index_box(&mut app, &ctx, screen), "the index box was not ticked");
         assert!(app.auto_rescan, "ticking the index box did not ask for a rescan");
+
+        // With that on, the box under it can be reached and ticked.
+        let drawn = draw(&mut app);
+        let marking = label_rect(&drawn, "Automatically mark to keep").expect("no box");
+        let at = egui::pos2(marking.left() - 8.0, marking.center().y);
+        for pressed in [true, false] {
+            let mut input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            input.events.push(egui::Event::PointerMoved(at));
+            input.events.push(egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.folder_section(ui, 700.0);
+                });
+            });
+        }
+        assert!(app.auto_mark, "the box could not be ticked with a rescan asked for");
+    }
+
+    /// The box is a fact about the folder: the index keeps it, and opening that
+    /// folder again comes back with it.
+    #[test]
+    fn the_index_keeps_whether_marking_on_opening_was_ticked() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert!(!app.auto_mark, "marking on opening was on before anything asked for it");
+
+        app.keep_index = true;
+        app.auto_rescan = true;
+        app.auto_mark = true;
+        app.remember_ways_of_matching();
+
+        closed(&app);
+        let again = reviewing(found.path());
+        assert!(again.auto_mark, "the folder was opened again without the box ticked");
+    }
+
+    /// With the box on, a pass leaves every set marking its best copy, so a
+    /// folder opens with the obvious answers already filled in.
+    #[test]
+    fn a_pass_with_marking_on_leaves_every_set_marked() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert!(app.keep.is_empty(), "the search marked something on its own");
+        app.auto_mark = true;
+
+        app.start_scan();
+        settle(&mut app);
+
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found again");
+        for set in &app.sets {
+            let best = set.members.iter().find(|member| member.auto_keep).expect("a best copy");
+            let keeping = app.keep.get(&set.set_id).expect("a set came back unmarked");
+            assert!(keeping.keeps(best.file_id), "the best copy of a set was not marked");
+        }
     }
 
     /// Both ways of matching are on to begin with, and switching one off is a
@@ -6837,200 +7102,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Every page of the window, drawn into picture files for the manual.
-    ///
-    /// A real folder, really scanned and really searched, so what the manual
-    /// shows is the window rather than a drawing of it. Ignored unless it is
-    /// asked for by name; the pictures go where `IMGDEDUPE_SHOT_DIR` says, or to
-    /// the temporary folder.
-    #[test]
-    #[ignore = "writes the pictures the manual is built from"]
-    fn the_pictures_for_the_manual() {
-        let found = folder_with_two_sets();
-        let mut app = reviewing(found.path());
-        app.keep_index = true;
-        app.recurse = true;
-        app.selected = app.sets[0].members.first().map(|member| member.file_id);
-
-        let ctx = window();
-        // The window as it ships, not the toolkit's own dark.
-        ctx.set_visuals(egui::Visuals::light());
-        // Wide enough for the whole of the scan page, which is three boxes in a
-        // row and a run of lamps under them.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 720.0));
-        let mut camera = crate::shot::Camera::default();
-        let folder = crate::shot::folder();
-
-        // Each page, drawn the way the window draws it: the tabs across the top
-        // and the page under them. Several frames each, because the pictures and
-        // the panel beside them arrive over a few.
-        let mut page = |app: &mut App, name: &str, view: View| {
-            app.view = view;
-            for _ in 0..10 {
-                let drawing = &mut *app;
-                camera.shoot(
-                    &ctx,
-                    egui::RawInput { screen_rect: Some(screen), ..Default::default() },
-                    |ctx| {
-                        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                for (label, on) in [
-                                    ("1  Scan", drawing.view == View::Scan),
-                                    ("2  Review", drawing.view == View::Review),
-                                    ("3  Clean up", drawing.view == View::Cleanup),
-                                ] {
-                                    ui.add(egui::SelectableLabel::new(on, label));
-                                }
-                            });
-                            ui.add_space(6.0);
-                        });
-                        let margin = match drawing.view {
-                            View::Cleanup | View::Review => egui::Margin::ZERO,
-                            _ => egui::Margin::symmetric(16.0, 12.0),
-                        };
-                        egui::CentralPanel::default()
-                            .frame(
-                                egui::Frame::central_panel(&ctx.style()).inner_margin(margin),
-                            )
-                            .show(ctx, |ui| match drawing.view {
-                                View::Scan => drawing.scan_view(ui),
-                                View::Review => drawing.review_view(ui),
-                                View::Cleanup => drawing.cleanup_view(ui),
-                            });
-                    },
-                    &folder.join(format!("manual-{name}.png")),
-                );
-                app.thumbs.collect(&ctx);
-            }
-        };
-
-        // The scan page is the one page that writes the folder's path on itself,
-        // in the folder row and in the first lamp. What is drawn there is a
-        // folder anybody could have, not the temporary one this ran against and
-        // not the name of whoever ran it. Nothing is pressed while it is set, so
-        // nothing goes looking for it.
-        let real = app.folder.clone();
-        app.folder = Some(PathBuf::from("D:\\Photos\\2026"));
-        page(&mut app, "scan", View::Scan);
-        app.folder = real;
-
-        page(&mut app, "review", View::Review);
-
-        // The same review with a set nobody calls a set of copies.
-        let second = app.sets[1].set_id;
-        app.ignore_set(second);
-        page(&mut app, "ignored", View::Review);
-        app.unignore_set(second);
-
-        page(&mut app, "cleanup", View::Cleanup);
-        println!("the manual's pictures are in {}", folder.display());
-    }
-
-    /// Draw the scan page into a picture file, so what it looks like can be
-    /// looked at. Names the file it wrote.
-    ///
-    /// Not a check of anything: it is the window, on paper, for whoever is
-    /// changing the layout. Ignored unless it is asked for by name.
-    #[test]
-    #[ignore = "writes a picture of the scan page instead of checking anything"]
-    fn a_picture_of_the_scan_page() {
-        let found = folder_with_two_sets();
-        let mut app = reviewing(found.path());
-        app.view = View::Scan;
-        app.keep_index = true;
-
-        let ctx = window();
-        ctx.set_visuals(egui::Visuals::light());
-        // Short, so the lamps are more than the room left for them and the bar
-        // beside the lamps is drawn.
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 560.0));
-        let at = std::env::var_os("IMGDEDUPE_SHOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("scan.png"));
-        let mut camera = crate::shot::Camera::default();
-        for _ in 0..6 {
-            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-            let drawing = &mut app;
-            camera.shoot(
-                &ctx,
-                input,
-                |ctx| {
-                    egui::CentralPanel::default()
-                        .frame(
-                            egui::Frame::central_panel(&ctx.style())
-                                .inner_margin(egui::Margin::symmetric(16.0, 12.0)),
-                        )
-                        .show(ctx, |ui| drawing.scan_view(ui));
-                },
-                &at,
-            );
-        }
-        println!("the scan page is at {}", at.display());
-    }
-
-    /// Draw the review page into a picture file, so what it looks like can be
-    /// looked at. Names the file it wrote.
-    ///
-    /// Not a check of anything: it is the window, on paper, for whoever is
-    /// changing the layout. Ignored unless it is asked for by name.
-    #[test]
-    #[ignore = "writes a picture of the review page instead of checking anything"]
-    fn a_picture_of_the_review_page() {
-        let found = folder_with_two_sets();
-        let mut app = reviewing(found.path());
-        app.selected = app.sets[0].members.first().map(|member| member.file_id);
-        // A set wider than the box, so its own scroll bar is in the picture, and
-        // a set nobody calls a set of copies, so the faded look is in it too.
-        let held: Vec<_> = app.sets[0].members.clone();
-        app.sets[0].members = (0..12)
-            .map(|at| {
-                let mut member = held[at % held.len()].clone();
-                member.file_id = 100 + at as i64;
-                member
-            })
-            .collect();
-        if app.sets.len() > 1 {
-            let second = app.sets[1].clone();
-            for pair in pairs_of(&second) {
-                app.ignored.insert(pair);
-            }
-        }
-
-        let ctx = window();
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
-        // The picture is for looking at, so it is drawn the way the window is
-        // rather than in whatever the toolkit ships as its default.
-        ctx.set_visuals(egui::Visuals::light());
-        let mut camera = crate::shot::Camera::default();
-        let at = std::env::var_os("IMGDEDUPE_SHOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("review.png"));
-        // The pictures arrive over a few frames, and the panel settles on its
-        // width over one or two, so the frame worth looking at is not the first.
-        for _ in 0..8 {
-            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-            let drawing = &mut app;
-            camera.shoot(&ctx, input, |ctx| {
-                egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("1  Scan");
-                        ui.label("2  Review");
-                    });
-                    ui.add_space(6.0);
-                });
-                egui::CentralPanel::default()
-                    .frame(
-                        egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO),
-                    )
-                    .show(ctx, |ui| drawing.review_view(ui));
-            }, &at);
-            app.thumbs.collect(&ctx);
-        }
-        println!("the review page is at {}", at.display());
     }
 
     /// A set's own scroll bar runs the width of the box, edge to edge inside the
@@ -7339,6 +7410,111 @@ mod tests {
         );
     }
 
+    /// Every line of a given colour drawn round something, however faded.
+    ///
+    /// A faded set is drawn at a quarter, and fading multiplies every channel of
+    /// a colour, alpha included. So the colour looked for is faded the same way
+    /// before it is compared, by however much the painted one was: an exact
+    /// comparison against the unfaded colour matches a set at full strength and
+    /// misses the faded one, which is an assertion that cannot fail.
+    fn outlined(drawn: &[egui::epaint::ClippedShape], colour: egui::Color32) -> usize {
+        let near = |painted: egui::Color32| {
+            let faded = colour.gamma_multiply(f32::from(painted.a()) / f32::from(colour.a()));
+            let (painted, faded) = (painted.to_array(), faded.to_array());
+            (0..3).all(|channel| painted[channel].abs_diff(faded[channel]) <= 2)
+        };
+        drawn
+            .iter()
+            .filter(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.stroke.width >= 2.0 => near(rect.stroke.color),
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Draw one set over a really scanned folder, twice, and hand back the second
+    /// frame: what a picture shows takes a frame to settle.
+    fn set_frames(app: &mut App, ctx: &egui::Context, root: &std::path::Path) -> Vec<egui::epaint::ClippedShape> {
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        let mut draw = || {
+            crate::shot::frame(
+                "a_set_drawn_for_what_it_shows",
+                ctx,
+                egui::RawInput { screen_rect: Some(screen), ..Default::default() },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| app.set_row(ui, 0, root, ui.available_width()));
+                },
+            )
+        };
+        draw();
+        draw()
+    }
+
+    /// Keeping a picture is two things on screen: a green border round it and
+    /// the word KEEP under it. A set that marks nothing draws neither, and the
+    /// marks are what decides it.
+    #[test]
+    fn a_marked_picture_is_drawn_with_a_border_and_an_unmarked_one_is_not() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+
+        let root = found.path().to_path_buf();
+        let ctx = window();
+        let keep_colour = egui::Color32::from_rgb(90, 180, 110);
+
+        // A review arrives marking nothing.
+        let plain = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&plain, keep_colour), 0, "something was drawn as kept already");
+        assert!(label_rects(&plain, "KEEP").is_empty(), "something said KEEP already");
+
+        app.keep.insert(set_id, Keep::One(app.sets[0].members[0].file_id));
+        let marked = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&marked, keep_colour), 1, "the marked picture had no border");
+        assert_eq!(label_rects(&marked, "KEEP").len(), 1, "nothing said KEEP");
+
+        // Which is what keep none takes off again.
+        app.keep.remove(&set_id);
+        let cleared = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&cleared, keep_colour), 0, "the border stayed on an unmarked picture");
+        assert!(label_rects(&cleared, "KEEP").is_empty(), "an unmarked picture said KEEP");
+    }
+
+    /// The ring round the picture the preview is on says where the cursor keys
+    /// are and nothing about what the set keeps: a picture can have one, the
+    /// other, both or neither. Taking the marks off leaves the ring where it is.
+    #[test]
+    fn the_ring_round_the_picture_shown_is_not_the_keep_border() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+        let first = app.sets[0].members[0].file_id;
+        app.selected = Some(first);
+
+        let root = found.path().to_path_buf();
+        let ctx = window();
+        let ring_colour = ctx.style().visuals.selection.bg_fill;
+        let keep_colour = egui::Color32::from_rgb(90, 180, 110);
+
+        // Shown and not marked: a ring and no border.
+        let showing = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&showing, ring_colour), 1, "the picture shown had no ring");
+        assert_eq!(outlined(&showing, keep_colour), 0, "an unmarked picture had a keep border");
+
+        // Marked as well: both, on the same picture.
+        app.keep.insert(set_id, Keep::One(first));
+        let both = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&both, ring_colour), 1, "the ring went when the picture was marked");
+        assert_eq!(outlined(&both, keep_colour), 1, "the marked picture had no border");
+
+        // Marks off: the ring stays, because it was never about the marks.
+        app.keep.remove(&set_id);
+        let after = set_frames(&mut app, &ctx, &root);
+        assert_eq!(outlined(&after, ring_colour), 1, "taking the marks off took the ring with them");
+        assert_eq!(outlined(&after, keep_colour), 0, "the border stayed on an unmarked picture");
+    }
+
     /// A set nobody calls a set of copies is barely drawn: the pictures and every
     /// line of writing under them at `IGNORED_OPACITY`. The buttons are not,
     /// because they are how it stops being ignored.
@@ -7418,6 +7594,9 @@ mod tests {
     fn an_ignored_set_is_shown_and_left_alone() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
+        // A review arrives with nothing marked, so there is nothing to be left
+        // alone until something is marked.
+        app.auto_mark_to_keep();
         assert_eq!(app.sets.len(), 1, "the copies were not found");
         let set_id = app.sets[0].set_id;
         assert!(!app.is_ignored(&app.sets[0]), "a set was ignored before anybody said so");
@@ -7451,6 +7630,8 @@ mod tests {
     fn a_set_can_be_unignored_again() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
+        // Marked, so the set has something to go back to being.
+        app.auto_mark_to_keep();
         let set_id = app.sets[0].set_id;
 
         app.ignore_set(set_id);
@@ -7762,10 +7943,11 @@ mod tests {
         assert!(again.auto_rescan, "the folder came back without running on opening");
     }
 
-    /// With the box unticked the mark moves: keeping one picture lets go of the
-    /// one that was kept before it.
+    /// Shift says which picture rather than toggling one: whatever the set was
+    /// marking, afterwards it marks that one and nothing else. Pressed again on
+    /// the same picture it stays marked, because it is not a toggle.
     #[test]
-    fn without_multi_selected_marking_a_picture_lets_the_last_one_go() {
+    fn shift_marks_the_selected_picture_and_unmarks_the_rest() {
         let mut app = App::from_settings(crate::settings::Settings::default());
         app.sets = vec![DuplicateSet {
             set_id: 1,
@@ -7776,19 +7958,29 @@ mod tests {
             ],
         }];
         let set_id = app.sets[0].set_id;
+        app.keep.insert(set_id, Keep::Several(vec![1, 2]));
 
-        app.selected = Some(1);
-        app.keep_selected();
-        app.selected = Some(2);
-        app.keep_selected();
+        app.selected = Some(3);
+        app.keep_only_selected();
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::One(3)),
+            "the other marks were left where they were"
+        );
 
-        assert_eq!(app.keep.get(&set_id), Some(&Keep::One(2)), "the mark did not move");
+        app.keep_only_selected();
+        assert_eq!(
+            app.keep.get(&set_id),
+            Some(&Keep::One(3)),
+            "a second press took the mark off, which is what the toggle does"
+        );
     }
 
-    /// With the box ticked the marks add up, and taking them off again one at a
-    /// time can leave the set keeping nothing at all.
+    /// A mark says to keep one picture and says nothing about any other, so
+    /// marks add up. Taking them off again one at a time can leave the set
+    /// marked with nothing at all, which is where it started.
     #[test]
-    fn with_multi_selected_marks_add_up_and_come_off_one_at_a_time() {
+    fn marks_add_up_and_come_off_one_at_a_time() {
         let mut app = App::from_settings(crate::settings::Settings::default());
         app.sets = vec![DuplicateSet {
             set_id: 1,
@@ -7799,7 +7991,6 @@ mod tests {
             ],
         }];
         let set_id = app.sets[0].set_id;
-        app.multi_select = true;
 
         app.selected = Some(1);
         app.keep_selected();
@@ -7824,45 +8015,16 @@ mod tests {
         assert_eq!(app.keep.get(&set_id), None, "the set is still keeping something");
     }
 
-    /// Keep all marks the whole set. Taking one picture off it leaves the rest
-    /// marked rather than throwing the lot away.
+    /// Two clicks on a second picture keep it as well as the one already marked,
+    /// rather than in place of it.
     #[test]
-    fn taking_one_picture_off_a_set_that_keeps_all_of_it_leaves_the_rest() {
-        let mut app = App::from_settings(crate::settings::Settings::default());
-        app.sets = vec![DuplicateSet {
-            set_id: 1,
-            members: vec![
-                member(1, "a.jpg", 500),
-                member(2, "b.jpg", 400),
-                member(3, "c.jpg", 300),
-            ],
-        }];
-        let set_id = app.sets[0].set_id;
-        app.keep.insert(set_id, Keep::All);
-
-        app.selected = Some(2);
-        app.keep_selected();
-
-        assert_eq!(
-            app.keep.get(&set_id),
-            Some(&Keep::Several(vec![1, 3])),
-            "the other two did not stay marked"
-        );
-    }
-
-    /// Two clicks on a second picture while the box is ticked keep it as well as
-    /// the one already kept, rather than in place of it.
-    #[test]
-    fn two_clicks_with_multi_selected_keep_both_pictures() {
+    fn two_clicks_on_a_second_picture_keep_both() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
         let root = found.path().to_path_buf();
         let set_id = app.sets[0].set_id;
-        app.multi_select = true;
-        let first = match app.keep.get(&set_id) {
-            Some(Keep::One(file_id)) => *file_id,
-            other => panic!("the search did not pick one picture to keep: {other:?}"),
-        };
+        let first = app.sets[0].members[0].file_id;
+        app.keep.insert(set_id, Keep::One(first));
         let other = app.sets[0]
             .members
             .iter()
@@ -7927,14 +8089,15 @@ mod tests {
     }
 
     /// The two buttons on a set really pressed, in a really scanned folder. Keep
-    /// none takes every picture of the set into the plan, and keep all takes
-    /// them all back out.
+    /// none takes every picture of the set into the plan, and keep all clears
+    /// the marks, which takes them all back out.
     #[test]
     fn the_buttons_on_a_set_decide_all_of_it_or_none_of_it() {
         let found = folder_with_a_duplicate();
         let mut app = reviewing(found.path());
         assert_eq!(app.sets.len(), 1, "the two copies were not found");
-        assert_eq!(app.build_plan().files(), 1, "the search kept nothing to start from");
+        app.keep.insert(app.sets[0].set_id, Keep::One(app.sets[0].members[0].file_id));
+        assert_eq!(app.build_plan().files(), 1, "one mark should leave one picture going");
 
         let root = found.path().to_path_buf();
         let ctx = window();
@@ -7969,39 +8132,88 @@ mod tests {
             .expect("no keep all button was drawn on the set")
             .center();
 
-        frame(&mut app, Some(none_at), None);
-        frame(&mut app, Some(none_at), Some(true));
-        frame(&mut app, Some(none_at), Some(false));
-        assert_eq!(app.build_plan().files(), 2, "keep none left a picture behind");
-
+        // Keep all marks every picture in the set, which takes all of it out of
+        // the plan.
         frame(&mut app, Some(all_at), None);
         frame(&mut app, Some(all_at), Some(true));
         frame(&mut app, Some(all_at), Some(false));
+        let keeping = app.keep.get(&app.sets[0].set_id).expect("keep all marked nothing");
+        for member in &app.sets[0].members {
+            assert!(keeping.keeps(member.file_id), "keep all left {} unmarked", member.rel_path);
+        }
         assert_eq!(app.build_plan().files(), 0, "keep all still gave the set up");
+
+        // Keep none takes every mark off, which puts every picture of the set
+        // into the plan.
+        frame(&mut app, Some(none_at), None);
+        frame(&mut app, Some(none_at), Some(true));
+        frame(&mut app, Some(none_at), Some(false));
+        assert_eq!(app.keep.get(&app.sets[0].set_id), None, "keep none left a mark behind");
+        assert_eq!(app.build_plan().files(), 2, "keep none left a picture behind");
     }
 
-    /// What is marked is kept and everything else goes, so a set with the mark
-    /// taken off loses every picture in it.
+    /// Auto-marking only ever adds. A set with nothing marked gets the best
+    /// copy; a set already marking something else keeps that and gains it.
     #[test]
-    fn a_set_keeping_nothing_loses_all_of_it() {
-        let found = folder_with_a_duplicate();
+    fn auto_marking_adds_the_best_copy_and_disturbs_nothing() {
+        let found = folder_with_two_sets();
         let mut app = reviewing(found.path());
-        // The space bar on the picture already kept takes the mark off.
-        app.selected = match app.keep.get(&app.sets[0].set_id) {
-            Some(Keep::One(file_id)) => Some(*file_id),
-            other => panic!("the search gave the set no keeper: {other:?}"),
+        assert_eq!(app.sets.len(), 2, "the two pairs were not found");
+        let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
+        let best_of = |app: &App, set: usize| {
+            app.sets[set]
+                .members
+                .iter()
+                .find(|member| member.auto_keep)
+                .expect("a best copy")
+                .file_id
         };
-        app.keep_selected();
+        let (best_first, best_second) = (best_of(&app, 0), best_of(&app, 1));
 
-        let plan = app.build_plan();
-        assert_eq!(plan.files(), 2, "a set that keeps nothing kept something anyway");
-        let mut going: Vec<&str> =
-            plan.removals.iter().map(|removal| removal.rel_path.as_str()).collect();
-        going.sort();
-        let mut all: Vec<&str> =
-            app.sets[0].members.iter().map(|member| member.rel_path.as_str()).collect();
-        all.sort();
-        assert_eq!(going, all);
+        // The second set already marks the copy that is not the best one.
+        let other_in_second = app.sets[1]
+            .members
+            .iter()
+            .map(|member| member.file_id)
+            .find(|file_id| *file_id != best_second)
+            .expect("the set holds two pictures");
+        app.keep.insert(second, Keep::One(other_in_second));
+
+        app.auto_mark_to_keep();
+
+        assert_eq!(app.keep.get(&first), Some(&Keep::One(best_first)), "the best copy was not marked");
+        let keeping = app.keep.get(&second).expect("the second set lost its mark");
+        assert!(keeping.keeps(other_in_second), "the mark that was already there was taken off");
+        assert!(keeping.keeps(best_second), "the best copy was not added beside it");
+    }
+
+    /// A set nobody calls a set of copies is an answer already given, and
+    /// auto-marking does not answer again.
+    #[test]
+    fn auto_marking_leaves_ignored_sets_alone() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        let ignored = app.sets[0].set_id;
+        app.ignore_set(ignored);
+
+        app.auto_mark_to_keep();
+
+        assert_eq!(app.keep.get(&ignored), None, "an ignored set was marked");
+    }
+
+    /// What is marked is kept, so a set that marks nothing keeps nothing and all
+    /// of it is there to be cleaned up. A review arrives marking nothing, so
+    /// that is every picture of every set it found.
+    #[test]
+    fn a_set_marked_with_nothing_loses_all_of_it() {
+        let found = folder_with_a_duplicate();
+        let app = reviewing(found.path());
+        assert!(app.keep.is_empty(), "the search marked something on its own");
+        assert_eq!(
+            app.build_plan().files(),
+            app.sets[0].members.len(),
+            "a set marking nothing was not all going"
+        );
     }
 
     #[test]
@@ -8315,6 +8527,41 @@ mod tests {
         assert!(app.keep_index, "an index exists but the checkbox was not ticked");
     }
 
+    /// Opening a folder reads its index on a thread of its own, and pressing
+    /// Scan starts a pass that reads the same folder again. Both are answered by
+    /// the one thing that owns the index, so the opening read can come back
+    /// after the pass has finished, describing the folder as it was before it.
+    ///
+    /// The pass's pictures are the newer ones and they stay. Taking the older
+    /// ones left the window holding an empty folder, and the search that ran on
+    /// them found nothing.
+    #[test]
+    fn the_pictures_read_on_opening_do_not_replace_a_finished_pass() {
+        let scanned = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        let found = app.images.clone().expect("the pass read the folder");
+        assert_eq!(found.len(), 3, "the pass did not read the folder");
+
+        // The opening read, arriving now: an index with nothing in it, because it
+        // was read before the pass had written anything.
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(Opened::Index(std::sync::Arc::new(Vec::new()))).expect("the answer");
+        drop(send);
+        app.asking = Some(receive);
+        app.hear_the_index(&window());
+
+        let held = app.images.clone().expect("the window let go of the pictures");
+        assert_eq!(held.len(), 3, "the opening read replaced the pass's pictures");
+
+        // And the search that runs on them still finds the copies.
+        app.load_sets();
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the search found nothing to review");
+    }
+
     /// The checkbox belongs to the folder that is open. Opening a different
     /// folder resets it and the subfolder setting; opening the same folder again
     /// leaves them alone; and opening a folder that contains an index ticks the
@@ -8379,7 +8626,7 @@ mod tests {
     /// the process is what waits for that, and this is a test saying the first
     /// run ended.
     fn closed(app: &App) {
-        app.index.let_go().expect("write the folder out");
+        app.index.close().expect("close the index");
     }
 
     /// The folder's index as it is on disk, once the file has caught up with

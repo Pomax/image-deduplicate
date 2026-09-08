@@ -20,7 +20,7 @@ pub struct Notes {
     pub recurse: Option<bool>,
     pub disposal: Option<String>,
     pub move_dir: Option<String>,
-    pub multi_select: Option<bool>,
+    pub auto_mark: Option<bool>,
     pub match_whole_frame: Option<bool>,
     pub match_corners: Option<bool>,
     pub within_a_folder: Option<bool>,
@@ -31,7 +31,7 @@ pub struct Notes {
 pub const RECURSE: &str = "recurse";
 pub const DISPOSAL: &str = "disposal";
 pub const MOVE_DIR: &str = "move_dir";
-pub const MULTI_SELECT: &str = "multi_select";
+pub const AUTO_MARK: &str = "auto_mark";
 pub const MATCH_WHOLE_FRAME: &str = "match_whole_frame";
 pub const MATCH_CORNERS: &str = "match_corners";
 pub const WITHIN_A_FOLDER: &str = "within_a_folder";
@@ -54,7 +54,7 @@ pub fn read(index: &Index) -> Notes {
         recurse: yes_or_no(RECURSE),
         disposal: value(DISPOSAL),
         move_dir: value(MOVE_DIR),
-        multi_select: yes_or_no(MULTI_SELECT),
+        auto_mark: yes_or_no(AUTO_MARK),
         match_whole_frame: yes_or_no(MATCH_WHOLE_FRAME),
         match_corners: yes_or_no(MATCH_CORNERS),
         within_a_folder: yes_or_no(WITHIN_A_FOLDER),
