@@ -1250,6 +1250,15 @@ pub struct App {
     /// another machine, and this is a file opened across the network before
     /// anything has been drawn.
     asking: Option<std::sync::mpsc::Receiver<Opened>>,
+    /// Whether a pass has started since the folder was asked about itself.
+    ///
+    /// The pictures read on opening describe the folder as it was before the
+    /// pass, and the pass hands over its own, newer copy. Which of the two
+    /// arrives first is a race: both are answered by the one thing that owns the
+    /// index, and on a busy machine the read from opening can come back after
+    /// the pass has already finished. This says the older copy is not to be
+    /// taken, however late it turns up.
+    scanned_since_asking: bool,
     /// The one thing that owns the folder's index. Everything that reads or
     /// writes it asks this.
     index: imgdedupe_core::index::Index,
@@ -1382,6 +1391,7 @@ impl App {
             auto_mark: false,
             mark_on_arrival: false,
             asking: None,
+            scanned_since_asking: false,
             index: imgdedupe_core::index::Index::start(),
             noted: false,
             // What counts as a duplicate is a decision about the pictures in
@@ -2090,6 +2100,7 @@ impl App {
     /// answers a folder gives until another folder gives its own.
     fn ask_the_index(&mut self) {
         self.asking = None;
+        self.scanned_since_asking = false;
         // Whatever the last folder said is not true of this one. What this one
         // says arrives with its index.
         self.ignored.clear();
@@ -2203,8 +2214,9 @@ impl App {
                 Opened::Index(images) => {
                     self.light(Lamp::LoadedIndexIntoMemory);
                     // A pass that started in the meantime is reading the same
-                    // folder and will hand over its own, newer copy.
-                    if self.running.is_none() {
+                    // folder and hands over its own, newer copy, whether it is
+                    // still running or has already finished.
+                    if !self.scanned_since_asking {
                         self.images = Some(images);
                     }
                     self.search = SearchState::default();
@@ -2535,6 +2547,8 @@ impl App {
         // that came out of it: the sets, what was marked to keep in them, what is
         // selected, and the pictures loaded for them.
         self.images = None;
+        // Including the ones the opening read is still on its way back with.
+        self.scanned_since_asking = true;
         self.sets.clear();
         self.keep.clear();
         self.selected = None;
@@ -8511,6 +8525,41 @@ mod tests {
         app.open_what_was_left_open();
         settle(&mut app);
         assert!(app.keep_index, "an index exists but the checkbox was not ticked");
+    }
+
+    /// Opening a folder reads its index on a thread of its own, and pressing
+    /// Scan starts a pass that reads the same folder again. Both are answered by
+    /// the one thing that owns the index, so the opening read can come back
+    /// after the pass has finished, describing the folder as it was before it.
+    ///
+    /// The pass's pictures are the newer ones and they stay. Taking the older
+    /// ones left the window holding an empty folder, and the search that ran on
+    /// them found nothing.
+    #[test]
+    fn the_pictures_read_on_opening_do_not_replace_a_finished_pass() {
+        let scanned = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(scanned.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        let found = app.images.clone().expect("the pass read the folder");
+        assert_eq!(found.len(), 3, "the pass did not read the folder");
+
+        // The opening read, arriving now: an index with nothing in it, because it
+        // was read before the pass had written anything.
+        let (send, receive) = std::sync::mpsc::channel();
+        send.send(Opened::Index(std::sync::Arc::new(Vec::new()))).expect("the answer");
+        drop(send);
+        app.asking = Some(receive);
+        app.hear_the_index(&window());
+
+        let held = app.images.clone().expect("the window let go of the pictures");
+        assert_eq!(held.len(), 3, "the opening read replaced the pass's pictures");
+
+        // And the search that runs on them still finds the copies.
+        app.load_sets();
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the search found nothing to review");
     }
 
     /// The checkbox belongs to the folder that is open. Opening a different

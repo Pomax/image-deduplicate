@@ -1588,6 +1588,13 @@ itself, which is what decides whether a pass starts. If there is not, the
 checkbox is unticked and nothing is asked or started. The settings file has no
 say in either.
 
+### the_pictures_read_on_opening_do_not_replace_a_finished_pass
+
+Opening a folder reads its index on a thread of its own, and a pass over the same
+folder reads it again. Both are answered by the one thing that owns the index, so
+the opening read can come back after the pass has finished, holding the folder as
+it was before it. The pass's pictures stay, and the search still finds the copies.
+
 ### the_checkbox_follows_the_folder_that_is_opened
 
 Opening a different folder resets the checkbox and the subfolder setting.
