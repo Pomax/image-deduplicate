@@ -96,7 +96,10 @@ JOIN fingerprints p ON p.file_id = f.id;
 pub fn open_and_migrate(path: &Path) -> Result<Connection> {
     // The file is brought to the current shape first, on disk, so no reader can
     // be handed a connection to an index that is still in an older one.
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
     migrate_the_file(path)?;
+    crate::log_line!("    migrate the file: {:.2}s", at.elapsed().as_secs_f64());
 
     // Then read in one go. Every statement against a database on another machine
     // is a round trip; in memory they are free, and what reaches the network is
@@ -106,8 +109,11 @@ pub fn open_and_migrate(path: &Path) -> Result<Connection> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading the index at {}", path.display()))?;
     crate::log_line!("    read {} bytes of index: {:.2}s", bytes.len(), at.elapsed().as_secs_f64());
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
     let conn = into_memory(bytes, path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    crate::log_line!("    hand it to sqlite: {:.2}s", at.elapsed().as_secs_f64());
     Ok(conn)
 }
 
@@ -126,13 +132,22 @@ fn migrate_the_file(path: &Path) -> Result<()> {
             );
         }
     }
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
     let conn = Connection::open(path)
         .with_context(|| format!("opening the index at {}", path.display()))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    crate::log_line!("      open the file: {:.2}s", at.elapsed().as_secs_f64());
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
     conn.execute_batch(SCHEMA).context("applying the schema")?;
+    crate::log_line!("      apply the schema: {:.2}s", at.elapsed().as_secs_f64());
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
     add_new_columns(&conn)?;
     carry_the_stamps_across(&conn)?;
     drop_dead_columns(&conn)?;
+    crate::log_line!("      the columns: {:.2}s", at.elapsed().as_secs_f64());
 
     let existing: Option<i64> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {

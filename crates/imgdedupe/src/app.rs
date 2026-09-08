@@ -645,10 +645,6 @@ const BUTTON_ROW_GAP: f32 = 2.0;
 /// The band those buttons sit on.
 const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
 
-/// The line along the top of that band, darker than the line round the box so
-/// the band reads as the foot of the set rather than as another edge of it.
-const BUTTON_ROW_EDGE: egui::Color32 = egui::Color32::from_rgb(0x22, 0x22, 0x22);
-
 /// What the page keeps at its edges, and what a list keeps between what is in it
 /// and the scroll bar down its right: the same, so a box in a list stops as far
 /// from the bar as the list stops from the edge of the window.
@@ -740,17 +736,16 @@ fn set_row_height(ui: &egui::Ui) -> f32 {
     BOX_PADDING
         + tile_strip_height(ui)
         + SCROLL_BAR
-        + STRIP_TO_BAND
+        + STRIP_TO_BAR
         + button_row_height(ui)
         + 2.0 * BOX_EDGE
         + BETWEEN_BOXES
 }
 
-/// Kept between what is in the box — the pictures, the writing under them and
-/// the strip's own scroll bar — and the band of buttons under all of it. Enough
-/// to be seen: the band is what a set is told to do, and it reads as part of the
-/// set above it when the two touch.
-const STRIP_TO_BAND: f32 = 6.0;
+/// Kept between the writing under the pictures and the strip's own scroll bar,
+/// which sits on the band of buttons below it. Enough to be seen: the bar reads
+/// as another line of the writing when the two touch.
+const STRIP_TO_BAR: f32 = 6.0;
 
 /// Kept between one set and the next.
 const BETWEEN_BOXES: f32 = 12.0;
@@ -2144,6 +2139,12 @@ impl App {
             }
         }
         if arrived.is_empty() && !over {
+            // The answers come from a thread of their own, and a window draws
+            // only when it is given something to draw for. Left at that it sleeps
+            // until the mouse happens to move over it, with the index sitting in
+            // the channel: measured at one second on one run and two on the next,
+            // for a folder whose index was ready in a fifth of a second.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
             return;
         }
         for said in arrived {
@@ -2478,8 +2479,16 @@ impl App {
         // The clock the lamps are timed against starts here, at the press of the
         // button: what the numbers beside them answer is how long this run has
         // been going, not how long the window has been open.
-        self.started = std::time::Instant::now();
-        self.lit.clear();
+        //
+        // Not when the folder is still being opened. A folder that asks to be
+        // brought up to date on sight starts its pass from here, and starting
+        // the clock again would time it from the moment it began rather than
+        // from the moment the folder was opened, hiding everything in between
+        // and putting out the lamps that reported it.
+        if self.asking.is_none() {
+            self.started = std::time::Instant::now();
+            self.lit.clear();
+        }
 
         self.scan = ScanState::default();
         // The duplicates bar is drawn from this, and it is a different set of
@@ -3501,7 +3510,7 @@ impl App {
                 // would put its bar under the buttons, at the very bottom.
                 let strip = egui::Rect::from_min_size(
                     egui::pos2(inside.left(), inside.top() + BOX_PADDING),
-                    egui::vec2(inside.width(), tile_strip_height(ui) + SCROLL_BAR),
+                    egui::vec2(inside.width(), tile_strip_height(ui) + STRIP_TO_BAR + SCROLL_BAR),
                 );
 
                 // One tile's width is what a click on the strip's scroll bar
@@ -3581,14 +3590,15 @@ impl App {
                     inside.max,
                 );
                 ui.painter().rect_filled(band, 0.0, BUTTON_ROW_BACKGROUND);
-                // A line of its own along the top of the band. Without it the
-                // band's edge is the same colour as the line round the box and
-                // as the one under the strip's scroll bar, and three edges of the
-                // same colour a few points apart read as one thick edge.
+                // A line of its own along the top of the band, in the grey the
+                // scroll bar is drawn round, which the bar above it now sits on.
                 ui.painter().hline(
                     band.x_range(),
                     band.top(),
-                    egui::Stroke::new(1.0_f32, BUTTON_ROW_EDGE),
+                    egui::Stroke::new(
+                        1.0_f32,
+                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    ),
                 );
 
                 let mut pressed = None;
@@ -7106,11 +7116,12 @@ mod tests {
         );
 
         // And the line along the top of the band under it.
+        let edge = ctx.style().visuals.widgets.noninteractive.bg_stroke.color;
         let lines: Vec<(egui::Pos2, egui::Pos2)> = drawn
             .iter()
             .filter_map(|clipped| match &clipped.shape {
                 egui::Shape::LineSegment { points, stroke }
-                    if stroke.color == egui::epaint::ColorMode::Solid(BUTTON_ROW_EDGE) =>
+                    if stroke.color == egui::epaint::ColorMode::Solid(edge) =>
                 {
                     Some((points[0], points[1]))
                 }
@@ -7121,7 +7132,7 @@ mod tests {
         // was given rather than that rectangle less half of the line.
         let band_line = lines.iter().any(|(from, to)| {
             (to.x - from.x - set.width()).abs() < 0.51
-                && from.y >= bar.bottom() - 0.01
+                && (from.y - bar.bottom()).abs() < 0.51
                 && from.y < inside.bottom()
         });
         assert!(
