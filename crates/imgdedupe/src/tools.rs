@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use imgdedupe_core::cleanup::{self, Disposal, Plan};
+use imgdedupe_core::cleanup::{self, Disposal, Fate, Plan};
 use imgdedupe_core::index::Index;
 use imgdedupe_core::matching::{DuplicateSet, Thresholds};
 
@@ -141,7 +141,7 @@ fn report_json(sets: &[DuplicateSet]) -> String {
                     "height": member.height,
                     "format": member.format,
                     "size_bytes": member.size_bytes,
-                    "keep": member.auto_keep,
+                    "keep": member.best,
                 })).collect::<Vec<_>>(),
             })
         })
@@ -156,7 +156,7 @@ fn report_csv(sets: &[DuplicateSet]) -> String {
             out.push_str(&format!(
                 "{},{},{},{},{},{},{}\n",
                 set.set_id,
-                if member.auto_keep { "keep" } else { "remove" },
+                if member.best { "keep" } else { "remove" },
                 csv_field(&member.rel_path),
                 member.width,
                 member.height,
@@ -178,7 +178,17 @@ fn csv_field(value: &str) -> String {
 
 /// Everything the automatic pick would remove, across every set.
 fn plan_from(sets: &[DuplicateSet]) -> Plan {
-    cleanup::plan_from_sets(sets.iter().map(|set| set.members.as_slice()))
+    // Nobody is here to mark anything, so what the search would keep is what is
+    // kept: the best copy in each set, and the rest of the set goes.
+    let kept: Vec<Vec<i64>> = sets
+        .iter()
+        .map(|set| set.members.iter().filter(|m| m.best).map(|m| m.file_id).collect())
+        .collect();
+    cleanup::plan_from_sets(
+        sets.iter()
+            .zip(&kept)
+            .map(|(set, kept)| (set.members.as_slice(), Fate::Keeping(kept))),
+    )
 }
 
 fn describe(plan: &Plan) -> String {
@@ -242,7 +252,7 @@ mod tests {
     use super::*;
     use imgdedupe_core::matching::Member;
 
-    fn member(id: i64, path: &str, keep: bool, size: i64) -> Member {
+    fn member(id: i64, path: &str, best: bool, size: i64) -> Member {
         Member {
             file_id: id,
             rel_path: path.to_string(),
@@ -252,7 +262,7 @@ mod tests {
             channels: 3,
             size_bytes: size,
             mtime_ms: 1,
-            auto_keep: keep,
+            best,
         }
     }
 

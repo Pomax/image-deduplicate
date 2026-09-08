@@ -32,18 +32,23 @@ went on to measure, and filling one is the slow part.
 A plan reports how many files it would remove and how many bytes that is, which
 is what the toolbar and the cleanup page show before anything is touched.
 
-### a_plan_takes_everything_but_the_keeper
+### a_plan_takes_everything_that_is_not_marked
 
-A set puts every picture in the plan except the one marked to keep.
+A set puts every picture in the plan except the ones marked to keep.
 
-### a_set_with_nothing_kept_loses_all_of_it
+### a_set_with_nothing_marked_loses_none_of_it
 
-What is marked is what is kept, so a set with no mark on it keeps nothing and
-every picture in it goes.
+A set nobody has marked is a set nobody has reached, so none of it goes. This is
+the rule a half-finished review depends on.
 
-### a_set_with_everything_kept_loses_none_of_it
+### a_set_marked_to_be_cleared_out_loses_all_of_it
 
-A set marked to keep all of it contributes nothing to the plan.
+The one way to lose a whole set: the flag "keep none" puts on, which takes every
+picture whether or not any of them are marked.
+
+### a_set_with_everything_marked_loses_none_of_it
+
+A set where every picture is marked contributes nothing to the plan.
 
 ### removing_says_how_many_files_it_has_been_through
 
@@ -562,13 +567,20 @@ The scale stops at both ends however far the control is dragged.
 The shape test treats a rotated picture as the same shape, or every rotated
 duplicate would be rejected before its hash was looked at.
 
-### the_bigger_image_is_marked_to_keep
+### a_set_comes_back_oldest_first
 
-The picture a set suggests keeping is the one the score picks.
+Three copies written at different times come back in the order the files
+appeared, whatever order the search met them in.
+
+### the_bigger_image_is_the_best_candidate
+
+The picture a set offers as its best copy is the one the score picks. Nothing is
+kept or removed on account of it: it is what "auto-mark to keep" marks.
 
 ### recoverable_bytes_counts_everything_but_the_keeper
 
-What a set reports as reclaimable is every picture in it but the keeper.
+What a set reports as reclaimable is every picture in it but its best copy. This
+is the command line's figure; it has nobody to mark anything.
 
 ### a_band_files_every_variant_of_every_image_under_its_value
 
@@ -1060,8 +1072,8 @@ nothing: the window stays on the scan, the tabs stay shut and it says so.
 
 ### the_first_sets_keeper_is_what_the_preview_starts_on
 
-After a real search the preview opens on the first set's keeper, and on the first
-picture when a set keeps nothing.
+A review arrives with nothing marked, so the preview opens on the first picture
+of the first set. Once something is marked it opens on that instead.
 
 ### right_and_left_run_through_the_whole_list_and_stop_at_its_ends
 
@@ -1124,10 +1136,12 @@ was left alone was not read.
 A tile is the width of its own picture, so a portrait beside a landscape leaves
 no gap.
 
-### the_selected_tally_is_every_picture_that_is_not_kept
+### the_selected_tally_is_every_picture_a_cleanup_would_take
 
-On a real result of two sets, the tally beside the set count is every picture that
-is not marked to keep, and it follows the marks as they move.
+On a real result of two sets: nothing is going before anything is marked, marking
+one in each set puts the others in, taking a set's marks off takes the whole set
+out, and flagging a set to be cleared out puts all of it in. The tally is asked
+of the plan, so it cannot disagree with the button.
 
 ### the_duplicate_count_is_every_picture_but_the_one_each_set_keeps
 
@@ -1203,19 +1217,19 @@ A narrow list still has its scroll bar.
 
 The handle is drawn at the right edge of the list at its full width.
 
-### a_set_removes_everything_but_the_kept_file
+### a_set_removes_everything_but_the_marked_file
 
-On a real result, the plan is every picture in the set except the keeper, and its
-byte count is that file's.
+On a real result, the plan is every picture in the set except the marked one, and
+its byte count is that file's.
 
 ### moving_the_keep_mark_moves_what_gets_removed
 
-Pressing keep on the picture the plan was going to remove moves the plan onto the
-other one.
+Marking the picture the plan was going to remove and unmarking the other swaps
+which of them the plan takes.
 
 ### keeping_everything_in_a_set_removes_nothing_from_it
 
-A set marked to keep all of it puts nothing in the plan.
+A set where every picture is marked puts nothing in the plan.
 
 ### only_the_picture_being_kept_is_labelled_and_the_others_keep_the_space
 
@@ -1227,13 +1241,40 @@ set instead of riding up under the unmarked one.
 ### the_buttons_on_a_set_decide_all_of_it_or_none_of_it
 
 Draws a set from a really scanned folder, finds the keep all and keep none
-buttons by their labels in what was painted, and really presses them. Keep none
-puts every picture of the set in the plan, keep all takes them all back out.
+buttons by their labels in what was painted, and really presses them. Keep all
+clears the marks, which takes the set out of the plan; keep none puts every
+picture of it in; and the button then reads "undo", which puts it back.
 
-### a_set_keeping_nothing_loses_all_of_it
+### a_set_marked_with_nothing_loses_none_of_it
 
-Taking the mark off with the space bar puts every picture in that set into the
-plan.
+A review arrives marking nothing, and a plan built from it is empty. A review
+left half done does not delete the half nobody looked at.
+
+### a_set_told_to_clean_all_of_it_loses_every_picture
+
+A set flagged "clean all files" puts every picture in the plan, including one
+that is marked to keep.
+
+### auto_marking_adds_the_best_copy_and_disturbs_nothing
+
+On a real result of two sets, one already marking the copy that is not the best
+one. Auto-marking marks the best copy in the untouched set, and adds it to the
+other beside the mark that was already there.
+
+### auto_marking_leaves_ignored_and_cleared_out_sets_alone
+
+Both are answers already given, so neither gets a mark.
+
+### ignoring_a_set_being_cleared_out_leaves_it_ignored_and_not_cleared
+
+Saying a set is not a set of copies outranks saying to clear it out: the flag
+comes off, and the set loses nothing.
+
+### a_set_being_cleared_out_is_drawn_faded_and_its_buttons_are_not
+
+A set flagged "clean all files" is drawn at a quarter of its opacity, the way an
+ignored one is, and its buttons are not faded, because all three are still worth
+pressing.
 
 ### the_review_state_is_not_written_to_the_index
 
@@ -1371,12 +1412,12 @@ Really clicks twice on the picture in a scanned set that the search did not
 choose. It becomes the one being kept, and two more clicks a moment later let it
 go again, which is what the space bar does on the picture being shown.
 
-### the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right
+### the_review_toolbar_holds_marking_left_the_counts_centred_and_cleanup_right
 
 Draws the review over a scanned folder and reads the toolbar off the frame. The
-allow multi-select box sits against the left edge, the clean up button against the
-right, and the counts in the middle of the window rather than in the middle of
-what is left of the row.
+auto-mark to keep button sits against the left edge, the clean up button against
+the right, and the counts in the middle of the window rather than in the middle
+of what is left of the row.
 
 ### a_click_on_the_preview_fills_the_window_and_escape_puts_it_back
 
@@ -1434,11 +1475,16 @@ With nothing but ignored sets beyond, the keys move nothing at all.
 A set of three with one pair ignored is still a set of copies. Only once all
 three pairs are ignored is the set left alone.
 
-### the_index_keeps_whether_multi_selected_was_ticked
+### the_index_keeps_whether_marking_on_opening_was_ticked
 
-Ticks allow multi-select on a scanned folder and opens that folder again. The box
-starts unticked, and the folder's own index is what remembers that it was
+Ticks automatically mark to keep on a scanned folder and opens that folder again.
+The box starts unticked, and the folder's own index is what remembers that it was
 ticked.
+
+### a_pass_with_marking_on_leaves_every_set_marked
+
+With the box on, a real pass over a folder of two pairs comes back with every set
+marking its best copy, without anybody pressing the button.
 
 ### the_index_keeps_which_ways_of_matching_were_ticked
 
@@ -1453,10 +1499,12 @@ index.
 
 ### a_box_that_depends_on_another_is_off_and_out_of_reach_without_it
 
-Matching within folders needs subfolders, and rescanning on opening needs an
-index to rescan. With what they depend on switched off, both come off, and
-clicking where they are drawn does not put them back on. Ticking the index box
-asks for a rescan on opening by itself, which is what that box is for.
+Matching within folders needs subfolders, rescanning on opening needs an index to
+rescan, and marking on opening needs a rescan to mark at the end of. With what
+they depend on switched off, all three come off, and clicking where they are
+drawn does not put them back on. Ticking the index box asks for a rescan on
+opening by itself, which is what that box is for, and the marking box can then be
+reached and ticked.
 
 ### opening_a_folder_reads_its_index_without_scanning_it
 
@@ -1465,27 +1513,17 @@ No pass runs, and the index is still read into memory: the pictures are there,
 the lamp for it is lit, and Find duplicates finds the copies without a pass
 having read a single file.
 
-### without_multi_selected_marking_a_picture_lets_the_last_one_go
+### marks_add_up_and_come_off_one_at_a_time
 
-Keeps one picture in a set and then another. With the box unticked the mark
-moves rather than adding up, so the set keeps the second one and nothing else.
+Marks two pictures in a set, then takes both marks off. A mark speaks for its own
+picture and no other, so the second joins the first rather than replacing it,
+taking one off leaves the other, and taking that one off leaves the set marked
+with nothing at all.
 
-### with_multi_selected_marks_add_up_and_come_off_one_at_a_time
+### two_clicks_on_a_second_picture_keep_both
 
-Keeps two pictures in a set with the box ticked, then takes both marks off.
-Marking the second one leaves both kept, taking one off leaves the other, and
-taking that one off leaves the set keeping nothing at all.
-
-### taking_one_picture_off_a_set_that_keeps_all_of_it_leaves_the_rest
-
-Marks a whole set with keep all and then unmarks one picture in it. The other
-two stay marked: taking one off what a set keeps is not throwing the lot away.
-
-### two_clicks_with_multi_selected_keep_both_pictures
-
-Really clicks twice on the picture in a scanned set that the search did not
-choose, with allow multi-select ticked. Both that picture and the one the search
-chose are kept, rather than the second taking the place of the first.
+Really clicks twice on a second picture in a scanned set. Both it and the one
+already marked are kept, rather than the second taking the place of the first.
 
 ### the_last_entry_of_the_previous_list_empties_it
 
@@ -1818,6 +1856,12 @@ A wide picture with a segment saying to stand it on its end, read the way the
 tiles and the preview read every picture. It comes back on its end. Both of them
 come through this one function, so this is where the turn belongs.
 
+### a_picture_drained_to_red_grey_keeps_no_colour_but_red
+
+What a set on its way out is drawn in. Green and blue come out equal, so no
+colour of the picture's own is left, and red is twice that, clamped rather than
+wrapped: black stays black and white stays white.
+
 ### loading_reduces_to_the_preview_size
 
 A picture read for a tile comes back at the tile's size.
@@ -1925,7 +1969,7 @@ already checked in the suite proper, on a folder made for the purpose:
 | `a_search_reports_while_it_runs` | `comparing_is_reported_while_it_is_still_comparing` |
 | `what_the_real_folders_index_says_about_itself` | nothing: it prints, it does not assert |
 | `only_matching_within_folders_holds_on_the_real_folder` | `matching_within_folders_never_puts_two_folders_together` |
-| `every_box_the_window_keeps_survives_the_real_folders_index` | `the_index_keeps_whether_multi_selected_was_ticked`, `the_index_keeps_which_ways_of_matching_were_ticked`, `the_index_keeps_matching_within_folders_and_running_on_opening` |
+| `every_box_the_window_keeps_survives_the_real_folders_index` | `the_index_keeps_whether_marking_on_opening_was_ticked`, `the_index_keeps_which_ways_of_matching_were_ticked`, `the_index_keeps_matching_within_folders_and_running_on_opening` |
 | `a_pass_says_something_almost_at_once` | `the_event_stream_starts_and_ends` |
 | `a_pass_reaches_its_total_without_reading_the_index_page_by_page` | `a_folder_whose_index_is_in_an_older_shape_still_opens` |
 | `how_fast_new_files_are_read_and_indexed` | nothing: it prints a rate that belongs to the storage |
