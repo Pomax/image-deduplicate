@@ -21,9 +21,8 @@
 - [Linux](./0.2.0/imgdedupe-0.2.0-linux.zip) (sha256 bc3a905795d91b914f911260100c344b7e82e0647d459cd11b902d98859a863d)
 - [Source code](../../tree/v0.2.0)
 
-## 0.1.0 (2026-09-06)
+## 0.1.0 (2026-09-03)
 
-- [Windows](./0.1.0/imgdedupe-0.1.0-windows.zip) (sha256 c8e5b4198b59cef59842255678462e9d5b35473b35ce82e19be23e7f57e98fdf)
-- [macOS](./0.1.0/imgdedupe-0.1.0-macos.zip) (sha256 566f672c7c54bcfb34adaa2cc65e2ab4324743f8cdb8d3e655d2559136d4c3ca)
-- [Linux](./0.1.0/imgdedupe-0.1.0-linux.zip) (sha256 a84cc2774a55606179a488cc0b0fbb0ffa1c03495a202dc676bf7659031a96fc)
+No downloads: this version was never built and published under its own name.
+
 - [Source code](../../tree/v0.1.0)
