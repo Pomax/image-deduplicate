@@ -76,14 +76,17 @@ pub fn start(
     root: &Path,
     db_path: &Path,
     recurse: bool,
+    compare_only: bool,
 ) -> Result<Run> {
     let options = Options {
         root: root.to_path_buf(),
         db_path: db_path.to_path_buf(),
         recurse,
+        compare_only,
     };
     runlog::log_line!(
-        "indexing {} (recurse {recurse}, db {})",
+        "{} {} (recurse {recurse}, db {})",
+        if compare_only { "comparing" } else { "indexing" },
         root.display(),
         db_path.display()
     );
@@ -195,7 +198,7 @@ mod tests {
     /// A pass, started the way the window starts one: on a manager of its own,
     /// holding nothing until the pass gives it the folder.
     fn start_a_pass(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
-        start(imgdedupe_core::index::Index::start(), root, db_path, recurse)
+        start(imgdedupe_core::index::Index::start(), root, db_path, recurse, false)
     }
 
     fn drain(run: &mut Run) -> Vec<Update> {

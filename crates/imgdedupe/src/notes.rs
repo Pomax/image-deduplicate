@@ -25,6 +25,23 @@ pub struct Notes {
     pub match_corners: Option<bool>,
     pub within_a_folder: Option<bool>,
     pub auto_rescan: Option<bool>,
+    pub sensitivity: Option<f64>,
+    pub ignore_colour: Option<bool>,
+}
+
+/// The settings a search ran under, which is what its sets are the answer to.
+/// Sets found under one of these are not the sets another gives.
+///
+/// This is what got used, not what somebody moved a control to. A slider moved
+/// and left alone has changed nothing, and the index goes on holding the
+/// settings the sets in it were found with.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Search {
+    pub sensitivity: f64,
+    pub whole_frame: bool,
+    pub corners: bool,
+    pub ignore_colour: bool,
+    pub within_a_folder: bool,
 }
 
 /// The keys the window writes and reads them under.
@@ -36,6 +53,8 @@ pub const MATCH_WHOLE_FRAME: &str = "match_whole_frame";
 pub const MATCH_CORNERS: &str = "match_corners";
 pub const WITHIN_A_FOLDER: &str = "within_a_folder";
 pub const AUTO_RESCAN: &str = "auto_rescan";
+pub const SENSITIVITY: &str = "sensitivity";
+pub const IGNORE_COLOUR: &str = "ignore_colour";
 
 /// How a yes and a no are written.
 pub fn mark(on: bool) -> &'static str {
@@ -50,6 +69,7 @@ pub fn mark(on: bool) -> &'static str {
 pub fn read(index: &Index) -> Notes {
     let value = |key: &str| index.meta(key).ok().flatten();
     let yes_or_no = |key: &str| value(key).map(|held| held == "1");
+    let number = |key: &str| value(key).and_then(|held| held.parse::<f64>().ok());
     Notes {
         recurse: yes_or_no(RECURSE),
         disposal: value(DISPOSAL),
@@ -59,7 +79,19 @@ pub fn read(index: &Index) -> Notes {
         match_corners: yes_or_no(MATCH_CORNERS),
         within_a_folder: yes_or_no(WITHIN_A_FOLDER),
         auto_rescan: yes_or_no(AUTO_RESCAN),
+        sensitivity: number(SENSITIVITY),
+        ignore_colour: yes_or_no(IGNORE_COLOUR),
     }
+}
+
+/// Write down the settings a search ran under. Called where one has run, and
+/// nowhere else.
+pub fn ran_under(index: &Index, search: &Search) -> anyhow::Result<()> {
+    index.set_meta(SENSITIVITY, &search.sensitivity.to_string())?;
+    index.set_meta(MATCH_WHOLE_FRAME, mark(search.whole_frame))?;
+    index.set_meta(MATCH_CORNERS, mark(search.corners))?;
+    index.set_meta(IGNORE_COLOUR, mark(search.ignore_colour))?;
+    index.set_meta(WITHIN_A_FOLDER, mark(search.within_a_folder))
 }
 
 
