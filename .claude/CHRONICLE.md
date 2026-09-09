@@ -600,7 +600,7 @@ The tally in the run log says how many were asked for, how many arrived, how lon
 
 The script builds the release, moves the binary to the repository root, and packs it with upx when upx is on the path. macOS never packs: upx dropped Mach-O support, and a packed binary cannot be signed.
 
-The binary is not committed. Built ones come from the releases the workflow makes, three platforms at a time: a `v*` tag makes its own, and a push to main replaces the one called `latest`. There was a `dist/<os>/` folder before that workflow existed, and it is gone.
+The binary is not committed. Built ones come from the workflow, three platforms at a time: a push to main whose version in `Cargo.toml` has changed tags that commit and commits the three archives to the `releases` branch, under a directory named after the version. There was a `dist/<os>/` folder before that workflow existed, and it is gone. There was a GitHub release for every version and a rolling one called `latest` before the branch existed, and those are gone too.
 
 Tests are `cargo test --workspace`. Every test is named for what it proves and appears in `tests.md`; when a test changes, that document changes with it. A check that is worth making once is worth making on every run, so nothing is verified by a throwaway command.
 

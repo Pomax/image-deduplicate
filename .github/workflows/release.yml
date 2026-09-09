@@ -197,3 +197,30 @@ jobs:
           git add "$VERSION" README.md
           git commit -m "$VERSION"
           git push origin releases
+
+      # And the version somebody arriving at the repository sees. The title of
+      # the README on main is the version that was last released, so the front
+      # page and the branch of builds cannot say different things.
+      #
+      # This pushes to main, which starts this workflow again. That run stops at
+      # the first job: the commit changes the README and not `Cargo.toml`, so the
+      # version is the same as the commit before it and there is nothing to build
+      # or release.
+      - name: Say the version in the title of main's readme
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          git checkout main
+          git pull --ff-only origin main
+          printf '# imgdedupe v%s\n' "$VERSION" > README.next
+          tail -n +2 README.md >> README.next
+          mv README.next README.md
+          head -n 1 README.md
+
+          if git diff --quiet -- README.md; then
+            echo "the title already says v$VERSION"
+            exit 0
+          fi
+          git add README.md
+          git commit -m "v$VERSION"
+          git push origin main
