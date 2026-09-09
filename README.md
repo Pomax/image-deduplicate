@@ -2,6 +2,12 @@
 
 A cross-platform desktop program that indexes a folder of images, finds duplicates in it, and removes the ones you don't keep. Written in Rust with egui. Builds to one executable, with no installer and no runtime dependencies.
 
+## Downloads
+
+You can find versioned downloads over on [the releases branch](./tree/releases).
+
+<sub>This repo does not use GitHub's "releases" format, as there is no way to force it to always show assets, and has no way to only show actual releases, always injecting source code downloads when you're literally on the code repository webpage already. With the added benefit that updating the release information is a normal PR that can be tracked like everything else.</sub>
+
 ## Supported image formats:
 
 Supported basic formats:
