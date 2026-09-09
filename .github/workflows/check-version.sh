@@ -42,3 +42,6 @@ fi
 echo "build=$build" >> "$GITHUB_OUTPUT"
 echo "release=$release" >> "$GITHUB_OUTPUT"
 echo "tag=$tag" >> "$GITHUB_OUTPUT"
+# The tag without its v, which is what the built archives are named after: a
+# file sitting in somebody's downloads folder says which version it is.
+echo "version=$version" >> "$GITHUB_OUTPUT"
