@@ -251,7 +251,7 @@ mod tests {
     fn a_unc_path_survives_the_round_trip_untouched() {
         let dir = tempfile::tempdir().expect("tempdir");
         let settings = dir.path().join(FILE);
-        let share = PathBuf::from(r"\\DragonHoard\Storage\Seafood\sexy pictures\gonewild");
+        let share = PathBuf::from(r"\\a machine\a share\a folder\pictures");
 
         write(
             &settings,
@@ -373,7 +373,7 @@ mod tests {
     fn a_path_with_spaces_survives_the_round_trip() {
         let dir = tempfile::tempdir().expect("tempdir");
         let settings = dir.path().join(FILE);
-        let chosen = folder_in(dir.path(), "sexy pictures");
+        let chosen = folder_in(dir.path(), "holiday pictures");
 
         write(&settings, &Settings { folder: Some(chosen.clone()), recurse: true, ..Settings::default() });
         assert_eq!(read(&settings).folder, Some(chosen));

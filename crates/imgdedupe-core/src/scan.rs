@@ -113,6 +113,14 @@ pub struct Options {
     pub root: PathBuf,
     pub db_path: PathBuf,
     pub recurse: bool,
+    /// Stop after comparing the folder with the index, without reading a file.
+    ///
+    /// A pass begins by listing the folder, reading what the index knows, and
+    /// working out the difference, and it reports every one of those. Opening a
+    /// folder needs that answer and nothing after it, so it asks for the same
+    /// pass and says where to stop. There is one comparison in this program and
+    /// this is it.
+    pub compare_only: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -263,11 +271,18 @@ fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db
 
     for candidate in candidates {
         seen.insert(candidate.rel_path.clone());
-        let fresh = known.get(&candidate.rel_path).is_some_and(|entry| {
-            entry.size_bytes == candidate.size_bytes
-                && entry.mtime_ms == candidate.mtime_ms
-                && entry.fingerprint_version == FINGERPRINT_VERSION
+        let entry = known.get(&candidate.rel_path);
+        // The file is where it was, at the size it was. Whether that settles it
+        // depends on what the index has to say about it: a picture is settled by
+        // its fingerprints being current, and a file the pass has already read
+        // and found not to be a picture is settled by having been read.
+        let where_it_was = entry.is_some_and(|entry| {
+            entry.size_bytes == candidate.size_bytes && entry.mtime_ms == candidate.mtime_ms
         });
+        let fresh = where_it_was
+            && entry.is_some_and(|entry| {
+                entry.not_a_picture || entry.fingerprint_version == FINGERPRINT_VERSION
+            });
         if fresh {
             unchanged += 1;
         } else {
@@ -285,11 +300,24 @@ fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db
 }
 
 /// What came back from reading one file.
+///
+/// The two that are not pictures carry what the index records about them, so a
+/// later pass and a later comparison know the file has been looked at and that
+/// looking again would find what this found.
 enum Outcome {
     Indexed(Box<Record>),
     /// Not one of the supported formats, or animated. Not an error, and not indexed.
-    NotAnImage,
-    Failed { path: String, message: String },
+    NotAnImage(db::Looked),
+    Failed { looked: db::Looked, message: String },
+}
+
+/// What the index records about a file the pass read and did not index.
+fn looked_at(candidate: &Candidate) -> db::Looked {
+    db::Looked {
+        rel_path: candidate.rel_path.clone(),
+        size_bytes: candidate.size_bytes,
+        mtime_ms: candidate.mtime_ms,
+    }
 }
 
 /// Read, sniff, decode and fingerprint one file. Never panics on bad input: a
@@ -347,10 +375,10 @@ struct Spent;
 fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
     let head = &bytes[..bytes.len().min(SNIFF_LEN)];
     let Some(format) = format::detect(head) else {
-        return Outcome::NotAnImage;
+        return Outcome::NotAnImage(looked_at(candidate));
     };
     if frames::is_animated(format, &bytes) {
-        return Outcome::NotAnImage;
+        return Outcome::NotAnImage(looked_at(candidate));
     }
 
     #[cfg(feature = "logging")]
@@ -359,7 +387,7 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
         Ok(ready) => ready,
         Err(err) => {
             return Outcome::Failed {
-                path: candidate.rel_path.clone(),
+                looked: looked_at(candidate),
                 message: format!("{err:#}"),
             }
         }
@@ -536,6 +564,35 @@ pub fn run(
         removed.len()
     );
 
+    // Asked only what the folder looks like against the index. Everything below
+    // reads files, and there is nothing here to read them for.
+    if options.compare_only {
+        report(indexed_so_far(
+            0,
+            unchanged,
+            to_index.len() as u64,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        ));
+        // What it found: the files the index does not have, and the files it has
+        // that the folder does not. The caller decides what to do about them.
+        report(Event::Done {
+            indexed: to_index.len() as u64,
+            removed: removed.len() as u64,
+            failed: 0,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        });
+        return Ok((
+            Summary {
+                indexed: to_index.len() as u64,
+                removed: removed.len() as u64,
+                unchanged,
+                ..Summary::default()
+            },
+            None,
+        ));
+    }
+
     // The index is loaded and nothing in the folder has moved, so it is already
     // the answer. Convert it here, off the copy that is still in memory, rather
     // than leaving it for whatever runs next to read the file all over again.
@@ -635,6 +692,18 @@ pub fn run(
                 Ok(())
             };
 
+            // The files that turned out not to be pictures, batched the way the
+            // pictures are. Writing them down is what stops the next pass reading
+            // them again and the next comparison calling them new.
+            let mut looked: Vec<db::Looked> = Vec::new();
+            let note = |index: &crate::index::Index, looked: &mut Vec<db::Looked>| -> Result<()> {
+                if looked.is_empty() {
+                    return Ok(());
+                }
+                let batch: Vec<db::Looked> = looked.drain(..).collect();
+                index.not_pictures(batch, scanned_at)
+            };
+
             for outcome in recv {
                 match outcome {
                     Outcome::Indexed(record) => {
@@ -648,15 +717,26 @@ pub fn run(
                             told = Instant::now();
                         }
                     }
-                    Outcome::NotAnImage => {}
-                    Outcome::Failed { path, message } => {
+                    Outcome::NotAnImage(one) => {
+                        looked.push(one);
+                        if looked.len() >= BATCH {
+                            note(index, &mut looked)?;
+                        }
+                    }
+                    Outcome::Failed { looked: one, message } => {
                         failed += 1;
+                        let path = one.rel_path.clone();
+                        looked.push(one);
+                        if looked.len() >= BATCH {
+                            note(index, &mut looked)?;
+                        }
                         report(Event::Error { path, message });
                     }
                 }
             }
 
             flush(index, &mut pending)?;
+            note(index, &mut looked)?;
             report(indexed_so_far(indexed, unchanged, total, &done, &ignored));
             if !to_index.is_empty() {
                 report(Event::Reached(Step::FinishedIndexingNewFiles));
@@ -743,7 +823,7 @@ pub fn run(
                             }
                             Err(err) => {
                                 let _ = failures.send(Outcome::Failed {
-                                    path: candidate.rel_path.clone(),
+                                    looked: looked_at(candidate),
                                     message: err.to_string(),
                                 });
                             }
@@ -764,7 +844,7 @@ pub fn run(
             }
             let outcome = index_one(candidate, &bytes, &spent);
             read_ahead.release(bytes.len() as u64);
-            if matches!(outcome, Outcome::NotAnImage) {
+            if matches!(outcome, Outcome::NotAnImage(_)) {
                 ignored.fetch_add(1, Ordering::Relaxed);
             }
             let _ = send.send(outcome);
@@ -1088,7 +1168,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().to_path_buf();
         let db_path = root.join(db::INDEX_FILENAME);
-        let options = Options { root, db_path, recurse: true };
+        let options = Options { root, db_path, recurse: true, compare_only: false };
         let index = crate::index::Index::start();
         index.open(&options.db_path).expect("hold the index");
         Fixture { dir, options, index }
@@ -1514,6 +1594,74 @@ mod tests {
         assert_eq!(counted, Some(2), "the two files that are not pictures were not reported");
     }
 
+    /// A file the pass read and did not index is written down as read, so the
+    /// next pass has nothing to do with it and does not open it again.
+    ///
+    /// This is what the whole folder being "as indexed" turns on: without the
+    /// row, a file that claims a format and is not one is missing from the index
+    /// for ever, and every comparison calls it new.
+    #[test]
+    fn what_a_pass_could_not_index_is_not_read_again_by_the_next_one() {
+        let fx = fixture();
+        write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
+        std::fs::write(fx.dir.path().join("notes.png"), b"just some text").expect("write");
+        std::fs::write(fx.dir.path().join("bad.png"), b"\x89PNG\r\n\x1a\ntruncated")
+            .expect("write");
+
+        let (first, _) = scan(&fx);
+        assert_eq!((first.indexed, first.failed), (1, 1));
+
+        let (again, _) = scan(&fx);
+        assert_eq!(again.indexed, 0, "a file was indexed by the second pass");
+        assert_eq!(again.failed, 0, "the broken file was opened and failed again");
+        // All three, not just the picture. A file counted as unchanged is a file
+        // the pass did not open: that is what unchanged means.
+        assert_eq!(again.unchanged, 3, "the files that were looked at were read again");
+    }
+
+    /// And the folder then answers that it is as indexed, which is what decides
+    /// whether opening it asks anybody anything.
+    #[test]
+    fn a_folder_whose_files_were_all_looked_at_is_as_indexed() {
+        let fx = fixture();
+        write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
+        std::fs::write(fx.dir.path().join("notes.png"), b"just some text").expect("write");
+        scan(&fx);
+
+        // The same pass, told to stop once it has compared. Nothing to index and
+        // nothing gone is a folder that is as its index says.
+        let comparing = Options { compare_only: true, ..fx.options.clone() };
+        let (found, _) = run(&fx.index, &comparing, &AtomicBool::new(false), &|_| {})
+            .expect("compare");
+        assert_eq!(
+            (found.indexed, found.removed),
+            (0, 0),
+            "a file the pass looked at and could not index reads as a difference"
+        );
+        assert_eq!(found.unchanged, 2, "the files it accounted for are not what it said");
+
+        // A picture added since is a difference, which is the other half of the
+        // same answer, and it is counted as the one file there is to read.
+        write_image(&fx.dir.path().join("b.png"), 48, 32, 7);
+        let (found, _) = run(&fx.index, &comparing, &AtomicBool::new(false), &|_| {})
+            .expect("compare");
+        assert_eq!((found.indexed, found.removed, found.unchanged), (1, 0, 2));
+    }
+
+    /// A file that was not a picture and has been replaced by one is indexed on
+    /// the next pass: the row says where it was and how big, and both have moved.
+    #[test]
+    fn a_file_that_became_a_picture_is_indexed_by_the_next_pass() {
+        let fx = fixture();
+        std::fs::write(fx.dir.path().join("a.png"), b"just some text").expect("write");
+        let (first, _) = scan(&fx);
+        assert_eq!(first.indexed, 0);
+
+        write_image(&fx.dir.path().join("a.png"), 64, 48, 0);
+        let (again, _) = scan(&fx);
+        assert_eq!(again.indexed, 1, "the file that became a picture was not indexed");
+    }
+
     #[test]
     fn a_malformed_image_is_reported_and_does_not_stop_the_pass() {
         let fx = fixture();
@@ -1565,7 +1713,12 @@ mod tests {
         std::fs::create_dir(&root).expect("mkdir");
         write_image(&root.join("a.png"), 32, 32, 0);
         let db_path = root.join(db::INDEX_FILENAME);
-        let options = Options { root: root.clone(), db_path: db_path.clone(), recurse: true };
+        let options = Options {
+            root: root.clone(),
+            db_path: db_path.clone(),
+            recurse: true,
+            compare_only: false,
+        };
 
         let index = crate::index::Index::start();
         index.open(&db_path).expect("hold the index");

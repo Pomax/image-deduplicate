@@ -16,7 +16,7 @@
 //! manager holds nothing, and no file is touched.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -39,7 +39,16 @@ enum Job {
     ForgetMeta(String, Sender<Result<()>>),
     Ignore(Vec<(i64, i64)>, Sender<Result<()>>),
     Unignore(Vec<(i64, i64)>, Sender<Result<()>>),
+    BeginReview(Sender<Result<()>>),
+    Kept(Sender<Result<Vec<i64>>>),
+    KeepThese(Vec<i64>, Sender<Result<()>>),
+    UnkeepThese(Vec<i64>, Sender<Result<()>>),
+    ClearKeep(Sender<Result<()>>),
+    StoredSets(Sender<Result<Vec<(i64, Vec<i64>)>>>),
+    StoreSets(Vec<(i64, Vec<i64>)>, Sender<Result<()>>),
+    ClearSets(Sender<Result<()>>),
     Upsert(Vec<Record>, i64, Sender<Result<()>>),
+    NotPictures(Vec<db::Looked>, i64, Sender<Result<()>>),
     DeletePaths(Vec<String>, Sender<Result<usize>>),
     Compact(Sender<Result<()>>),
     Delete(Sender<Result<usize>>),
@@ -137,6 +146,48 @@ impl Index {
         self.ask(Job::Ignored)?
     }
 
+    /// A review is starting: make the tables it is written in, so the folder has
+    /// a review from the moment somebody can mark a picture in it.
+    pub fn begin_review(&self) -> Result<()> {
+        self.ask(Job::BeginReview)?
+    }
+
+    /// Every picture a review marked to keep, from whenever it was reviewed.
+    pub fn kept(&self) -> Result<Vec<i64>> {
+        self.ask(Job::Kept)?
+    }
+
+    /// Mark these pictures to keep: what somebody just marked, and nothing else.
+    pub fn keep_these(&self, file_ids: &[i64]) -> Result<()> {
+        self.ask(|back| Job::KeepThese(file_ids.to_vec(), back))?
+    }
+
+    /// Take the mark off these pictures.
+    pub fn unkeep_these(&self, file_ids: &[i64]) -> Result<()> {
+        self.ask(|back| Job::UnkeepThese(file_ids.to_vec(), back))?
+    }
+
+    /// Take the marks away, for a review that has been carried out.
+    pub fn clear_keep(&self) -> Result<()> {
+        self.ask(Job::ClearKeep)?
+    }
+
+    /// The sets a search found and wrote down, in the order they were shown in.
+    pub fn stored_sets(&self) -> Result<Vec<(i64, Vec<i64>)>> {
+        self.ask(Job::StoredSets)?
+    }
+
+    /// Write down the sets a search found.
+    pub fn store_sets(&self, sets: &[(i64, Vec<i64>)]) -> Result<()> {
+        self.ask(|back| Job::StoreSets(sets.to_vec(), back))?
+    }
+
+    /// Take the stored sets away, for a folder about to be searched again or one
+    /// whose review has been carried out.
+    pub fn clear_sets(&self) -> Result<()> {
+        self.ask(Job::ClearSets)?
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.ask(|back| Job::Meta(key.to_string(), back))?
     }
@@ -161,6 +212,12 @@ impl Index {
     /// Write a batch of pictures into the index.
     pub fn upsert(&self, records: Vec<Record>, scanned_at: i64) -> Result<()> {
         self.ask(|back| Job::Upsert(records, scanned_at, back))?
+    }
+
+    /// Write down a batch of files the pass read and did not index, so the next
+    /// pass and the next comparison know they have been looked at.
+    pub fn not_pictures(&self, looked_at: Vec<db::Looked>, scanned_at: i64) -> Result<()> {
+        self.ask(|back| Job::NotPictures(looked_at, scanned_at, back))?
     }
 
     /// Take paths out of the index, giving back how many rows went.
@@ -243,6 +300,79 @@ fn serve(jobs: Receiver<Job>) {
                 let _ = back.send(done);
                 writer.apply(Box::new(move |file| db::unignore(file, &pairs)));
             }
+            Job::Kept(back) => {
+                let _ = back.send(with(&current_open_index, |it| db::kept(&it.conn)));
+            }
+            // These four are asked of a folder that may not be open yet: the
+            // window writes a review as it happens, and a folder is chosen before
+            // its index has been opened. A change the copy in memory did not make
+            // is not sent to the file, or the writer is handed work it has
+            // nowhere to do and reports it as trouble.
+            Job::BeginReview(back) => {
+                let done = with(&current_open_index, |it| db::begin_review(&it.conn));
+                let made = done.is_ok();
+                let _ = back.send(done);
+                if made {
+                    writer.apply(Box::new(db::begin_review));
+                }
+            }
+            Job::KeepThese(file_ids, back) => {
+                let done = with(&current_open_index, |it| db::keep_these(&it.conn, &file_ids));
+                let made = done.is_ok();
+                let _ = back.send(done);
+                if made {
+                    writer.apply(Box::new(move |file| db::keep_these(file, &file_ids)));
+                }
+            }
+            Job::UnkeepThese(file_ids, back) => {
+                let done = with(&current_open_index, |it| db::unkeep_these(&it.conn, &file_ids));
+                let made = done.is_ok();
+                let _ = back.send(done);
+                if made {
+                    writer.apply(Box::new(move |file| db::unkeep_these(file, &file_ids)));
+                }
+            }
+            Job::ClearKeep(back) => {
+                let done = with(&current_open_index, |it| db::clear_keep(&it.conn));
+                let made = done.is_ok();
+                let _ = back.send(done);
+                if made {
+                    writer.apply(Box::new(db::clear_keep));
+                }
+            }
+            Job::StoredSets(back) => {
+                let _ = back.send(with(&current_open_index, |it| db::stored_sets(&it.conn)));
+            }
+            // Not somebody doing something: a search handing over everything it
+            // found, which on a folder of any size is hundreds of rows. They go to
+            // the file in one transaction, the way a pass's records do, so it is
+            // one commit rather than one per picture per set.
+            Job::StoreSets(sets, back) => {
+                let done = with_mut(&mut current_open_index, |it| {
+                    let tx = it.conn.transaction()?;
+                    db::store_sets(&tx, &sets)?;
+                    tx.commit()?;
+                    Ok(())
+                });
+                let made = done.is_ok();
+                let _ = back.send(done);
+                if made {
+                    writer.apply(Box::new(move |file| {
+                        let tx = file.unchecked_transaction()?;
+                        db::store_sets(&tx, &sets)?;
+                        tx.commit()?;
+                        Ok(())
+                    }));
+                }
+            }
+            Job::ClearSets(back) => {
+                let done = with(&current_open_index, |it| db::clear_sets(&it.conn));
+                let made = done.is_ok();
+                let _ = back.send(done);
+                if made {
+                    writer.apply(Box::new(db::clear_sets));
+                }
+            }
             Job::Upsert(records, scanned_at, back) => {
                 let done = with_mut(&mut current_open_index, |it| {
                     let tx = it.conn.transaction()?;
@@ -260,6 +390,25 @@ fn serve(jobs: Receiver<Job>) {
                     let tx = file.unchecked_transaction()?;
                     for record in &records {
                         db::upsert(&tx, record, scanned_at)?;
+                    }
+                    tx.commit()?;
+                    Ok(())
+                }));
+            }
+            Job::NotPictures(looked_at, scanned_at, back) => {
+                let done = with_mut(&mut current_open_index, |it| {
+                    let tx = it.conn.transaction()?;
+                    for one in &looked_at {
+                        db::not_a_picture(&tx, one, scanned_at)?;
+                    }
+                    tx.commit()?;
+                    Ok(())
+                });
+                let _ = back.send(done);
+                writer.apply(Box::new(move |file| {
+                    let tx = file.unchecked_transaction()?;
+                    for one in &looked_at {
+                        db::not_a_picture(&tx, one, scanned_at)?;
                     }
                     tx.commit()?;
                     Ok(())
@@ -357,24 +506,70 @@ fn close_index(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> R
 }
 
 fn compact(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result<()> {
-    with_mut(current_open_index, |it| {
-        it.conn.execute_batch("VACUUM").context("giving back the space of deleted rows")
-    })?;
-    // A VACUUM in memory does not change the size of the file, and a smaller
-    // file is what the caller asked for.
-    writer.apply(Box::new(|file| {
-        file.execute_batch("VACUUM").context("giving back the space of deleted rows")
-    }));
-    writer.drain()
+    // Tidied on this machine's own disk, never on the folder's.
+    //
+    // Tidying writes a database out a page at a time. The folder can be on
+    // another machine, and done there that is the whole index across the network
+    // in small writes with a journal beside it: a minute on a hundred-megabyte
+    // index. On a local disk those pages cost nothing, and what crosses the
+    // network afterwards is one finished file, written once.
+    //
+    // This is the one thing that replaces the index file rather than writing
+    // changes into it, because it is the one thing that changes every byte of it.
+    //
+    // Written out by SQLite rather than built in memory first: the index is
+    // already held whole, a large folder's being hundreds of megabytes, and
+    // taking the tidied database as bytes as well would be a second copy of it
+    // beside the first.
+    let path = {
+        let it = current_open_index.as_ref().context("no folder is open")?;
+        it.path.clone()
+    };
+    // One name per tidying, not one per program: two folders can be tidied at
+    // once, and they would otherwise write over each other's file.
+    static TIDYINGS: AtomicU64 = AtomicU64::new(0);
+    let local = std::env::temp_dir().join(format!(
+        "imgdedupe-tidying-{}-{}.sqlite",
+        std::process::id(),
+        TIDYINGS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&local);
+    {
+        let it = current_open_index.as_ref().context("no folder is open")?;
+        it.conn
+            .execute("VACUUM INTO ?1", [local.to_string_lossy().as_ref()])
+            .with_context(|| format!("tidying the index at {}", local.display()))?;
+    }
+
+    // The writer's connection is closed while the file underneath it is replaced,
+    // and opened again on the new one. Closing it is also what waits: the writer
+    // takes its errands in order, so everything written before this has reached
+    // the file by the time the close comes back, and any trouble with it is
+    // reported here.
+    writer.close()?;
+    // Back over the index, in one copy. If that fails the folder still has the
+    // index it had: the tidied file is the copy, and nothing has been taken away
+    // from the folder until this succeeds.
+    let put_back = std::fs::copy(&local, &path).with_context(|| {
+        format!("putting the tidied index back at {}", path.display())
+    });
+    let _ = std::fs::remove_file(&local);
+    put_back?;
+    writer.open(&path)
 }
 
 /// Remove the index from the folder and close it.
 fn delete(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result<usize> {
     let (path, rows) = match current_open_index {
         Some(it) => {
+            // Pictures, not rows: `files` also holds what the pass looked at and
+            // could not index, and "the index went, and N pictures with it" is
+            // what this number is read as.
             let rows: i64 = it
                 .conn
-                .query_row("SELECT count(*) FROM files", [], |row| row.get(0))
+                .query_row("SELECT count(*) FROM files WHERE not_a_picture = 0", [], |row| {
+                    row.get(0)
+                })
                 .unwrap_or(0);
             (it.path.clone(), rows as usize)
         }
@@ -758,6 +953,109 @@ mod tests {
             db::ignored(&conn).expect("ignored").is_empty(),
             "the pair outlived its picture in the file"
         );
+    }
+
+    /// A review is written down as it is made, so what one window wrote is what
+    /// the next one reading the file finds: the marks, and the sets they are
+    /// marks in.
+    #[test]
+    fn a_review_written_by_one_window_is_in_the_file_for_the_next() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("upsert");
+        let known = index.known().expect("known");
+        let (a, b) = (known["a.jpg"].id, known["b.jpg"].id);
+
+        index.begin_review().expect("begin the review");
+        index.keep_these(&[a]).expect("mark");
+        index.store_sets(&[(a, vec![a, b])]).expect("store");
+        index.synced().expect("wait for the disk");
+
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        assert_eq!(db::kept(&conn).expect("marks"), vec![a], "the mark is not in the file");
+        assert_eq!(
+            db::stored_sets(&conn).expect("sets"),
+            vec![(a, vec![a, b])],
+            "the set is not in the file"
+        );
+    }
+
+    /// The end of a review takes it out of the file as well, both tables, so the
+    /// next window opens a folder nobody has reviewed.
+    #[test]
+    fn a_review_that_is_over_is_out_of_the_file_too() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("upsert");
+        let known = index.known().expect("known");
+        let (a, b) = (known["a.jpg"].id, known["b.jpg"].id);
+        index.begin_review().expect("begin the review");
+        index.keep_these(&[a]).expect("mark");
+        index.store_sets(&[(a, vec![a, b])]).expect("store");
+        index.synced().expect("wait for the disk");
+
+        index.clear_keep().expect("clear the marks");
+        index.clear_sets().expect("clear the sets");
+        index.synced().expect("wait for the disk");
+
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        assert!(db::kept(&conn).expect("marks").is_empty(), "the marks outlived the review");
+        assert!(db::stored_sets(&conn).expect("sets").is_empty(), "the sets outlived the review");
+    }
+
+    /// A window writes a review before it has a folder open: a mark is made on
+    /// the sets in front of somebody, and the manager may be between folders. A
+    /// change the copy in memory could not make is not sent to the file, and the
+    /// writer is not left holding trouble to report.
+    #[test]
+    fn a_review_written_with_no_index_open_is_refused_and_leaves_the_writer_clean() {
+        let index = Index::start();
+        assert!(index.keep_these(&[1]).is_err(), "a mark was taken with no index open");
+        assert!(index.unkeep_these(&[1]).is_err(), "a mark was taken off the same way");
+        assert!(index.store_sets(&[(1, vec![1, 2])]).is_err(), "sets were taken the same way");
+        assert!(index.clear_keep().is_err());
+        assert!(index.clear_sets().is_err());
+        index.synced().expect("the writer was handed work it had nowhere to do");
+    }
+
+    /// Tidying replaces the index file with the tidied database from memory, so
+    /// everything written before it has to be in that file afterwards: both what
+    /// had already reached the disk and what was still on its way there.
+    #[test]
+    fn tidying_the_index_keeps_everything_written_before_it() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("upsert");
+        index.synced().expect("wait for the disk");
+        let known = index.known().expect("known");
+        let (a, b) = (known["a.jpg"].id, known["b.jpg"].id);
+        index.begin_review().expect("begin the review");
+        // Written and not waited for: this is still on the writer's queue when
+        // the tidying starts.
+        index.keep_these(&[a]).expect("mark");
+        index.ignore(&[db::pair(a, b)]).expect("ignore");
+
+        index.compact().expect("tidy the index");
+
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        assert_eq!(db::kept(&conn).expect("marks"), vec![a], "a mark was lost by the tidying");
+        assert_eq!(
+            db::ignored(&conn).expect("pairs"),
+            vec![db::pair(a, b)],
+            "an ignored pair was lost by the tidying"
+        );
+        assert_eq!(db::load_known(&conn).expect("known").len(), 2, "the pictures were lost");
+
+        // And the index is still being written to afterwards.
+        index.keep_these(&[b]).expect("mark again");
+        index.synced().expect("wait for the disk");
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        let mut held = db::kept(&conn).expect("marks");
+        held.sort();
+        assert_eq!(held, vec![a, b], "the file stopped taking changes after the tidying");
     }
 
     /// Giving back the space of deleted rows is asked for to make the file

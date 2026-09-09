@@ -104,9 +104,42 @@ enum Opened {
     /// connection as the pictures. They are part of what a folder's index says
     /// about it, so they arrive with it and are held in memory from then on.
     Ignored(Vec<(i64, i64)>),
+    /// The pictures a review marked to keep, whenever that review was. Read off
+    /// the same connection as the pairs, and held until there are sets to hang
+    /// them on.
+    Kept(Vec<i64>),
+    /// The sets the last search of this folder found, as file ids in the order
+    /// they were shown in. Held until the pictures arrive, which is what they are
+    /// built from.
+    Sets(Vec<(i64, Vec<i64>)>),
     /// The pictures, as the search wants them.
     Index(std::sync::Arc<Vec<matching::Image>>),
     Failed(String),
+}
+
+/// Why a folder with a saved review is being asked about rather than opened on
+/// it.
+///
+/// One reason, and it is the only one there can be: a file was added, removed or
+/// written since the review was saved, so the sets in it are not certainly the
+/// sets of what is there now. Nothing having changed is not a question: the
+/// review stands and is opened. A folder set to rescan itself is not a question
+/// either: with something to bring up to date it is brought up to date, which is
+/// what the box says, and with nothing to bring up to date the pass has no work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Question {
+    TheFolderChanged,
+}
+
+impl Question {
+    fn wording(self) -> &'static str {
+        match self {
+            Question::TheFolderChanged => {
+                "Previous session found but folder content has changed. Load previous session \
+                 or rescan?"
+            }
+        }
+    }
 }
 
 /// Every pair of pictures in a set, lower file id first, which is how a pair is
@@ -701,6 +734,13 @@ fn count_line(
 /// them: the button.
 const TOOLBAR_HEIGHT: f32 = 28.0;
 
+/// Between the buttons at the left of the review toolbar.
+const TOOLBAR_BUTTON_GAP: f32 = 14.0;
+
+/// The cleanup button at the right of it, which is a fixed width so the counts
+/// know how much of the row is left for them.
+const CLEANUP_BUTTON_WIDTH: f32 = 120.0;
+
 /// Room around a preset's name. Four of these sit under the slider and are read
 /// at a glance, so they are no bigger than the words in them.
 const PRESET_PADDING: egui::Vec2 = egui::vec2(6.0, 2.0);
@@ -1233,6 +1273,41 @@ pub struct App {
     /// Pairs of pictures said not to be copies of each other, as the folder's
     /// index holds them. A set every pair of which is in here is left alone.
     ignored: std::collections::HashSet<(i64, i64)>,
+    /// What a cleanup would take, as the review stands.
+    ///
+    /// Held rather than worked out where it is drawn. It follows from the marks,
+    /// the sets and the ignored pairs, and every place any of those changes works
+    /// it out again, derived whole each time, so it cannot come to disagree with
+    /// them, and derived on the change rather than on the frame, so a review
+    /// nobody is touching costs nothing.
+    plan: cleanup::Plan,
+    /// Whether the folder that is open arrived with an index. A folder without
+    /// one has nothing to compare itself against, and choosing it is not asking
+    /// for it to be scanned.
+    opened_with_an_index: bool,
+    /// Whether the pass that is running is the comparison a folder is opened
+    /// with, rather than a pass over the folder. What it finds decides what
+    /// opening the folder does.
+    comparing: bool,
+    /// Whether the last pass found a file the index does not have, or a file the
+    /// index has that the folder does not.
+    something_moved: bool,
+    /// The question standing between a saved review and this folder being
+    /// searched again. Nothing happens until it is answered.
+    question: Option<Question>,
+    /// The sets the last search of this folder found, as its index holds them:
+    /// file ids and the order they were shown in, and nothing else about the
+    /// pictures. Empty for a folder that has never been searched.
+    sets_before: Vec<(i64, Vec<i64>)>,
+    /// What the last review of this folder marked to keep, as the folder's index
+    /// holds it.
+    ///
+    /// Held per file, because that is what a mark is about. The window holds its
+    /// marks per set, and a set does not exist until a search has run, so these
+    /// wait here until there are sets to hang them on. A pass does not empty
+    /// them: it clears the marks on screen and the next search puts these back
+    /// on whatever it finds.
+    kept_before: std::collections::HashSet<i64>,
     /// Whether opening this folder starts a pass by itself. Off to begin with,
     /// and kept in the index, which is also the thing it depends on: a folder
     /// with no index has nothing to run on opening.
@@ -1387,6 +1462,13 @@ impl App {
             match_corners: true,
             within_a_folder: false,
             ignored: std::collections::HashSet::new(),
+            plan: cleanup::Plan::default(),
+            opened_with_an_index: false,
+            comparing: false,
+            something_moved: false,
+            question: None,
+            sets_before: Vec::new(),
+            kept_before: std::collections::HashSet::new(),
             auto_rescan: false,
             auto_mark: false,
             mark_on_arrival: false,
@@ -1529,12 +1611,14 @@ impl eframe::App for App {
             });
 
         self.filling_the_window(ctx);
+        self.ask_about_the_saved_review(ctx);
 
         if self.running.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.remember();
         // The indexer is a separate process. Left running it holds the index
@@ -1543,6 +1627,16 @@ impl eframe::App for App {
             run.cancel();
         }
         self.running = None;
+        // And the index is closed, which is what waits for the writer.
+        //
+        // A caller is answered when the copy in memory has its change, not when
+        // the file does: the file is caught up on a thread of its own. Ending
+        // here without waiting is ending with the last of the review still on
+        // that thread's queue, and a mark made a moment before the window closed
+        // is exactly what is lost.
+        if let Err(err) = self.index.close() {
+            runlog::log_line!("the index would not close: {err:#}");
+        }
     }
 }
 
@@ -1652,6 +1746,10 @@ impl App {
                 }
                 Update::Failed { path, message } => self.scan.failures.push((path, message)),
                 Update::Done { indexed, removed, failed, elapsed_ms } => {
+                    // Files the index does not have, and files it has that the
+                    // folder does not. Taken from what the pass says it did, not
+                    // from the bars, which count the whole folder.
+                    self.something_moved = indexed > 0 || removed > 0;
                     // The pass is over. Everything in the folder that was going
                     // to be read has been read and everything that was going to
                     // be indexed is in the index, including a folder where that
@@ -1669,10 +1767,18 @@ impl App {
                 }
                 Update::Finished { cancelled, error } => {
                     self.running = None;
+                    let comparing = std::mem::take(&mut self.comparing);
                     match error {
                         Some(message) => self.error = Some(message),
                         None if cancelled => {
                             self.scan.finished = Some(String::from("cancelled"))
+                        }
+                        // That was the comparison, not a pass over the folder.
+                        // What it found is what decides whether anything else
+                        // happens at all.
+                        None if comparing => {
+                            let moved = self.something_moved;
+                            self.decide_what_opening_the_folder_does(moved);
                         }
                         // Nothing was read, so there is nothing to look through.
                         // Searching an empty folder lights two more lamps and
@@ -1911,6 +2017,7 @@ impl App {
                 self.selected = None;
                 self.showing = None;
                 self.scan = ScanState::default();
+                self.replan();
             }
             // A folder worth keeping an index for is a folder worth bringing up
             // to date on sight, so saying yes to the one says yes to the other.
@@ -2071,6 +2178,7 @@ impl App {
         }
         self.sets.clear();
         self.keep.clear();
+        self.replan();
         self.selected = None;
         self.showing = None;
         // Counters, bars and whatever the last search said were about the folder
@@ -2112,6 +2220,9 @@ impl App {
         // Whatever the last folder said is not true of this one. What this one
         // says arrives with its index.
         self.ignored.clear();
+        self.replan();
+        self.kept_before.clear();
+        self.sets_before.clear();
         let Some(db_path) = self.db_path.clone() else {
             return;
         };
@@ -2138,12 +2249,37 @@ impl App {
                 return;
             }
             let _ = send.send(Opened::Found(there));
+            // Whether there is a review to go back to comes first, before what
+            // the folder says it does on opening. A folder that asks to be
+            // rescanned and has a review saved is asked about rather than
+            // rescanned, and the window cannot know that until it has this.
+            match index.stored_sets() {
+                Ok(sets) => {
+                    let _ = send.send(Opened::Sets(sets));
+                }
+                Err(err) => {
+                    let _ = send.send(Opened::Failed(format!("{err:#}")));
+                    return;
+                }
+            }
             let _ = send.send(Opened::Notes(crate::notes::read(&index)));
             // The pairs are part of what the index holds about this folder, and
             // after this they are in memory and nothing asks again.
             match index.ignored() {
                 Ok(pairs) => {
                     let _ = send.send(Opened::Ignored(pairs));
+                }
+                Err(err) => {
+                    let _ = send.send(Opened::Failed(format!("{err:#}")));
+                    return;
+                }
+            }
+            // And what the last review of this folder marked to keep, for the
+            // same reason: it is part of what the index says about the folder,
+            // and after this it is in memory.
+            match index.kept() {
+                Ok(marks) => {
+                    let _ = send.send(Opened::Kept(marks));
                 }
                 Err(err) => {
                     let _ = send.send(Opened::Failed(format!("{err:#}")));
@@ -2202,23 +2338,23 @@ impl App {
         }
         for said in arrived {
             match said {
-                Opened::Notes(notes) => {
-                    self.take_notes(notes);
-                    // A folder that asks to be brought up to date on sight is
-                    // started here rather than when its pictures arrive: the
-                    // pass reads the index itself, and there is nothing to be
-                    // gained by waiting for a second copy of it.
-                    if self.auto_rescan && !self.busy() {
-                        self.start_scan();
-                    }
-                }
+                // What the folder was set to. Nothing is started here: what
+                // opening a folder does is decided by comparing it with its
+                // index, and that cannot be done until the index has arrived.
+                Opened::Notes(notes) => self.take_notes(notes),
                 Opened::Reading(progress) => self.note_search_progress(progress),
                 Opened::Found(there) => {
                     self.light(Lamp::CheckedForIndexFile);
                     self.keep_index = there;
+                    self.opened_with_an_index = there;
                     self.settle_the_boxes();
                 }
-                Opened::Ignored(pairs) => self.ignored.extend(pairs),
+                Opened::Ignored(pairs) => {
+                    self.ignored.extend(pairs);
+                    self.replan();
+                }
+                Opened::Kept(marks) => self.kept_before.extend(marks),
+                Opened::Sets(sets) => self.sets_before = sets,
                 Opened::Index(images) => {
                     self.light(Lamp::LoadedIndexIntoMemory);
                     // A pass that started in the meantime is reading the same
@@ -2226,6 +2362,9 @@ impl App {
                     // still running or has already finished.
                     if !self.scanned_since_asking {
                         self.images = Some(images);
+                        // Everything the folder had to say has now been said, so
+                        // this is where it is compared with what is on disk.
+                        self.look_at_the_folder();
                     }
                     self.search = SearchState::default();
                 }
@@ -2566,8 +2705,13 @@ impl App {
         self.images = None;
         // Including the ones the opening read is still on its way back with.
         self.scanned_since_asking = true;
+        // And the sets written down for this folder, which are not the sets this
+        // pass and the search after it will find. No index holds sets nobody
+        // stands behind.
+        self.give_up_the_saved_review();
         self.sets.clear();
         self.keep.clear();
+        self.replan();
         self.selected = None;
         self.showing = None;
         self.thumbs.forget();
@@ -2589,7 +2733,7 @@ impl App {
             self.previous = crate::settings::sorted(&self.previous);
             self.remember();
         }
-        match indexer::start(self.index.clone(), &folder, &db_path, self.recurse) {
+        match indexer::start(self.index.clone(), &folder, &db_path, self.recurse, false) {
             Ok(run) => self.running = Some(run),
             Err(err) => self.fail(&format!("{err:#}")),
         }
@@ -2672,7 +2816,15 @@ impl App {
                     self.light(Lamp::FinishedFindingDuplicates);
                     self.search.stage = Some("finished");
                     self.search.done = true;
+                    // Taken first, because that is where a review begins and the
+                    // tables it is written in are made. Then written down, here
+                    // where the search is and not in `accept_sets`: sets read
+                    // back out of the index go through that too, and there is
+                    // nothing to write about sets that came from it. A search
+                    // that found nothing writes an empty list, which is a folder
+                    // searched and found clean rather than one never searched.
                     self.accept_sets(sets);
+                    self.remember_the_sets();
                     // The names about to go on screen. If any of them is in a
                     // script the bundled face does not have, this is where the
                     // machine gets asked for one that does.
@@ -2701,8 +2853,19 @@ impl App {
         }
     }
 
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     fn accept_sets(&mut self, sets: Vec<DuplicateSet>) {
         runlog::log_line!("found {} duplicate sets", sets.len());
+        // Sets are what a review is of, so a review begins here: this is the one
+        // place sets are built into the review page, whether they came from a
+        // search or out of the index, and the one place the tables a review is
+        // written in are made. A folder that already had a review is already
+        // holding them and nothing is made.
+        if self.db_path.is_some() {
+            if let Err(err) = self.index.begin_review() {
+                runlog::log_line!("the review could not be started in the index: {err:#}");
+            }
+        }
         self.keep.clear();
         self.selected = None;
         self.showing = None;
@@ -2722,13 +2885,19 @@ impl App {
             } else {
                 "No duplicates found for current settings"
             }));
+            self.replan();
             return;
         }
 
         self.sets = sets;
+        // What the last review of this folder marked, before anything the window
+        // would mark on its own: a mark somebody made outranks one that was
+        // offered, and the auto-marking below only adds what is missing.
+        self.take_up_the_marks();
         if std::mem::take(&mut self.mark_on_arrival) {
             self.auto_mark_to_keep();
         }
+        self.replan();
         self.preselect_first_keeper();
         if let Some(root) = self.folder.clone() {
             // The picture the pane opens on is asked for before the thumbnails,
@@ -2786,13 +2955,29 @@ impl App {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
+            if left.button("unmark all").clicked() {
+                self.unmark_everything();
+            }
+            left.add_space(TOOLBAR_BUTTON_GAP);
+            if left.button("mark all").clicked() {
+                self.keep_everything();
+            }
+            left.add_space(TOOLBAR_BUTTON_GAP);
             if left.button("auto-mark to keep").clicked() {
                 self.auto_mark_to_keep();
             }
 
+            // In the middle of what is left between the buttons, not the middle
+            // of the window: the buttons take the ends of the row, and centring
+            // on the window puts the counts over them as soon as there are
+            // enough of them.
+            let between = egui::Rect::from_min_max(
+                egui::pos2(left.min_rect().right() + TOOLBAR_BUTTON_GAP, rect.top()),
+                egui::pos2(rect.right() - CLEANUP_BUTTON_WIDTH - TOOLBAR_BUTTON_GAP, rect.bottom()),
+            );
             let mut middle = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(rect)
+                    .max_rect(between)
                     .layout(egui::Layout::top_down(egui::Align::Center)),
             );
             // One line rather than four labels beside each other: a row of
@@ -2810,7 +2995,7 @@ impl App {
                 egui::RichText::new("Clean up").strong().color(egui::Color32::WHITE),
             )
             .fill(egui::Color32::from_rgb(60, 110, 180))
-            .min_size(egui::vec2(120.0, 28.0));
+            .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, 28.0));
             if right.add_enabled(going > 0, go).clicked() {
                 self.view = View::Cleanup;
             }
@@ -2922,10 +3107,14 @@ impl App {
         };
         let pairs: Vec<(i64, i64)> = pairs_of(set).collect();
         self.ignored.extend(pairs.iter().copied());
+        // A set nobody calls a set of copies loses nothing, so what a cleanup
+        // would take is not what it was. Worked out with the change, not after
+        // the writing below, which a window with no folder open never reaches.
+        self.replan();
         // What the set kept stays with it, and so does where the preview was.
         // Neither is acted on while it is ignored: nothing goes from a set that
         // is not a set of copies, and no ring is drawn round a picture in one.
-        // Both are what taking it back gives back — the mark is where it was —
+        // Both are what taking it back gives back, the mark where it was,
         // and the preview is where the cursor keys walk from: left and up out of
         // a set that has just been ignored go to the set before it, right and
         // down to the set after it, which they cannot do from nowhere.
@@ -2950,6 +3139,7 @@ impl App {
         for pair in &pairs {
             self.ignored.remove(pair);
         }
+        self.replan();
         let Some(db_path) = &self.db_path else {
             return;
         };
@@ -2991,6 +3181,15 @@ impl App {
         if let Some(setting) = notes.auto_mark {
             self.auto_mark = setting;
         }
+        // What counts as a duplicate in this folder. A folder is searched the way
+        // it was searched before, the same as the ways of matching above: the
+        // sets it comes back with are the sets those settings give.
+        if let Some(setting) = notes.sensitivity {
+            self.sensitivity = setting;
+        }
+        if let Some(setting) = notes.ignore_colour {
+            self.ignore_colour = setting;
+        }
         // None of these boxes means anything without the one above it, and a box
         // that means nothing is not left ticked.
         self.settle_the_boxes();
@@ -3011,27 +3210,26 @@ impl App {
         }
     }
 
-    /// Which ways of matching this folder is searched with. A fact about the
-    /// folder: a folder where crops matter is searched for crops every time it
-    /// is opened, and one where they do not is not made to wait for them.
+    /// What this folder does when it is opened: whether it runs a pass, and
+    /// whether that pass marks the best copy in each set.
+    ///
+    /// Choices about the folder, and they take effect where they are made, so
+    /// they are written where they are made. The settings a search runs under
+    /// are not here: a control moved and never used has changed nothing, and the
+    /// index holds what a search really ran with.
     #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
     fn remember_ways_of_matching(&self) {
         let Some(db_path) = &self.db_path else {
             return;
         };
         let _ = db_path;
-        use crate::notes::{
-            mark, AUTO_MARK, AUTO_RESCAN, MATCH_CORNERS, MATCH_WHOLE_FRAME, WITHIN_A_FOLDER,
-        };
+        use crate::notes::{mark, AUTO_MARK, AUTO_RESCAN};
         let result = self
             .index
-            .set_meta(MATCH_WHOLE_FRAME, mark(self.match_whole_frame))
-            .and_then(|()| self.index.set_meta(MATCH_CORNERS, mark(self.match_corners)))
-            .and_then(|()| self.index.set_meta(WITHIN_A_FOLDER, mark(self.within_a_folder)))
-            .and_then(|()| self.index.set_meta(AUTO_RESCAN, mark(self.auto_rescan)))
+            .set_meta(AUTO_RESCAN, mark(self.auto_rescan))
             .and_then(|()| self.index.set_meta(AUTO_MARK, mark(self.auto_mark)));
         if let Err(err) = result {
-            runlog::log_line!("the ways of matching could not be written: {err:#}");
+            runlog::log_line!("what the folder does on opening could not be written: {err:#}");
         }
     }
 
@@ -3050,6 +3248,290 @@ impl App {
             .and_then(|()| self.index.set_meta("move_dir", &self.move_dir));
         if let Err(err) = result {
             runlog::log_line!("the cleanup choice could not be written: {err:#}");
+        }
+    }
+
+    /// Put the marks a previous review left back on the sets in front of the
+    /// person now.
+    ///
+    /// The marks are per file and the sets are whatever the search has just
+    /// found, so a mark goes back wherever its picture turns up. A mark whose
+    /// picture is in no set is left where it is: it is not on screen, so there is
+    /// nothing for it to be, and the next thing written takes it out.
+    ///
+    /// Nothing is written here. These marks came out of the index and putting
+    /// them back on screen does not change what it says.
+    fn take_up_the_marks(&mut self) {
+        if self.kept_before.is_empty() {
+            return;
+        }
+        for set in &self.sets {
+            let marked: Vec<i64> = set
+                .members
+                .iter()
+                .map(|member| member.file_id)
+                .filter(|file_id| self.kept_before.contains(file_id))
+                .collect();
+            if let Some(keep) = as_keep(marked) {
+                self.keep.insert(set.set_id, keep);
+            }
+        }
+        self.replan();
+    }
+
+    /// The review is finished, so what was written down for it goes: the sets and
+    /// the marks both.
+    ///
+    /// Nothing is left to be marked. The cleanup took everything that was not
+    /// marked, so the marks name every file still there, which says nothing, and
+    /// there are no sets for them to be marks in.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn the_review_is_over(&mut self) {
+        self.give_up_the_saved_review();
+        self.kept_before.clear();
+        if self.db_path.is_none() {
+            return;
+        }
+        if let Err(err) = self.index.clear_keep() {
+            runlog::log_line!("the marks could not be cleared: {err:#}");
+        }
+    }
+
+    /// Throw away the sets written down for this folder, because it is about to
+    /// be searched again and they are not what that search will find.
+    ///
+    /// The marks stay. A mark is about a file, not about a set, and the files are
+    /// still there; the next search hangs them on whatever sets it finds.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn give_up_the_saved_review(&mut self) {
+        self.sets_before.clear();
+        if self.db_path.is_none() {
+            return;
+        }
+        if let Err(err) = self.index.clear_sets() {
+            runlog::log_line!("the stored sets could not be cleared: {err:#}");
+        }
+    }
+
+    /// Compare the folder with its index, which is what decides everything that
+    /// happens on opening one.
+    ///
+    /// The same pass, told to stop once it has compared. It lists the folder,
+    /// reads what the index knows and works out the difference, and it reports
+    /// every one of those the way it always does, so the bars and the counters
+    /// say what is true of the folder: on one where nothing has moved, every file
+    /// read and every file indexed, by an earlier run.
+    ///
+    /// Only for a folder that arrived with an index. One without has nothing to
+    /// compare itself against, and choosing a folder is not asking for it to be
+    /// scanned.
+    fn look_at_the_folder(&mut self) {
+        if !self.opened_with_an_index || self.busy() {
+            return;
+        }
+        let (Some(folder), Some(db_path)) = (self.folder.clone(), self.db_path.clone()) else {
+            return;
+        };
+        self.comparing = true;
+        match indexer::start(self.index.clone(), &folder, &db_path, self.recurse, true) {
+            Ok(run) => self.running = Some(run),
+            Err(err) => {
+                self.comparing = false;
+                self.fail(&format!("{err:#}"));
+            }
+        }
+    }
+
+    /// Act on what the comparison found.
+    ///
+    /// The review opens on the stored sets when nothing has moved. Otherwise the
+    /// folder is brought up to date, or the question goes up and nothing else
+    /// happens until it is answered.
+    fn decide_what_opening_the_folder_does(&mut self, moved: bool) {
+        let saved = !self.sets_before.is_empty();
+        runlog::log_line!(
+            "opened a folder: something moved {moved}, rescans on opening {}, a saved review of \
+             {} sets",
+            self.auto_rescan,
+            self.sets_before.len()
+        );
+
+        // Something has moved. The box says whether that is asked about or simply
+        // brought up to date, and with no saved review there is nothing to ask
+        // about and nothing to protect.
+        if moved {
+            if self.auto_rescan || !saved {
+                self.start_scan();
+            } else {
+                self.question = Some(Question::TheFolderChanged);
+            }
+            return;
+        }
+
+        // Nothing has moved, so there is no pass to run whatever the box says.
+        // What the comparison found is on the bars already, put there by the
+        // comparison itself: every file read, every file indexed, by an earlier
+        // run.
+        //
+        // A saved review is what the folder was left in the middle of; without
+        // one, the folder was opened to be searched.
+        if saved {
+            self.open_the_stored_review();
+        } else {
+            self.load_sets();
+        }
+    }
+
+    /// Put the question up, and act on the answer.
+    ///
+    /// Two ways out and no third: this folder's review is finished, or it is
+    /// given up and the folder is scanned again. The window is not usable behind
+    /// it, because everything behind it is about one or the other.
+    fn ask_about_the_saved_review(&mut self, ctx: &egui::Context) {
+        let Some(question) = self.question else {
+            return;
+        };
+        let mut answered = None;
+        egui::Window::new("Previous session")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(question.wording());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Finish previous session").clicked() {
+                        answered = Some(true);
+                    }
+                    if ui.button("Rescan").clicked() {
+                        answered = Some(false);
+                    }
+                });
+                ui.add_space(4.0);
+            });
+        match answered {
+            Some(true) => {
+                self.question = None;
+                self.open_the_stored_review();
+            }
+            Some(false) => {
+                self.question = None;
+                self.give_up_the_saved_review();
+                self.start_scan();
+            }
+            None => {}
+        }
+    }
+
+    /// Open the review on the sets a previous search wrote down, without running
+    /// one.
+    ///
+    /// The pictures are the ones this open already read, so nothing is read
+    /// again and nothing is compared again. A set whose pictures are gone comes
+    /// back short or not at all, which `sets_from_stored` decides.
+    ///
+    /// Nothing is written: these sets came out of the index and putting them on
+    /// screen does not change what it says.
+    fn open_the_stored_review(&mut self) -> bool {
+        let Some(images) = self.images.clone() else {
+            return false;
+        };
+        if self.sets_before.is_empty() {
+            return false;
+        }
+        let sets = matching::sets_from_stored(&images, &self.sets_before);
+        if sets.is_empty() {
+            return false;
+        }
+        runlog::log_line!("opened {} sets from the last session", sets.len());
+        // The same way a search's sets are taken, because they are the same
+        // thing: sets, going on the review page. The only difference is that
+        // these came out of the index rather than out of a search, so there is
+        // nothing to write down about them.
+        self.accept_sets(sets);
+        true
+    }
+
+    /// What the window is set to search for, which is what a set it found is the
+    /// answer to.
+    fn search_settings(&self) -> crate::notes::Search {
+        crate::notes::Search {
+            sensitivity: self.sensitivity,
+            whole_frame: self.match_whole_frame,
+            corners: self.match_corners,
+            ignore_colour: self.ignore_colour,
+            within_a_folder: self.within_a_folder,
+        }
+    }
+
+    /// Write down the sets a search found, and the settings it found them under.
+    ///
+    /// The pictures are named by number and nothing about them is written twice:
+    /// what each one is comes out of the index the sets were found in.
+    ///
+    /// This is also where the settings themselves reach the index. Moving the
+    /// slider is not using it: until a search has run on a setting, the setting
+    /// has done nothing, and what the folder is searched with next time is what
+    /// it was last searched with.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn remember_the_sets(&mut self) {
+        if self.db_path.is_none() {
+            return;
+        }
+        let stored: Vec<(i64, Vec<i64>)> = self
+            .sets
+            .iter()
+            .map(|set| {
+                (set.set_id, set.members.iter().map(|member| member.file_id).collect())
+            })
+            .collect();
+        let under = self.search_settings();
+        let result = self
+            .index
+            .store_sets(&stored)
+            .and_then(|()| crate::notes::ran_under(&self.index, &under));
+        if let Err(err) = result {
+            runlog::log_line!("the sets could not be written: {err:#}");
+        }
+    }
+
+    /// Somebody marked these pictures to keep. Two things follow from that and
+    /// they follow together: the marks are written down, and what a cleanup would
+    /// take is worked out again.
+    fn marked(&mut self, file_ids: &[i64]) {
+        self.write_marks(file_ids, true);
+        self.replan();
+    }
+
+    /// And the other way: somebody took the mark off these.
+    fn unmarked(&mut self, file_ids: &[i64]) {
+        self.write_marks(file_ids, false);
+        self.replan();
+    }
+
+    /// Write down the marks that just changed, and only those.
+    ///
+    /// One row per picture somebody touched. Not the whole review: on a folder on
+    /// another machine every statement is a journal written and deleted beside the
+    /// index, so redoing every mark on every click cost as many of those as the
+    /// review had marks, and they piled up behind the person all session.
+    ///
+    /// Not called where the marks are cleared wholesale: another folder, a pass,
+    /// a search coming back, the end of a cleanup. None of those is somebody
+    /// unmarking a picture, and what is written down outlives all of them.
+    #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
+    fn write_marks(&self, file_ids: &[i64], keeping: bool) {
+        if self.db_path.is_none() || file_ids.is_empty() {
+            return;
+        }
+        let done = if keeping {
+            self.index.keep_these(file_ids)
+        } else {
+            self.index.unkeep_these(file_ids)
+        };
+        if let Err(err) = done {
+            runlog::log_line!("the marks could not be written: {err:#}");
         }
     }
 
@@ -3085,6 +3567,52 @@ impl App {
         self.show_selected = true;
     }
 
+    /// Take every mark off every set, so the person can start choosing again.
+    ///
+    /// A set nobody calls a set of copies is left alone, the way it is everywhere
+    /// else: what it was keeping before it was ignored is what it gets back if it
+    /// is taken back.
+    fn unmark_everything(&mut self) {
+        let ignored: Vec<i64> = self
+            .sets
+            .iter()
+            .filter(|set| self.is_ignored(set))
+            .map(|set| set.set_id)
+            .collect();
+        let mut came_off = Vec::new();
+        self.keep.retain(|set_id, keep| {
+            if ignored.contains(set_id) {
+                return true;
+            }
+            came_off.extend(keep.marked());
+            false
+        });
+        self.unmarked(&came_off);
+    }
+
+    /// Mark every picture in every set that is a set of copies, so a cleanup
+    /// takes nothing from any of them.
+    ///
+    /// A set nobody calls a set of copies is left alone, the way it is everywhere
+    /// else: nothing goes from it and nothing is marked in it.
+    fn keep_everything(&mut self) {
+        let mut went_on = Vec::new();
+        let sets: Vec<(i64, Vec<i64>)> = self
+            .sets
+            .iter()
+            .filter(|set| !self.is_ignored(set))
+            .map(|set| (set.set_id, set.members.iter().map(|member| member.file_id).collect()))
+            .collect();
+        for (set_id, all) in sets {
+            let already = self.keep.get(&set_id).map(Keep::marked).unwrap_or_default();
+            went_on.extend(all.iter().copied().filter(|id| !already.contains(id)));
+            if let Some(keep) = as_keep(all) {
+                self.keep.insert(set_id, keep);
+            }
+        }
+        self.marked(&went_on);
+    }
+
     /// Mark the best copy in every set that has not been dealt with, leaving
     /// every other mark where it is.
     ///
@@ -3102,6 +3630,7 @@ impl App {
                 Some((set.set_id, best.file_id))
             })
             .collect();
+        let mut went_on = Vec::new();
         for (set_id, file_id) in best {
             let keeping = self.keep.get(&set_id);
             if keeps(keeping, file_id) {
@@ -3109,8 +3638,10 @@ impl App {
             }
             if let Some(now) = marked(keeping, file_id) {
                 self.keep.insert(set_id, now);
+                went_on.push(file_id);
             }
         }
+        self.marked(&went_on);
     }
 
     /// Mark or unmark the picture the preview is showing, which is what the space
@@ -3138,7 +3669,8 @@ impl App {
         // A mark says to keep this picture and says nothing about any other, so
         // marking one never unmarks another. This is the only way a mark is put
         // on or taken off.
-        let now = if keeps(keeping, file_id) {
+        let coming_off = keeps(keeping, file_id);
+        let now = if coming_off {
             unmarked(keeping, file_id)
         } else {
             marked(keeping, file_id)
@@ -3147,6 +3679,12 @@ impl App {
             Some(keep) => self.keep.insert(set_id, keep),
             None => self.keep.remove(&set_id),
         };
+        // One picture changed, so one row is written.
+        if coming_off {
+            self.unmarked(&[file_id]);
+        } else {
+            self.marked(&[file_id]);
+        }
     }
 
     /// Make the picture the preview is showing the one thing its set keeps,
@@ -3169,7 +3707,18 @@ impl App {
             return;
         }
         let set_id = set.set_id;
+        // Whatever the set marked before comes off, and this one goes on.
+        let came_off: Vec<i64> = self
+            .keep
+            .get(&set_id)
+            .map(Keep::marked)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|kept| *kept != file_id)
+            .collect();
         self.keep.insert(set_id, Keep::One(file_id));
+        self.unmarked(&came_off);
+        self.marked(&[file_id]);
     }
 
     /// Where the preview is in the list on screen, as a set and a place in it.
@@ -3192,8 +3741,13 @@ impl App {
         // Asked of the plan rather than worked out again here. What a cleanup
         // takes is one rule, and a count that reads the marks its own way is a
         // second copy of it that can disagree with the button.
-        let plan = self.build_plan();
-        (plan.files(), plan.bytes())
+        (self.plan.files(), self.plan.bytes())
+    }
+
+    /// Work out again what a cleanup would take. Called wherever the marks, the
+    /// sets or the ignored pairs change, and nowhere else.
+    fn replan(&mut self) {
+        self.plan = self.build_plan();
     }
 
     /// The first set that is a set of copies, not simply the first set. A set
@@ -3260,6 +3814,7 @@ impl App {
         self.images = None;
         self.sets.clear();
         self.keep.clear();
+        self.replan();
         self.selected = None;
         self.showing = None;
         self.thumbs.forget();
@@ -3299,7 +3854,17 @@ impl App {
                         .add_enabled(!keeping, egui::Button::new("Keep this one"))
                         .clicked()
                     {
+                        let came_off: Vec<i64> = self
+                            .keep
+                            .get(&set_id)
+                            .map(Keep::marked)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|kept| *kept != member.file_id)
+                            .collect();
                         self.keep.insert(set_id, Keep::One(member.file_id));
+                        self.unmarked(&came_off);
+                        self.marked(&[member.file_id]);
                     }
                     ui.label(
                         egui::RichText::new(format!(
@@ -3745,16 +4310,24 @@ impl App {
                     Some(SetAction::KeepAll) => {
                         let all: Vec<i64> =
                             members.iter().map(|member| member.file_id).collect();
+                        // The ones that were not marked already: a row is written
+                        // for what changed, not for the set.
+                        let already = self.keep.get(&set_id).map(Keep::marked).unwrap_or_default();
+                        let went_on: Vec<i64> =
+                            all.iter().copied().filter(|id| !already.contains(id)).collect();
                         match as_keep(all) {
                             Some(keep) => self.keep.insert(set_id, keep),
                             None => self.keep.remove(&set_id),
                         };
+                        self.marked(&went_on);
                     }
                     // Nothing in the set is marked to keep any more. By the rule
                     // above that leaves the set losing nothing, the same as one
                     // nobody has reached.
                     Some(SetAction::KeepNone) => {
-                        self.keep.remove(&set_id);
+                        let came_off =
+                            self.keep.remove(&set_id).map(|keep| keep.marked()).unwrap_or_default();
+                        self.unmarked(&came_off);
                     }
                     Some(SetAction::Ignore) => self.ignore_set(set_id),
                     Some(SetAction::Unignore) => self.unignore_set(set_id),
@@ -3875,8 +4448,13 @@ impl App {
                 // goes around the picture, not around the space kept clear for it.
                 let bordered = framed.response.rect.shrink2(egui::vec2(TILE_RING, 0.0));
                 if showing {
+                    // Inside the keep border, not around it. Drawn outside, the
+                    // ring for the picture being looked at sits over the border
+                    // that says the picture is being kept, and the one thing a
+                    // person needs to see about the picture in front of them is
+                    // hidden by the fact that they are looking at it.
                     ui.painter().rect_stroke(
-                        bordered.expand(3.0),
+                        bordered.shrink(3.0),
                         2.0,
                         egui::Stroke::new(3.0_f32, ui.style().visuals.selection.bg_fill),
                     );
@@ -3937,7 +4515,9 @@ impl App {
     }
 
     fn cleanup_view(&mut self, ui: &mut egui::Ui) {
-        let plan = self.build_plan();
+        // The plan the window holds, not one built here: this runs on every frame
+        // the page is on screen.
+        let plan = self.plan.clone();
         let sets_in_play = self.sets.len();
 
         // The action sits top right, where the one that starts a scan and the one
@@ -4278,10 +4858,45 @@ impl App {
         // What went is out of the sets. What would not go stays, with its keeper,
         // so another destination can be chosen and the same files tried again.
         self.forget_members(&outcome.removed);
+        // And out of the pictures held in memory, which the search runs over.
+        //
+        // The window removed those files itself, so what the folder holds now is
+        // what it held less that list. Nothing has to be looked at to know it:
+        // reading the folder again, or converting the index again, is asking a
+        // question this already has the answer to. Until another folder is
+        // opened, everything here is what it says it is.
+        if let Some(images) = self.images.take() {
+            // Taken apart rather than copied: this is the whole index in memory,
+            // hundreds of megabytes on a large folder. Nothing else is holding it
+            // here, since a cleanup runs from the cleanup page with no search on,
+            // and if something were, the pictures are left as they are and the
+            // next search reads them again.
+            self.images = match std::sync::Arc::try_unwrap(images) {
+                Ok(held) => {
+                    Some(std::sync::Arc::new(matching::without(held, &outcome.removed)))
+                }
+                Err(held) => {
+                    runlog::log_line!("something else is holding the pictures; leaving them");
+                    Some(held)
+                }
+            };
+        }
+
+        // The review has been carried out, so it is over: the files it took are
+        // gone and the sets it took them from describe a folder that no longer
+        // exists, whether everything it planned to take went or only some of it.
+        // The marks go with them, because what is left is what they named.
+        //
+        // A folder whose index is not being kept has none of this: the index
+        // itself goes, further down.
+        if self.keep_index {
+            self.the_review_is_over();
+        }
 
         if outcome.failed.is_empty() {
             self.sets.clear();
             self.keep.clear();
+            self.replan();
             self.selected = None;
             self.showing = None;
             self.view = View::Scan;
@@ -4314,8 +4929,27 @@ impl App {
 
         let still_here: std::collections::HashSet<i64> =
             self.sets.iter().flat_map(|set| set.members.iter().map(|m| m.file_id)).collect();
+        // A set that survived can be left marking a picture that did not, and a
+        // `Keep::Several` can be left holding one id, which the type says never
+        // happens. Each surviving set's marks are cut down to the pictures still
+        // in it and put back through `as_keep`, so `One` and `Several` mean what
+        // they say and no mark names a file that has gone.
+        let mut emptied = Vec::new();
+        for (set_id, keep) in self.keep.iter_mut() {
+            let left: Vec<i64> =
+                keep.marked().into_iter().filter(|id| still_here.contains(id)).collect();
+            match as_keep(left) {
+                Some(now) => *keep = now,
+                None => emptied.push(*set_id),
+            }
+        }
+        for set_id in emptied {
+            self.keep.remove(&set_id);
+        }
+
         self.selected = self.selected.filter(|id| still_here.contains(id));
         self.showing = self.showing.filter(|id| still_here.contains(id));
+        self.replan();
     }
 
 }
@@ -4392,6 +5026,12 @@ mod tests {
         crate::fonts::install(&ctx);
         install_style(&ctx);
         ctx
+    }
+
+    /// The ring drawn around the picture being looked at, which is a different
+    /// thing from the border that says a picture is being kept.
+    fn selection_colour() -> egui::Color32 {
+        window().style().visuals.selection.bg_fill
     }
 
     fn member(id: i64, path: &str, size: i64) -> Member {
@@ -4910,6 +5550,34 @@ mod tests {
         );
     }
 
+    /// The index holds a row for every file the pass has been through, pictures
+    /// or not. What went with it is a count of pictures, because that is what
+    /// "the index was deleted and N rows went with it" is read as.
+    #[test]
+    fn what_went_with_a_forgotten_index_is_counted_in_pictures() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["a.png", "b.png"] {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(48, 32, |x, y| {
+                image::Rgb([((x * 3) % 256) as u8, ((y * 5) % 256) as u8, 40])
+            }))
+            .save_with_format(dir.path().join(name), image::ImageFormat::Png)
+            .expect("a fixture");
+        }
+        std::fs::write(dir.path().join("pretend.png"), b"not a picture").expect("a fixture");
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(dir.path().to_path_buf());
+        app.start_scan();
+        settle(&mut app);
+        app.index.synced().expect("wait for the file");
+
+        assert_eq!(
+            discard_index(&app.index),
+            2,
+            "the file that is not a picture was counted as one"
+        );
+    }
+
     /// A folder whose index cannot be read stops there: the lamp for reading the
     /// index stays red, what went wrong is on screen, and nothing else about the
     /// folder is attempted. What to do about it is the user's to decide.
@@ -5095,7 +5763,14 @@ mod tests {
 
         app.start_scan();
         settle(&mut app);
-        assert_eq!(app.scan.unchanged, 2, "the two pictures were read again");
+        // All four, not just the two pictures: the file that is not one and the
+        // broken one were looked at and written down as looked at, so the second
+        // pass has nothing to read at all.
+        assert_eq!(app.scan.unchanged, 4, "a file the last pass looked at was read again");
+        assert_eq!(
+            app.scan.done, app.scan.unchanged,
+            "the second pass read a file, where everything in the folder was known"
+        );
         assert_eq!(app.scan.found(), 0, "a pass with nothing new found something");
     }
 
@@ -5138,7 +5813,6 @@ mod tests {
         let found = folder_with_two_sets();
         let mut app = reviewing(found.path());
         assert_eq!(app.sets.len(), 2, "the two pairs were not found");
-        let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
         let bytes_of = |app: &App, set: usize, keeper: i64| -> i64 {
             app.sets[set]
                 .members
@@ -5152,17 +5826,21 @@ mod tests {
         assert_eq!(going, 4, "an untouched review was keeping something");
         assert_eq!(bytes, bytes_of(&app, 0, -1) + bytes_of(&app, 1, -1));
 
-        // One marked in each set leaves the other picture of each going.
+        // One marked in each set leaves the other picture of each going. Marked
+        // the way a person marks one, because the tally follows from the marking
+        // and not from the field it lands in.
         let kept_first = app.sets[0].members[0].file_id;
         let kept_second = app.sets[1].members[0].file_id;
-        app.keep.insert(first, Keep::One(kept_first));
-        app.keep.insert(second, Keep::One(kept_second));
+        app.selected = Some(kept_first);
+        app.keep_selected();
+        app.selected = Some(kept_second);
+        app.keep_selected();
         let (going, bytes) = app.selected_for_removal();
         assert_eq!(going, 2);
         assert_eq!(bytes, bytes_of(&app, 0, kept_first) + bytes_of(&app, 1, kept_second));
 
         // Taking one set's marks off puts the whole set back in the tally.
-        app.keep.remove(&second);
+        app.keep_selected();
         let (going, bytes) = app.selected_for_removal();
         assert_eq!(going, 3);
         assert_eq!(bytes, bytes_of(&app, 0, kept_first) + bytes_of(&app, 1, -1));
@@ -6579,8 +7257,11 @@ mod tests {
         let mut pictures: Vec<egui::Rect> = drawn
             .iter()
             .filter_map(|clipped| match &clipped.shape {
+                // Not the ring around the picture being looked at: that is drawn
+                // inside the tile now, so it is close to the tile's own size.
                 egui::Shape::Rect(rect)
-                    if (rect.rect.width() - TILE.x).abs() < 6.0
+                    if rect.stroke.color != selection_colour()
+                        && (rect.rect.width() - TILE.x).abs() < 6.0
                         && (rect.rect.height() - TILE.y).abs() < 6.0 =>
                 {
                     Some(rect.rect)
@@ -6610,6 +7291,87 @@ mod tests {
         assert_eq!(app.keep.get(&set_id), None, "twice more did not let it go again");
     }
 
+    /// A cleanup removes files the window chose itself, so afterwards the folder
+    /// is what it was less that list, and the pictures held in memory say so
+    /// without the folder being read or the index converted again. Searching
+    /// again finds what is left, and no pass runs.
+    #[test]
+    fn what_a_cleanup_took_is_out_of_the_pictures_held_in_memory() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.images.as_ref().expect("pictures").len(), 3);
+        app.auto_mark_to_keep();
+        app.keep_index = true;
+        app.destination = Destination::Delete;
+        let plan = app.plan.clone();
+        let going = plan.removals[0].rel_path.clone();
+
+        app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = window();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
+
+        let left = app.images.as_ref().expect("the pictures were thrown away");
+        assert_eq!(left.len(), 2, "the picture the cleanup took is still in memory");
+
+        // And searching again runs on those, with no pass over the folder.
+        app.load_sets();
+        settle(&mut app);
+        assert!(app.running.is_none(), "the folder was read again after a cleanup");
+        assert!(app.sets.is_empty(), "the copies survived the cleanup");
+        let _ = going;
+    }
+
+    /// "unmark all" takes every mark off, so somebody can choose again from
+    /// nothing. A set nobody calls a set of copies keeps what it was keeping,
+    /// which is what taking it back gives back.
+    #[test]
+    fn unmarking_all_leaves_nothing_marked_but_what_an_ignored_set_was_keeping() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
+        app.selected = Some(app.sets[1].members[0].file_id);
+        app.keep_selected();
+        app.ignore_set(second);
+        app.keep_everything();
+        assert!(app.keep.contains_key(&first), "the set that is a set of copies marks nothing");
+
+        app.unmark_everything();
+
+        assert!(app.keep.get(&first).is_none(), "a mark survived unmarking everything");
+        assert!(
+            app.keep.get(&second).is_some(),
+            "an ignored set lost what it was keeping before it was ignored"
+        );
+        assert_eq!(app.plan.files(), 2, "what a cleanup would take did not follow the marks");
+    }
+
+    /// "keep everything" marks every picture in every set that is a set of
+    /// copies, so a cleanup takes nothing. A set nobody calls a set of copies is
+    /// left alone, the way it is everywhere else.
+    #[test]
+    fn keeping_everything_marks_every_picture_that_is_in_a_set_of_copies() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two sets were not found");
+        let ignored = app.sets[1].set_id;
+        app.ignore_set(ignored);
+        // One picture already marked, to show that marking the rest disturbs it.
+        app.selected = Some(app.sets[0].members[0].file_id);
+        app.keep_selected();
+
+        app.keep_everything();
+
+        let marked = app.keep.get(&app.sets[0].set_id).expect("the set marks nothing").marked();
+        let all: Vec<i64> = app.sets[0].members.iter().map(|member| member.file_id).collect();
+        assert_eq!(marked, all, "not every picture in the set was marked");
+        assert!(app.keep.get(&ignored).is_none(), "a set that is not a set of copies was marked");
+        assert_eq!(app.plan.files(), 0, "a cleanup would still take something");
+    }
+
     /// The toolbar over the review holds three things in one row, and each is in
     /// its own place: the marking button against the left edge, the counts in
     /// the middle of the window, and the cleanup button against the right edge.
@@ -6621,7 +7383,10 @@ mod tests {
         app.auto_mark_to_keep();
 
         let ctx = window();
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        // Wide enough for the row: two buttons at the left, the counts in the
+        // middle and the cleanup button at the right come to more than a narrow
+        // window has.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0));
         let shapes = crate::shot::frame(
             "the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right",
             &ctx,
@@ -6642,25 +7407,46 @@ mod tests {
                 .map(|(_, rect)| *rect)
                 .unwrap_or_else(|| panic!("{wanted} was not drawn in the toolbar: {painted:?}"))
         };
+        let unmark = one("unmark all");
+        let everything = one("mark all");
         let marking = one("auto-mark to keep");
         let button = one("Clean up");
         let counts = painted
             .iter()
-            .filter(|(text, _)| text != "auto-mark to keep" && text != "Clean up")
+            .filter(|(text, _)| {
+                text != "unmark all"
+                    && text != "mark all"
+                    && text != "auto-mark to keep"
+                    && text != "Clean up"
+            })
             .map(|(_, rect)| *rect)
             .reduce(|all, rect| all.union(rect))
             .expect("no counts were drawn");
 
-        assert!(marking.left() < 60.0, "the button is not against the left edge: {marking:?}");
+        assert!(
+            unmark.left() < 60.0,
+            "the first button is not against the left edge: {unmark:?}"
+        );
+        assert!(
+            everything.left() > unmark.right(),
+            "marking all is not to the right of unmarking all"
+        );
+        assert!(
+            marking.left() > everything.right(),
+            "auto-marking is not to the right of marking all"
+        );
         assert!(
             button.right() > screen.right() - 60.0,
             "the button is not against the right edge: {button:?}"
         );
+        // In the middle of what is left between the buttons. Centred on the
+        // window instead, they sit over the buttons as soon as there are enough
+        // of them, which there now are.
+        let middle_of_the_gap = (marking.right() + button.left()) / 2.0;
         assert!(
-            (counts.center().x - screen.center().x).abs() < 12.0,
-            "the counts are centred on {} and the window on {}",
+            (counts.center().x - middle_of_the_gap).abs() < 12.0,
+            "the counts are centred on {} and the space between the buttons on {middle_of_the_gap}",
             counts.center().x,
-            screen.center().x
         );
         assert!(
             counts.left() > marking.right() && counts.right() < button.left(),
@@ -7040,8 +7826,18 @@ mod tests {
         assert!(app.match_whole_frame, "whole pictures were not being matched to begin with");
         assert!(app.match_corners, "crops were not being matched to begin with");
 
+        // Unticking it writes nothing on its own: until a search has run that
+        // way, the folder has not been searched that way.
         app.match_corners = false;
-        app.remember_ways_of_matching();
+        assert_eq!(
+            crate::notes::read(&app.index).match_corners,
+            Some(true),
+            "unticking the box wrote it down before it had been used"
+        );
+
+        // Searching is using it, and that is what the index takes.
+        app.load_sets();
+        settle(&mut app);
 
         closed(&app);
         let again = reviewing(found.path());
@@ -7579,6 +8375,36 @@ mod tests {
         assert_eq!(outlined(&both, ring_colour), 1, "the ring went when the picture was marked");
         assert_eq!(outlined(&both, keep_colour), 1, "the marked picture had no border");
 
+        // And the ring is inside the border, not over it. Drawn outside, the ring
+        // for the picture being looked at covers the border that says the picture
+        // is being kept, and that is the one thing somebody needs to see about
+        // the picture in front of them.
+        let inside = |drawn: &[egui::epaint::ClippedShape],
+                      colour: egui::Color32|
+         -> egui::Rect {
+            drawn
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.stroke.width >= 2.0 => {
+                        let painted = rect.stroke.color;
+                        let faded = colour
+                            .gamma_multiply(f32::from(painted.a()) / f32::from(colour.a()));
+                        let (painted, faded) = (painted.to_array(), faded.to_array());
+                        (0..3)
+                            .all(|channel| painted[channel].abs_diff(faded[channel]) <= 2)
+                            .then_some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .expect("nothing was drawn in that colour")
+        };
+        let ring = inside(&both, ring_colour);
+        let border = inside(&both, keep_colour);
+        assert!(
+            border.contains_rect(ring),
+            "the ring is not inside the keep border: ring {ring:?}, border {border:?}"
+        );
+
         // Marks off: the ring stays, because it was never about the marks.
         app.keep.remove(&set_id);
         let after = set_frames(&mut app, &ctx, &root);
@@ -7998,7 +8824,18 @@ mod tests {
         settle(&mut app);
         app.within_a_folder = true;
         app.auto_rescan = true;
+        // Running on opening is a choice about the folder and is written where it
+        // is made. Matching within folders is a search setting, so it waits for a
+        // search to use it.
         app.remember_ways_of_matching();
+        let clicked = crate::notes::read(&app.index);
+        assert_eq!(
+            (clicked.recurse, clicked.within_a_folder, clicked.auto_rescan),
+            (Some(true), Some(false), Some(true)),
+            "a search setting was written before a search had used it"
+        );
+        app.load_sets();
+        settle(&mut app);
         let written = crate::notes::read(&app.index);
         assert_eq!(
             (written.recurse, written.within_a_folder, written.auto_rescan),
@@ -8134,8 +8971,11 @@ mod tests {
         let mut pictures: Vec<egui::Rect> = drawn
             .iter()
             .filter_map(|clipped| match &clipped.shape {
+                // Not the ring around the picture being looked at: that is drawn
+                // inside the tile now, so it is close to the tile's own size.
                 egui::Shape::Rect(rect)
-                    if (rect.rect.width() - TILE.x).abs() < 6.0
+                    if rect.stroke.color != selection_colour()
+                        && (rect.rect.width() - TILE.x).abs() < 6.0
                         && (rect.rect.height() - TILE.y).abs() < 6.0 =>
                 {
                     Some(rect.rect)
@@ -8288,31 +9128,22 @@ mod tests {
     }
 
     #[test]
-    fn the_review_state_is_not_written_to_the_index() {
-        // The marks live on the window and the plan is built from them alone,
-        // which is what makes a review something the index never hears about.
+    fn a_mark_reaches_the_index_and_leaves_the_pictures_alone() {
         let found = folder_with_a_duplicate();
         let db_path = headless::default_db_path(found.path());
         let mut app = reviewing(found.path());
-        app.index.synced().expect("wait for the file");
-        let before = std::fs::metadata(&db_path).expect("the index").len();
 
-        let moving_to = app.sets[0].members[1].file_id;
-        app.selected = Some(moving_to);
+        let marked = app.sets[0].members[1].file_id;
+        app.selected = Some(marked);
         app.keep_selected();
-        let plan = app.build_plan();
-
-        assert_eq!(plan.files(), 1);
+        assert_eq!(app.plan.files(), 1);
         assert_eq!(app.keep.len(), 1);
-        assert_eq!(
-            std::fs::metadata(&db_path).expect("the index").len(),
-            before,
-            "reviewing wrote to the index"
-        );
+
         let conn = index_file(&app, &db_path);
+        assert_eq!(db::kept(&conn).expect("marks"), vec![marked], "the mark is not in the index");
         let rows: i64 =
             conn.query_row("SELECT count(*) FROM files", [], |row| row.get(0)).expect("count");
-        assert_eq!(rows, 3, "reviewing changed what the index holds");
+        assert_eq!(rows, 3, "marking a picture changed what the index knows about the folder");
     }
 
     /// A real pass at the top of the scale, and then the window closed and
@@ -8633,6 +9464,462 @@ mod tests {
         assert_eq!(app.sets.len(), 1, "the search found nothing to review");
     }
 
+    /// The point of the whole thing: a review is not lost by closing the window.
+    /// What was marked comes back marked, on the same sets, without the folder
+    /// being read or searched again.
+    #[test]
+    fn a_review_survives_the_folder_changing_and_being_scanned_again() {
+        let found = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(found.path());
+        let mut app = reviewing(found.path());
+        let marked = app.sets[0].members[1].file_id;
+        let ignored_pair = app.sets[0].set_id;
+        app.selected = Some(marked);
+        app.keep_selected();
+        // And a set said not to be copies, which is the other half of what a
+        // review is.
+        let second = folder_with_a_duplicate();
+        let _ = second;
+        app.index.synced().expect("wait for the file");
+        {
+            let conn = db::open_and_migrate(&db_path).expect("read the index file");
+            assert_eq!(
+                db::kept(&conn).expect("marks"),
+                vec![marked],
+                "the mark never reached the index file"
+            );
+        }
+        closed(&app);
+
+        // Something added since, which is what this folder does every time: the
+        // comparison finds a difference and a pass runs before the review opens.
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }))
+        .save_with_format(found.path().join("new.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        again.auto_rescan = true;
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert!(again.have_sets(), "the folder was not searched after the pass");
+        let still: Vec<i64> = again.keep.values().flat_map(Keep::marked).collect();
+        assert_eq!(
+            still,
+            vec![marked],
+            "the mark did not come back onto the sets the new search found"
+        );
+        assert_eq!(again.plan.files(), 1, "what a cleanup would take did not come back");
+        let _ = ignored_pair;
+    }
+
+    /// A set somebody said is not a set of copies is part of the review too, and
+    /// comes back with it.
+    #[test]
+    fn an_ignored_set_comes_back_ignored_after_a_rescan() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+        app.ignore_set(set_id);
+        closed(&app);
+
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }))
+        .save_with_format(found.path().join("new.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        again.auto_rescan = true;
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        let same = again.sets.iter().find(|set| set.set_id == set_id).expect("the set came back");
+        assert!(again.is_ignored(same), "the set came back as a set of copies");
+    }
+
+    #[test]
+    fn a_review_is_still_there_when_the_folder_is_opened_again() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let set_id = app.sets[0].set_id;
+        let marked = app.sets[0].members[1].file_id;
+        app.selected = Some(marked);
+        app.keep_selected();
+        closed(&app);
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert_eq!(again.view, View::Review, "the window did not go back to the review");
+        assert!(again.running.is_none(), "the folder was scanned again");
+        assert!(again.searching.is_none(), "the folder was searched again");
+        assert_eq!(again.sets.len(), 1, "the sets did not come back");
+        assert_eq!(again.sets[0].set_id, set_id, "a different set came back");
+        assert_eq!(
+            again.keep.get(&set_id),
+            Some(&Keep::One(marked)),
+            "the picture that was marked came back unmarked"
+        );
+        assert_eq!(again.plan.files(), 1, "what a cleanup would take did not come back with it");
+    }
+
+    /// A mark is answered when the copy in memory has it, not when the file does:
+    /// the file is caught up on a thread of its own. So the window has to close
+    /// the index on the way out, because closing it is what waits for that
+    /// thread. Ending without it is ending with the last of the review still on
+    /// the queue.
+    ///
+    /// What is checked is that the window closed the index, not that the mark
+    /// happened to be there: on a small folder the writer wins that race anyway,
+    /// and a test that reads the file proves nothing about a folder where it does
+    /// not. That closing waits is `letting_go_of_a_folder_waits_for_the_file_to_
+    /// catch_up`, in the manager.
+    #[test]
+    fn the_window_closes_the_index_on_the_way_out() {
+        let found = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(found.path());
+        let mut app = reviewing(found.path());
+        let marked = app.sets[0].members[1].file_id;
+        app.selected = Some(marked);
+        app.keep_selected();
+        assert!(app.index.open_index_path().is_some(), "the folder was not open to begin with");
+
+        eframe::App::on_exit(&mut app, None);
+
+        assert!(
+            app.index.open_index_path().is_none(),
+            "the window ended without closing the index, so whatever was still being written went \
+             with it"
+        );
+        let conn = db::open_and_migrate(&db_path).expect("read the index file");
+        assert_eq!(db::kept(&conn).expect("marks"), vec![marked], "the mark is not in the file");
+    }
+
+    /// A file added since is a folder the stored sets do not describe, so the
+    /// person is asked rather than shown a review of what was there before.
+    /// Nothing happens until they answer.
+    #[test]
+    fn a_folder_that_changed_asks_before_its_saved_review_is_opened() {
+        let found = folder_with_a_duplicate();
+        let app = reviewing(found.path());
+        closed(&app);
+
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }))
+        .save_with_format(found.path().join("new.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert_eq!(
+            again.question,
+            Some(Question::TheFolderChanged),
+            "the folder changed and nothing was asked"
+        );
+        assert!(again.sets.is_empty(), "the review opened before anybody answered");
+        assert!(again.running.is_none(), "a pass started before anybody answered");
+        assert_eq!(again.view, View::Scan);
+    }
+
+    /// A folder set to rescan itself is asked about too, when there is a review
+    /// saved for it: the pass it asks for is what would throw that away. Saying
+    /// so opens the review, and the folder still rescans itself next time.
+    #[test]
+    fn a_folder_that_rescans_itself_with_nothing_to_rescan_opens_its_review() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let marked = app.sets[0].members[1].file_id;
+        app.selected = Some(marked);
+        app.keep_selected();
+        app.keep_index = true;
+        app.auto_rescan = true;
+        app.remember_ways_of_matching();
+        closed(&app);
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert_eq!(again.question, None, "a pass with no work to do was asked about");
+        assert!(again.running.is_none(), "a pass ran over a folder that had not changed");
+        assert_eq!(again.view, View::Review, "the review did not open");
+        assert!(again.auto_rescan, "the folder stopped asking to be rescanned");
+    }
+
+    /// The box says what to do when something has moved: bring it up to date,
+    /// without asking, saved review or not.
+    #[test]
+    fn a_folder_that_rescans_itself_is_rescanned_when_something_changed() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        app.keep_index = true;
+        app.auto_rescan = true;
+        app.remember_ways_of_matching();
+        closed(&app);
+
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }))
+        .save_with_format(found.path().join("new.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert_eq!(again.question, None, "the folder was asked about although the box is ticked");
+        assert_eq!(again.scan.total, 4, "the pass did not read the folder as it is now");
+    }
+
+    /// With no saved review there is nothing to protect and nothing to ask
+    /// about, so a folder that has changed is brought up to date either way.
+    #[test]
+    fn a_changed_folder_with_no_saved_review_is_rescanned_without_asking() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        app.keep_index = true;
+        app.give_up_the_saved_review();
+        closed(&app);
+
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }))
+        .save_with_format(found.path().join("new.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        assert!(!again.auto_rescan, "the box was ticked before the folder was opened");
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert_eq!(again.question, None, "a folder with nothing saved was asked about");
+        assert_eq!(again.scan.total, 4, "the pass did not read the folder as it is now");
+    }
+
+    /// A folder with an index, nothing changed and no saved review was opened to
+    /// be searched, and the pictures are already in memory, so it is searched.
+    #[test]
+    fn an_unchanged_folder_with_no_saved_review_is_searched_without_a_pass() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        app.give_up_the_saved_review();
+        closed(&app);
+
+        let mut again = App::from_settings(crate::settings::Settings::default());
+        again.open_folder(found.path().to_path_buf());
+        settle(&mut again);
+        settle_the_question(&mut again);
+
+        assert!(again.running.is_none(), "a folder that had not changed was scanned");
+        assert_eq!(again.sets.len(), 1, "the folder was not searched");
+    }
+
+    /// Choosing a folder that has no index is not asking for anything to happen
+    /// to it. Nothing is compared, nothing is scanned, nothing is searched.
+    #[test]
+    fn a_folder_with_no_index_is_left_alone_when_it_is_chosen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        }))
+        .save_with_format(dir.path().join("a.png"), image::ImageFormat::Png)
+        .expect("a fixture");
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(dir.path().to_path_buf());
+        settle(&mut app);
+        settle_the_question(&mut app);
+
+        assert!(app.running.is_none(), "choosing a folder scanned it");
+        assert!(app.sets.is_empty(), "choosing a folder searched it");
+        assert_eq!(app.question, None);
+        assert_eq!(app.view, View::Scan);
+    }
+
+    /// Answering "rescan" gives the saved review up: the sets go out of the
+    /// index, and the pass the folder was asking for runs.
+    #[test]
+    fn answering_rescan_leaves_no_stored_sets_and_starts_a_pass() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        let db_path = headless::default_db_path(found.path());
+        app.keep_index = true;
+
+        app.give_up_the_saved_review();
+        {
+            let conn = index_file(&app, &db_path);
+            assert!(
+                db::stored_sets(&conn).expect("sets").is_empty(),
+                "the sets nobody stands behind are still in the index"
+            );
+        }
+
+        // And the pass runs, and the search after it writes down what it found,
+        // which is what the index holds from then on.
+        app.start_scan();
+        settle(&mut app);
+        assert_eq!(app.sets.len(), 1, "the pass and its search found nothing");
+        let conn = index_file(&app, &db_path);
+        assert_eq!(
+            db::stored_sets(&conn).expect("sets").len(),
+            1,
+            "the new sets were not written down"
+        );
+    }
+
+    /// A cleanup is the review being carried out, so the review is over: the
+    /// sets and the marks both go out of the index.
+    #[test]
+    fn a_cleanup_leaves_no_review_in_the_index() {
+        let scanned = folder_with_a_duplicate();
+        let db_path = headless::default_db_path(scanned.path());
+        let mut app = reviewing(scanned.path());
+        app.auto_mark_to_keep();
+        app.keep_index = true;
+        app.destination = Destination::Delete;
+        let plan = app.plan.clone();
+        assert_eq!(plan.files(), 1, "there was nothing for the cleanup to do");
+
+        app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = window();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
+
+        let conn = index_file(&app, &db_path);
+        assert!(db::stored_sets(&conn).expect("sets").is_empty(), "the sets outlived the cleanup");
+        assert!(db::kept(&conn).expect("marks").is_empty(), "the marks outlived the cleanup");
+    }
+
+    /// What a cleanup would take is held rather than worked out where it is
+    /// drawn, so every interaction that changes it has to work it out again.
+    /// This is what catches one that forgot: after each, the held plan is
+    /// compared with one derived then and there.
+    #[test]
+    fn the_held_plan_follows_every_interaction() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        let in_step = |app: &App, after: &str| {
+            let derived = app.build_plan();
+            assert_eq!(
+                (app.plan.files(), app.plan.bytes()),
+                (derived.files(), derived.bytes()),
+                "the plan was not worked out again after {after}"
+            );
+        };
+        in_step(&app, "the search came back");
+
+        app.selected = Some(app.sets[0].members[0].file_id);
+        app.keep_selected();
+        in_step(&app, "a mark went on");
+        app.keep_selected();
+        in_step(&app, "a mark came off");
+        app.keep_only_selected();
+        in_step(&app, "shift said which picture");
+        app.auto_mark_to_keep();
+        in_step(&app, "the best copies were marked");
+
+        let set_id = app.sets[1].set_id;
+        app.ignore_set(set_id);
+        in_step(&app, "a set was ignored");
+        app.unignore_set(set_id);
+        in_step(&app, "a set was taken back");
+
+        app.forget_members(&[app.sets[0].members[0].rel_path.clone()]);
+        in_step(&app, "a picture was removed");
+
+        app.cancel_work();
+        in_step(&app, "the work was cancelled");
+        app.start_scan();
+        in_step(&app, "a pass started");
+    }
+
+    /// Drawing the review is not an interaction. The plan it draws from is the
+    /// one it was handed, and a frame does not change it.
+    #[test]
+    fn drawing_the_review_does_not_change_the_plan() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        app.auto_mark_to_keep();
+        let before = (app.plan.files(), app.plan.bytes());
+
+        let ctx = window();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            crate::shot::frame("drawing_does_not_change_the_plan", &ctx, input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.review_view(ui));
+            });
+        }
+        assert_eq!((app.plan.files(), app.plan.bytes()), before, "a frame changed the plan");
+    }
+
+    /// A cleanup that took some of what it planned to leaves marks naming files
+    /// that are gone. Each surviving set's marks are cut down to what is still in
+    /// it, so no mark names a file that went and no `Several` holds one id.
+    #[test]
+    fn marks_do_not_outlive_the_pictures_a_cleanup_took() {
+        // Three copies, so the set is still a set once one of them goes.
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.sets = vec![DuplicateSet {
+            set_id: 1,
+            members: vec![member(1, "a.jpg", 300), member(2, "b.jpg", 200), member(3, "c.jpg", 100)],
+        }];
+        app.selected = Some(1);
+        app.keep_selected();
+        app.selected = Some(2);
+        app.keep_selected();
+        assert_eq!(app.keep.get(&1), Some(&Keep::Several(vec![1, 2])));
+
+        app.forget_members(&[String::from("a.jpg")]);
+        assert_eq!(
+            app.keep.get(&1),
+            Some(&Keep::One(2)),
+            "a mark outlived the picture it was on"
+        );
+    }
+
+    /// Run the window's own frame loop until the folder has been listed and
+    /// compared with its index, which is what decides between opening a saved
+    /// review and asking about it.
+    fn settle_the_question(app: &mut App) {
+        let ctx = window();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < until {
+            app.hear_the_index(&ctx);
+            app.pump_indexer(&ctx);
+            app.pump_search(&ctx);
+            if app.asking.is_none()
+                && app.running.is_none()
+                && app.searching.is_none()
+            {
+                return;
+            }
+        }
+        panic!("the folder was never decided about");
+    }
+
     /// The checkbox belongs to the folder that is open. Opening a different
     /// folder resets it and the subfolder setting; opening the same folder again
     /// leaves them alone; and opening a folder that contains an index ticks the
@@ -8907,55 +10194,6 @@ mod tests {
             Stage::Waiting,
             "a total to read is not the same as having read any of it"
         );
-    }
-
-    /// A folder that has been scanned before is brought up to date the moment it
-    /// is opened. One that has not waits for the button.
-    #[test]
-    fn opening_a_folder_scans_it_only_when_its_index_asks_for_that() {
-        let known = folder_with_a_duplicate();
-        let mut app = App::from_settings(crate::settings::Settings::default());
-
-        app.open_folder(known.path().to_path_buf());
-        settle(&mut app);
-        assert!(
-            app.running.is_none() && app.error.is_none(),
-            "a folder nothing is known about was scanned without being asked"
-        );
-
-        app.start_scan();
-        settle(&mut app);
-        assert!(!app.auto_rescan, "the box was ticked without anybody ticking it");
-
-        // Scanned before, and its index does not ask to be brought up to date on
-        // sight, so opening it does nothing.
-        app.open_folder(known.path().to_path_buf());
-        settle(&mut app);
-        assert!(app.running.is_none(), "the folder was scanned although its index did not ask");
-
-        // Ticked, and now opening it is enough.
-        app.auto_rescan = true;
-        app.remember_ways_of_matching();
-        closed(&app);
-        let mut again = App::from_settings(crate::settings::Settings::default());
-        again.open_folder(known.path().to_path_buf());
-        let ctx = window();
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut started = false;
-        while !started && std::time::Instant::now() < until {
-            again.hear_the_index(&ctx);
-            again.pump_indexer(&ctx);
-            started = again.running.is_some() || again.error.is_some();
-        }
-        assert!(started, "the index asked to be brought up to date and nothing happened");
-        assert!(again.auto_rescan, "the box came back unticked");
-        settle(&mut again);
-
-        let fresh = tempfile::tempdir().expect("tempdir");
-        again.open_folder(fresh.path().to_path_buf());
-        settle(&mut again);
-        assert!(again.running.is_none(), "the empty folder was scanned unasked");
-        assert!(!again.auto_rescan, "a folder with no index came up ticked");
     }
 
     /// A different folder is different pictures, so what counted as a duplicate

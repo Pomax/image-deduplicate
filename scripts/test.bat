@@ -4,29 +4,33 @@ rem The repository, which is where cargo has to be run from. This script lives
 rem in a directory of its own under it.
 cd /d "%~dp0.."
 
-rem Anything given on the command line is passed on to cargo, so one test can be
-rem run by name: scripts\test.bat the_name_of_the_test. A named run is what was
-rem asked for and nothing else is added to it.
-if not "%~1"=="" (
-    cargo test --workspace %*
-    exit /b %errorlevel%
-)
+rem Without arguments this is the suite, the way CI runs it: no extra features,
+rem and nothing that reads anybody's real folder of photographs.
+rem
+rem With --all it is that plus the checks in local\, which are compiled by the
+rem `local` feature and run against the folder the application is set to. They
+rem take minutes and they write to a real index, so they are asked for.
+rem
+rem Anything else given on the command line is passed on to cargo, so one test
+rem can be run by name: scripts\test.bat the_name_of_the_test.
+if /i "%~1"=="--all" goto all
 
-rem `local\` holds the checks that only mean something against a real folder of
-rem photographs. It is not in the repository, so a checkout without it runs the
-rem suite exactly as CI does, and a machine that has it runs those as well.
+cargo test --workspace %*
+exit /b %errorlevel%
+
+:all
 if not exist "local\" (
-    cargo test --workspace
-    exit /b %errorlevel%
+    echo there is no local\ here, so there is nothing --all adds
+    exit /b 1
 )
 
-echo local\ is here, so the checks against a real folder are included
-cargo test --workspace --features imgdedupe/local
+rem The suite, without them: local:: is the module they are all in, and
+rem everything else runs the way it always does, in parallel.
+cargo test --workspace --features imgdedupe/local -- --skip local::
 if errorlevel 1 exit /b 1
 
-rem They are all marked to be asked for by name, because they take minutes and
-rem work on a real index. `local::` is the module they are all in.
-rem
-rem One at a time: there is one index and they all take it up, so run together
-rem they read each other's half-written work and three of the seven fail on it.
-cargo test --workspace --features imgdedupe/local local:: -- --ignored --nocapture --test-threads=1
+rem Then those, one at a time. Not because they are optional: the feature is what
+rem asks for them, and asking for it is asking for them to run. It is that there
+rem is one real index and they all open it, so run together they read each
+rem other's half-written work and three of the seven fail on it.
+cargo test --workspace --features imgdedupe/local local:: -- --nocapture --test-threads=1

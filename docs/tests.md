@@ -22,7 +22,7 @@ fills the triangles the toolkit's tessellator produces into a buffer of its own
 and writes a PNG named after the check. The window is drawn by a graphics card and
 a test has none, so this is the only way to look at what a check was measuring.
 The pictures go to `IMGDEDUPE_SHOT_DIR`, or the temporary folder when that says
-nothing, and only the last frame a check drew is filled in — that is the frame it
+nothing, and only the last frame a check drew is filled in, that being the one it
 went on to measure, and filling one is the slow part.
 
 ## crates/imgdedupe-core/src/cleanup.rs
@@ -89,6 +89,72 @@ is not a pair.
 
 An index written before there was such a table reads back as a folder where
 nothing has been ignored, rather than as a failure.
+
+### a_file_that_is_not_a_picture_is_written_down_as_looked_at
+
+The row comes back saying the file has been read, at that size and timestamp, and
+is not a picture. That is the answer that stops the next comparison calling it
+new and the next pass opening it.
+
+### a_file_that_became_a_picture_stops_being_marked_as_not_one
+
+A file that was not a picture and is one now is indexed in the ordinary way, and
+the row stops saying otherwise.
+
+### a_picture_that_stopped_being_one_loses_what_was_held_about_it
+
+The other way about. What the index held about it as a picture goes, so nothing
+downstream is left describing a picture that is not there.
+
+### a_review_beginning_makes_the_tables_it_is_written_in
+
+A review is its two tables, and they are made where a review begins, which is
+sets being built into the review page, not by the first mark made. So a
+review nobody has marked anything in yet is a review with nothing marked, and not
+a folder that has no such thing. Beginning one on a folder that already has a
+review leaves its marks where they are.
+
+### a_cleanup_leaves_the_ignored_pairs_where_they_are
+
+The end of a review takes the review away and nothing else. The pairs somebody
+said are not copies of each other are not one sitting's work, but a decision about
+those pictures, so a cleanup drops the marks and the sets and never touches
+them.
+
+### an_index_nobody_has_reviewed_has_no_marks_and_no_sets
+
+A review is one sitting's work, so neither of its tables is part of what an index
+is. A fresh index holds neither, and reading a review out of it gives nothing back
+rather than failing.
+
+### a_mark_written_is_a_mark_read_back_and_the_rest_are_left_alone
+
+A mark going on is one row written, a mark coming off is one row deleted, and
+neither touches any other mark. Saying it twice says it once, and taking off what
+is not on is nothing. This is what keeps a click on a picture to a single
+statement: on a folder on another machine every statement is a journal written and
+deleted beside the index, and a write that redid the whole review on every click
+cost one of those per mark the review held.
+
+### a_mark_goes_when_its_picture_does
+
+A mark on a file that is gone is not a mark, so deleting the file takes the mark
+with it.
+
+### the_sets_come_back_in_the_order_they_were_stored_in
+
+The review is a list and somebody left off partway down it, so the sets come back
+in the order they were shown in and not in the order their numbers happen to fall.
+
+### a_stored_set_loses_the_pictures_its_files_lost
+
+A set that has lost a picture is not that set. Deleting a file takes its row out
+of the stored sets, and what is left of the set is what comes back.
+
+### a_review_that_is_over_leaves_neither_table
+
+Clearing the marks and the sets leaves an index that reads as one nobody has
+reviewed, and the next review makes both tables again.
 
 ### a_file_id_is_reused_after_the_rows_above_it_are_deleted
 
@@ -173,8 +239,8 @@ next run migrated it again.
 
 ### every_change_reaches_the_file
 
-One of every kind of change — rows written, rows deleted, a setting set, a
-setting forgotten, a pair marked, a compaction — then the index is closed, and
+One of every kind of change: rows written, rows deleted, a setting set, a setting
+forgotten, a pair marked, a compaction. Then the index is closed, and
 all of them are in the file.
 
 ### a_change_is_in_the_file_once_the_writing_is_waited_for
@@ -193,6 +259,31 @@ time; it is now written into.
 Two pictures, marked as not copies of each other, then one of them deleted. The
 pair is gone from the file, not only from the copy in memory. This fails if the
 connection the writer holds does not have `foreign_keys` on.
+
+### a_review_written_by_one_window_is_in_the_file_for_the_next
+
+A review is written down as it is made, so what one window marked and the sets it
+marked them in are in the file, not only in the copy in memory.
+
+### a_review_that_is_over_is_out_of_the_file_too
+
+Clearing the marks and the sets reaches the file as well, so the next window opens
+a folder nobody has reviewed.
+
+### a_review_written_with_no_index_open_is_refused_and_leaves_the_writer_clean
+
+A window writes a review as it happens, and a folder is chosen before its index is
+open. Asking for a mark then is refused, and, this being the point, the writer is
+not handed the change anyway: work it has nowhere to do would be kept and reported
+as trouble the next time somebody closed the index.
+
+### tidying_the_index_keeps_everything_written_before_it
+
+Tidying replaces the index file with the tidied database from memory, so
+everything written before it has to be in that file afterwards: what had reached
+the disk already and what was still on the writer's queue. Marks, ignored pairs
+and pictures are all read back out of the file, and the file goes on taking
+changes afterwards, because the writer is opened again on the new one.
 
 ### compacting_makes_the_file_smaller
 
@@ -593,6 +684,19 @@ appeared, whatever order the search met them in.
 The picture a set offers as its best copy is the one the score picks. Nothing is
 kept or removed on account of it: it is what "auto-mark to keep" marks.
 
+### a_stored_set_is_built_back_into_the_set_it_was
+
+Only file ids and their order are written down. Built back from the pictures as
+they are now, a set has the same members in the same order with the same best
+copy as the one the search handed over, so nothing about a picture is written
+twice and the two cannot drift.
+
+### a_stored_set_that_lost_its_pictures_comes_back_short_or_not_at_all
+
+A set whose pictures are no longer in the index comes back without them, and one
+left holding a single picture does not come back at all, because one picture is
+not a set of copies.
+
 ### recoverable_bytes_counts_everything_but_the_keeper
 
 What a set reports as reclaimable is every picture in it but its best copy. This
@@ -885,6 +989,26 @@ A JPEG saved as `liar.png` is read, because the name claims a format, and indexe
 as a JPEG, because its first bytes say so. The name decides what is worth
 reading; the bytes decide what it is.
 
+### what_a_pass_could_not_index_is_not_read_again_by_the_next_one
+
+A picture, a file that claims a format and is not one, and a broken picture. The
+first pass indexes one and fails on one; the second indexes nothing, fails on
+nothing, and counts all three as unchanged, because a file counted as unchanged is a
+file the pass did not open. Without the row for what it could not index, those
+two are read in full on every pass for ever.
+
+### a_folder_whose_files_were_all_looked_at_is_as_indexed
+
+And the folder then answers that it is as indexed, which is what decides whether
+opening it asks anybody anything. A picture added since is a difference, which is
+the other half of the same answer.
+
+### a_file_that_became_a_picture_is_indexed_by_the_next_pass
+
+The row says where the file was and how big it was. A file that was not a picture
+and has been replaced by one differs in both, so the next pass reads it and
+indexes it.
+
 ### a_malformed_image_is_reported_and_does_not_stop_the_pass
 
 A broken picture is reported by name and the pass carries on.
@@ -892,7 +1016,7 @@ A broken picture is reported by name and the pass carries on.
 ### a_pass_over_the_subfolders_stays_out_of_dot_and_at_folders
 
 A folder whose name begins with a dot or an at sign is something else's
-workings — `.git`, `.thumbnails`, `@eaDir` — and a pass over the subfolders does
+workings, such as `.git`, `.thumbnails` or `@eaDir`, and a pass over the subfolders does
 not go into one, nor into anything under it.
 
 ### the_folder_the_pass_was_pointed_at_is_scanned_whatever_it_is_called
@@ -1171,10 +1295,12 @@ index and reports how many rows went.
 ### what_was_skipped_and_what_broke_are_not_counted_as_found
 
 A real folder holding two pictures, a text file, a file named `.png` that is not
-one, and a broken PNG, scanned twice. The pass looks at four of the five — the
-text file claims no format, so it is never read — counts the one that lied about
+one, and a broken PNG, scanned twice. The pass looks at four of the five, since
+the text file claims no format and is never read. It counts the one that lied about
 its name as ignored and the broken one as a failure, and reports two found. The
-second pass finds nothing new, because what was left alone was not read.
+second pass finds nothing new and reads nothing at all: all four are unchanged,
+including the two it could not index, because the first pass wrote down that it
+had looked at them.
 
 ### a_set_of_portraits_is_not_given_the_width_of_a_landscape
 
@@ -1184,9 +1310,10 @@ no gap.
 ### the_selected_tally_is_every_picture_a_cleanup_would_take
 
 On a real result of two sets: nothing is going before anything is marked, marking
-one in each set puts the others in, taking a set's marks off takes the whole set
-out, and flagging a set to be cleared out puts all of it in. The tally is asked
-of the plan, so it cannot disagree with the button.
+one in each set puts the others in, and taking a set's marks off takes the whole
+set out. Marked the way a person marks one, because the tally follows from the
+marking and not from the field it lands in. The tally is asked of the plan, so it
+cannot disagree with the button.
 
 ### the_duplicate_count_is_every_picture_but_the_one_each_set_keeps
 
@@ -1320,10 +1447,11 @@ The ring says where the cursor keys are and the border says what is kept, so a
 picture can have one, the other, both or neither. Taking the marks off leaves the
 ring where it is.
 
-### the_review_state_is_not_written_to_the_index
+### a_mark_reaches_the_index_and_leaves_the_pictures_alone
 
-Moving keep marks and building a plan on a real result leaves the index file
-unchanged, byte for byte and row for row.
+Marking a picture on a real result puts that mark in the folder's index, where the
+next window will find it, and changes nothing the index knows about the pictures
+themselves.
 
 ### saved_settings_reach_the_window
 
@@ -1454,12 +1582,27 @@ Really clicks twice on the picture in a scanned set that the search did not
 choose. It becomes the one being kept, and two more clicks a moment later let it
 go again, which is what the space bar does on the picture being shown.
 
+### what_a_cleanup_took_is_out_of_the_pictures_held_in_memory
+
+A cleanup removes files the window chose itself, so afterwards the folder is what
+it was less that list, and nothing has to be looked at to know it. The pictures
+held in memory lose the ones that went, and searching again runs on those with no
+pass over the folder and no second conversion of the index.
+
+### keeping_everything_marks_every_picture_that_is_in_a_set_of_copies
+
+The "keep everything" button marks every picture in every set that is a set of
+copies, including ones already marked, so a cleanup would take nothing. A set
+somebody said is not a set of copies is left alone, the way it is everywhere else.
+
 ### the_review_toolbar_holds_marking_left_the_counts_centred_and_cleanup_right
 
-Draws the review over a scanned folder and reads the toolbar off the frame. The
-auto-mark to keep button sits against the left edge, the clean up button against
-the right, and the counts in the middle of the window rather than in the middle
-of what is left of the row.
+Draws the review over a scanned folder and reads the toolbar off the frame. Keep
+everything sits against the left edge with auto-mark to keep beside it, the clean
+up button against the right, and the counts in the middle of the window rather
+than in the middle of what is left of the row. Drawn on a wide window: the two
+buttons, the counts and the cleanup button together are more than a narrow one
+holds, and they overlap there.
 
 ### a_click_on_the_preview_fills_the_window_and_escape_puts_it_back
 
@@ -1531,13 +1674,17 @@ marking its best copy, without anybody pressing the button.
 ### the_index_keeps_which_ways_of_matching_were_ticked
 
 Both ways of matching are on when a folder is opened. Switching the corner match
-off and opening the folder again comes back with it off and the other still on.
+off writes nothing on its own, because a control moved and never used has changed
+nothing, and searching with it off is what the index takes. Opening the folder
+again comes back with it off and the other still on.
 
 ### the_index_keeps_matching_within_folders_and_running_on_opening
 
 A folder scanned with its subfolders, then set to match within folders and to
-rescan on opening. Opening it again from nothing comes back with both, off the
-index.
+rescan on opening. Rescanning on opening is a choice about the folder and is
+written where it is made; matching within folders is a search setting and waits
+for a search to use it, which is checked here rather than assumed. Opening the
+folder again from nothing comes back with both, off the index.
 
 ### a_box_that_depends_on_another_is_off_and_out_of_reach_without_it
 
@@ -1582,10 +1729,11 @@ list is emptied, and with nothing left to offer the box is not drawn at all.
 ### the_setting_for_what_counts_as_a_duplicate_is_not_kept_across_a_restart
 
 Really scans a folder at the top of the scale with the colour setting on, then
-opens a new window from what that one would have written down. The folder and
-the colour setting come back and the sensitivity does not: it starts on the
-default every run, because what counts as a duplicate is decided against the
-pictures on screen.
+opens a new window from what that one would have written down. This is the
+application's own settings file, not a folder's index: the folder and the colour
+setting come back from it and the sensitivity does not, so a window opens on the
+default rather than on whatever the last run was left at. A folder whose index
+holds what it was last searched with is a different matter, and brings it back.
 
 ### a_folder_with_an_index_is_asked_about_on_opening_and_one_without_is_not
 
@@ -1594,6 +1742,108 @@ If there is one, the checkbox is ticked and the index is asked what it says abou
 itself, which is what decides whether a pass starts. If there is not, the
 checkbox is unticked and nothing is asked or started. The settings file has no
 say in either.
+
+### a_review_survives_the_folder_changing_and_being_scanned_again
+
+The path a folder that keeps changing really takes: marked, closed, a picture
+added, opened again. The comparison finds the difference, the pass runs, the
+search hands over sets that are not the ones that were saved, and the mark goes
+back onto the picture it was on, with what a cleanup would take counting it. The
+mark is checked in the index file first, so a failure here says which half broke.
+
+### an_ignored_set_comes_back_ignored_after_a_rescan
+
+The other half of what a review is. A set somebody said is not a set of copies
+comes back that way after a pass and a new search, because the pairs are in the
+index and not in the sitting.
+
+### a_review_is_still_there_when_the_folder_is_opened_again
+
+The point of the whole thing. A folder scanned, searched and marked, the window
+closed, the folder opened again: the review comes back on the same sets with the
+same picture marked, and what a cleanup would take comes back with it. Neither a
+pass nor a search runs, because the answer was already written down.
+
+### a_folder_that_changed_asks_before_its_saved_review_is_opened
+
+A picture added since the review was saved. The sets stored for that folder do not
+describe it any more, so the question goes up saying the folder's content has
+changed, and until it is answered no review opens and no pass starts.
+
+### a_folder_that_rescans_itself_with_nothing_to_rescan_opens_its_review
+
+A folder set to bring itself up to date on opening, with a review saved for it
+and nothing changed. There is nothing to bring up to date, so no pass runs and
+nothing is asked: the review opens, and the folder still asks to be rescanned the
+next time.
+
+### a_folder_that_rescans_itself_is_rescanned_when_something_changed
+
+The same folder with a picture added. That is what the box is for, so it is
+brought up to date without anybody being asked, saved review or not.
+
+### a_changed_folder_with_no_saved_review_is_rescanned_without_asking
+
+A folder that has changed, with no review saved and the box unticked. There is
+nothing to protect and so nothing to ask about, and the pass runs.
+
+### an_unchanged_folder_with_no_saved_review_is_searched_without_a_pass
+
+A folder with an index, nothing changed and no saved review was opened to be
+searched, and its pictures are already in memory, so it is searched. No pass
+runs.
+
+### a_folder_with_no_index_is_left_alone_when_it_is_chosen
+
+Choosing a folder that has no index is not asking for anything to happen to it.
+There is nothing to compare it against, so nothing is compared, nothing is
+scanned and nothing is searched.
+
+### the_window_closes_the_index_on_the_way_out
+
+A caller is answered when the copy in memory has its change, not when the file
+does, so the window has to close the index as it ends: closing is what waits for
+the writer. What is checked is that it closed it, not that a mark happened to
+have landed: on a small folder the writer wins that race anyway, and a test that
+reads the file would pass whether or not the window waited. That closing waits is
+`letting_go_of_a_folder_waits_for_the_file_to_catch_up`.
+
+### what_went_with_a_forgotten_index_is_counted_in_pictures
+
+The index holds a row for every file the pass has been through, pictures or not.
+A folder holding two pictures and one file that is not one reports two going with
+the index, because "N rows went with it" is read as pictures.
+
+### answering_rescan_leaves_no_stored_sets_and_starts_a_pass
+
+Giving the saved review up takes the sets out of the index there and then. The
+pass runs, and the search after it writes down what it found, which is what the
+index holds from then on.
+
+### a_cleanup_leaves_no_review_in_the_index
+
+A cleanup is the review being carried out, so the review is over: neither the sets
+nor the marks are in the index afterwards. What is left of the folder is what the
+marks named, which says nothing, and there are no sets for them to be marks in.
+
+### the_held_plan_follows_every_interaction
+
+What a cleanup would take is held rather than worked out on every frame that
+draws, so every interaction that changes it has to work it out again. After each
+one of a mark on, a mark off, shift, auto-marking, a set ignored, a set taken
+back, a picture removed, work cancelled and a pass started, the held plan is compared with
+one derived then and there. This is the test that catches a site that forgot.
+
+### drawing_the_review_does_not_change_the_plan
+
+Drawing is not an interaction. Three frames of the review leave the plan exactly
+as it was.
+
+### marks_do_not_outlive_the_pictures_a_cleanup_took
+
+A set of three with two marked, one of them removed. The surviving set's marks are
+cut down to the pictures still in it, so no mark names a file that is gone and a
+`Keep::Several` is not left holding a single id, which the type says never happens.
 
 ### the_pictures_read_on_opening_do_not_replace_a_finished_pass
 
@@ -1655,13 +1905,6 @@ half the reading is a sixth of the bar.
 The listing is not the reading. While the folder is still being listed nothing
 has been read, and a total to read is not the same as having read any of it, so
 the bar for reading stays where it is: empty.
-
-### opening_a_folder_scans_it_only_when_its_index_asks_for_that
-
-A folder that has been scanned before is not scanned again on sight: opening it
-reads what its index says, and only an index asking to run on opening starts a
-pass. Ticked, opening the folder is enough; opening a folder with no index ticks
-nothing and starts nothing.
 
 ### a_different_folder_starts_on_the_default_setting
 

@@ -1018,6 +1018,49 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
         .collect()
 }
 
+/// The pictures without the ones a cleanup took.
+///
+/// A cleanup removes files the window chose itself, so what the folder holds
+/// afterwards is known without looking: everything that was there, less that
+/// list. Reading the folder again to find that out is asking a question already
+/// answered, and on a folder on another machine it is a listing and a read of
+/// the whole index for nothing.
+pub fn without(images: Vec<Image>, gone: &[String]) -> Vec<Image> {
+    let gone: std::collections::HashSet<&str> = gone.iter().map(String::as_str).collect();
+    images.into_iter().filter(|image| !gone.contains(image.rel_path.as_str())).collect()
+}
+
+/// Build the sets a previous search wrote down, from the pictures as they are
+/// now.
+///
+/// What was written down is file ids and their order and nothing else, so
+/// everything a set says about a picture is read out of the index that was just
+/// opened. Nothing about a picture is stored twice and the two cannot drift.
+///
+/// A set that has lost pictures, their rows going with the files, comes back
+/// without them, and one left with fewer than two does not come back at all,
+/// because one picture is not a set of copies.
+pub fn sets_from_stored(images: &[Image], stored: &[(i64, Vec<i64>)]) -> Vec<DuplicateSet> {
+    let where_it_is: std::collections::HashMap<i64, u32> =
+        images.iter().enumerate().map(|(at, image)| (image.file_id, at as u32)).collect();
+    stored
+        .iter()
+        .filter_map(|(set_id, file_ids)| {
+            let positions: Vec<u32> =
+                file_ids.iter().filter_map(|file_id| where_it_is.get(file_id).copied()).collect();
+            if positions.len() < 2 {
+                return None;
+            }
+            // The same shaping the search does, so a set read back is the set it
+            // was: the same keeper, the same order.
+            let mut set = build_sets(images, &positions.iter().map(|at| (0, *at)).collect::<Vec<_>>())
+                .pop()?;
+            set.set_id = *set_id;
+            Some(set)
+        })
+        .collect()
+}
+
 /// What each step of a search cost, written to the run log. A search that is slow
 /// on someone's folder is a fact about that folder, and the only way to know
 /// which step it is spending the time in is for the run to say so.
@@ -1412,6 +1455,57 @@ mod tests {
         let kept: Vec<&Member> = sets[0].members.iter().filter(|m| m.auto_keep).collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].rel_path, "big.jpg");
+    }
+
+    /// A set read back out of the index is the set the search handed over: the
+    /// same pictures, the same order, the same best copy. Only file ids were
+    /// written down, and everything else comes from the pictures as they are.
+    #[test]
+    fn a_stored_set_is_built_back_into_the_set_it_was() {
+        let mut conn = open();
+        insert_written_at(&mut conn, "later.jpg", 0x1234, 1600, 1200, 300_000, ring(0.5), 3_000);
+        insert_written_at(&mut conn, "earlier.jpg", 0x1234, 400, 300, 20_000, ring(0.5), 1_000);
+        let found = find_sets(&conn, Thresholds::preset("balanced")).expect("find");
+        let images = load_images(&conn, &AtomicBool::new(false), &|_| {})
+            .expect("load")
+            .expect("images");
+
+        let stored: Vec<(i64, Vec<i64>)> = found
+            .iter()
+            .map(|set| (set.set_id, set.members.iter().map(|m| m.file_id).collect()))
+            .collect();
+        let built = sets_from_stored(&images, &stored);
+
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].set_id, found[0].set_id);
+        let names: Vec<&str> = built[0].members.iter().map(|m| m.rel_path.as_str()).collect();
+        assert_eq!(names, ["earlier.jpg", "later.jpg"], "the order it was shown in was lost");
+        let keeper: Vec<&str> =
+            built[0].members.iter().filter(|m| m.auto_keep).map(|m| m.rel_path.as_str()).collect();
+        assert_eq!(keeper, ["later.jpg"], "the best copy is not the one the search chose");
+    }
+
+    /// A set whose pictures have gone comes back short, and one left holding a
+    /// single picture does not come back at all: one picture is not a set of
+    /// copies.
+    #[test]
+    fn a_stored_set_that_lost_its_pictures_comes_back_short_or_not_at_all() {
+        let mut conn = open();
+        insert(&mut conn, "a.jpg", 0x1234, 400, 300, 20_000, ring(0.5));
+        insert(&mut conn, "b.jpg", 0x1234, 800, 600, 90_000, ring(0.5));
+        insert(&mut conn, "c.jpg", 0x1234, 1600, 1200, 300_000, ring(0.5));
+        let images = load_images(&conn, &AtomicBool::new(false), &|_| {})
+            .expect("load")
+            .expect("images");
+        let ids: Vec<i64> = images.iter().map(|image| image.file_id).collect();
+        let missing = ids.iter().max().expect("ids") + 100;
+
+        let built = sets_from_stored(
+            &images,
+            &[(ids[0], vec![ids[0], ids[1], missing]), (ids[2], vec![ids[2], missing])],
+        );
+        assert_eq!(built.len(), 1, "a set of one picture came back");
+        assert_eq!(built[0].members.len(), 2, "the picture that is gone came back with it");
     }
 
     #[test]

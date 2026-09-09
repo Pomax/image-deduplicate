@@ -36,6 +36,11 @@ pub const INDEX_FILENAME: &str = "imgdedupe.sqlite";
 /// which is what the foreign keys are for: a pair that has lost a side is not a
 /// pair.
 ///
+/// A review is not in here. What it marks to keep and the sets it is a review of
+/// are one sitting's worth of work: they are written when there is one and taken
+/// away when it is over, so their tables are made where they are written and are
+/// no part of what an index is. See `KEEP_TABLE` and `DUPLICATE_SETS_TABLE`.
+///
 /// `phash_bands` was a table of 128 rows per picture that the search now works
 /// out as it loads, so any file still carrying one is relieved of it.
 ///
@@ -54,7 +59,8 @@ CREATE TABLE IF NOT EXISTS files (
     rel_path        TEXT    NOT NULL UNIQUE,
     size_bytes      INTEGER NOT NULL,
     mtime_ms        INTEGER NOT NULL,
-    last_scanned_at INTEGER NOT NULL
+    last_scanned_at INTEGER NOT NULL,
+    not_a_picture   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS images (
@@ -199,6 +205,7 @@ fn add_new_columns(conn: &Connection) -> Result<()> {
     let wanted = [
         ("fingerprints", "corners", "BLOB NOT NULL DEFAULT x''"),
         ("files", "mtime_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("files", "not_a_picture", "INTEGER NOT NULL DEFAULT 0"),
     ];
     let mut added = false;
     for (table, column, declaration) in wanted {
@@ -305,13 +312,18 @@ pub struct Known {
     pub size_bytes: i64,
     pub mtime_ms: i64,
     pub fingerprint_version: i64,
+    /// The pass read this file and it is not a picture: not one of the formats,
+    /// or animated, or it could not be read. There is nothing else in the index
+    /// about it, and looking again would find what it found.
+    pub not_a_picture: bool,
 }
 
-/// Every indexed path, in one query. A row whose fingerprints are missing reads
-/// as version -1 so it is always treated as stale.
+/// Every path the pass has been through, in one query. A row whose fingerprints
+/// are missing reads as version -1 so it is always treated as stale.
 pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
     let mut statement = conn.prepare(
-        "SELECT f.rel_path, f.id, f.size_bytes, f.mtime_ms, COALESCE(p.fingerprint_version, -1)
+        "SELECT f.rel_path, f.id, f.size_bytes, f.mtime_ms, COALESCE(p.fingerprint_version, -1),
+                f.not_a_picture
          FROM files f LEFT JOIN fingerprints p ON p.file_id = f.id",
     )?;
     let rows = statement.query_map([], |row| {
@@ -322,6 +334,7 @@ pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
                 size_bytes: row.get(2)?,
                 mtime_ms: row.get(3)?,
                 fingerprint_version: row.get(4)?,
+                not_a_picture: row.get::<_, i64>(5)? != 0,
             },
         ))
     })?;
@@ -350,13 +363,16 @@ pub struct Record {
 /// Write one image into every table it belongs in. Callers batch these inside a
 /// transaction, which is what makes a killed run leave a consistent index.
 pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<()> {
+    // A file that was not a picture and is one now loses the flag with the same
+    // statement that records what it is.
     tx.execute(
-        "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at, not_a_picture)
+         VALUES (?1, ?2, ?3, ?4, 0)
          ON CONFLICT(rel_path) DO UPDATE SET
              size_bytes = excluded.size_bytes,
              mtime_ms = excluded.mtime_ms,
-             last_scanned_at = excluded.last_scanned_at",
+             last_scanned_at = excluded.last_scanned_at,
+             not_a_picture = 0",
         params![record.rel_path, record.size_bytes, record.mtime_ms, scanned_at],
     )?;
     let file_id: i64 = tx.query_row(
@@ -400,6 +416,59 @@ pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<
     )?;
 
     Ok(())
+}
+
+/// A review is starting: make the two tables it is written in.
+///
+/// Where the window goes to the review page and somebody can start marking
+/// pictures, not where the first mark happens to be made. From that moment the
+/// folder has a review, and a review with nothing marked in it is a review with
+/// nothing marked, not a folder that has no such thing.
+///
+/// The pairs somebody said are not copies of each other are not made here. They
+/// are not one sitting's work, but a decision about the pictures, so they
+/// are part of the index itself and a cleanup never touches them.
+pub fn begin_review(conn: &Connection) -> Result<()> {
+    conn.execute(DUPLICATE_SETS_TABLE, [])?;
+    conn.execute(KEEP_TABLE, [])?;
+    Ok(())
+}
+
+/// Write down that the pass read this file and it is not a picture.
+///
+/// The row says the path, the size and the timestamp and nothing else: whether it
+/// was not one of the formats, or animated, or could not be read, the answer to
+/// the next comparison is the same, and looking again would find what it found.
+///
+/// Whatever the index held about it as a picture goes, because it is not one. The
+/// cascade takes those rows with the ones written here.
+pub fn not_a_picture(tx: &Transaction<'_>, looked_at: &Looked, scanned_at: i64) -> Result<()> {
+    tx.execute(
+        "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at, not_a_picture)
+         VALUES (?1, ?2, ?3, ?4, 1)
+         ON CONFLICT(rel_path) DO UPDATE SET
+             size_bytes = excluded.size_bytes,
+             mtime_ms = excluded.mtime_ms,
+             last_scanned_at = excluded.last_scanned_at,
+             not_a_picture = 1",
+        params![looked_at.rel_path, looked_at.size_bytes, looked_at.mtime_ms, scanned_at],
+    )?;
+    let file_id: i64 = tx.query_row(
+        "SELECT id FROM files WHERE rel_path = ?1",
+        params![looked_at.rel_path],
+        |row| row.get(0),
+    )?;
+    tx.execute("DELETE FROM images WHERE file_id = ?1", params![file_id])?;
+    tx.execute("DELETE FROM fingerprints WHERE file_id = ?1", params![file_id])?;
+    Ok(())
+}
+
+/// A file the pass read and did not index, as the index records it.
+#[derive(Debug, Clone)]
+pub struct Looked {
+    pub rel_path: String,
+    pub size_bytes: i64,
+    pub mtime_ms: i64,
 }
 
 /// Remove paths that are no longer on disk. The cascade clears the derived tables.
@@ -460,6 +529,134 @@ pub fn ignored(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+/// The pictures a review marks to keep, made where they are first written.
+///
+/// The rows go when the files do, for the reason the ignored pairs' do: a mark
+/// on a file that is gone is not a mark.
+const KEEP_TABLE: &str = "CREATE TABLE IF NOT EXISTS keep (
+    file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE
+)";
+
+/// Mark these pictures to keep. What a person just did, and no more than that.
+///
+/// One statement per picture and nothing else touched. Marking one picture is one
+/// row written: on a folder on another machine, every statement is a journal
+/// written and deleted beside the index, so a write that redid the whole review
+/// on every click cost as many of those as the review had marks.
+pub fn keep_these(conn: &Connection, file_ids: &[i64]) -> Result<()> {
+    if file_ids.is_empty() {
+        return Ok(());
+    }
+    let mut statement =
+        conn.prepare_cached("INSERT OR IGNORE INTO keep (file_id) VALUES (?1)")?;
+    for file_id in file_ids {
+        statement.execute(params![file_id])?;
+    }
+    Ok(())
+}
+
+/// Take the mark off these pictures. The other half of the same thing.
+pub fn unkeep_these(conn: &Connection, file_ids: &[i64]) -> Result<()> {
+    if file_ids.is_empty() {
+        return Ok(());
+    }
+    let mut statement = conn.prepare_cached("DELETE FROM keep WHERE file_id = ?1")?;
+    for file_id in file_ids {
+        statement.execute(params![file_id])?;
+    }
+    Ok(())
+}
+
+/// Take the marks away. A review that has been carried out is over, and the
+/// files it was about are not there any more.
+pub fn clear_keep(conn: &Connection) -> Result<()> {
+    conn.execute("DROP TABLE IF EXISTS keep", [])?;
+    Ok(())
+}
+
+/// Every picture marked to keep.
+///
+/// No table to read is not a failure: it is a folder nobody has reviewed yet.
+pub fn kept(conn: &Connection) -> Result<Vec<i64>> {
+    let table = conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'keep'");
+    let known = match table {
+        Ok(mut statement) => statement.exists([])?,
+        Err(_) => false,
+    };
+    if !known {
+        return Ok(Vec::new());
+    }
+    let mut statement = conn.prepare("SELECT file_id FROM keep")?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+/// The sets a search found, made where they are first written.
+///
+/// A row per picture per set. `at` is the set's place in the list the review
+/// shows: read back in another order it is another list, and not where the
+/// person left off. The pictures inside a set need no such column, because they
+/// are ordered by timestamp and sorting them again gives the same order. The
+/// rows go when the files do, because a set that has lost a picture is not that
+/// set.
+const DUPLICATE_SETS_TABLE: &str = "CREATE TABLE IF NOT EXISTS duplicate_sets (
+    set_id  INTEGER NOT NULL,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    at      INTEGER NOT NULL,
+    PRIMARY KEY (set_id, file_id)
+)";
+
+/// Write down the sets a search found, in the order the review shows them.
+///
+/// All of them, every time, for the reason the marks are written that way: this
+/// is what the search said, and there is no such thing as half of it.
+pub fn store_sets(conn: &Connection, sets: &[(i64, Vec<i64>)]) -> Result<()> {
+    conn.execute("DELETE FROM duplicate_sets", [])?;
+    let mut statement = conn.prepare_cached(
+        "INSERT OR IGNORE INTO duplicate_sets (set_id, file_id, at) VALUES (?1, ?2, ?3)",
+    )?;
+    for (at, (set_id, file_ids)) in sets.iter().enumerate() {
+        for file_id in file_ids {
+            statement.execute(params![set_id, file_id, at as i64])?;
+        }
+    }
+    Ok(())
+}
+
+/// The sets a search found, in the order they were shown in.
+///
+/// An index written before there was such a thing has no table to read, which is
+/// not a failure: it is a folder that has never been searched.
+pub fn stored_sets(conn: &Connection) -> Result<Vec<(i64, Vec<i64>)>> {
+    let table = conn
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_sets'");
+    let known = match table {
+        Ok(mut statement) => statement.exists([])?,
+        Err(_) => false,
+    };
+    if !known {
+        return Ok(Vec::new());
+    }
+    let mut statement =
+        conn.prepare("SELECT set_id, file_id FROM duplicate_sets ORDER BY at, set_id, file_id")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    let mut sets: Vec<(i64, Vec<i64>)> = Vec::new();
+    for (set_id, file_id) in rows.filter_map(Result::ok) {
+        match sets.last_mut() {
+            Some((last, members)) if *last == set_id => members.push(file_id),
+            _ => sets.push((set_id, vec![file_id])),
+        }
+    }
+    Ok(sets)
+}
+
+/// Take the stored sets away. No table is a folder that has never been searched,
+/// and the next search that finds any makes it again.
+pub fn clear_sets(conn: &Connection) -> Result<()> {
+    conn.execute("DROP TABLE IF EXISTS duplicate_sets", [])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod ignoring {
     use super::*;
@@ -511,6 +708,286 @@ mod ignoring {
         let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch("DROP TABLE ignore").expect("drop");
         assert!(ignored(&conn).expect("read").is_empty());
+    }
+}
+
+/// What the pass looked at and did not index. The row says the file has been
+/// read and there is nothing in the index about it as a picture, which is what
+/// stops the next pass reading it and the next comparison calling it new.
+#[cfg(test)]
+mod looked_at {
+    use super::*;
+
+    fn looked(path: &str, size: i64, mtime: i64) -> Looked {
+        Looked { rel_path: path.to_string(), size_bytes: size, mtime_ms: mtime }
+    }
+
+    /// A picture as the index holds one, so a file can be indexed and then not,
+    /// and the other way about.
+    fn a_record(path: &str, seed: u64, size: i64) -> Record {
+        let mut hash = [0u8; fingerprint::HASH_BYTES];
+        hash[..8].copy_from_slice(&seed.to_le_bytes());
+        Record {
+            rel_path: path.to_string(),
+            size_bytes: size,
+            mtime_ms: 900,
+            width: 800,
+            height: 600,
+            format: Format::Jpeg,
+            channels: 3,
+            fingerprint: crate::fingerprint::Fingerprint {
+                dct_hashes: [hash, hash, hash, hash, hash, hash, hash, hash],
+                ring_stats: vec![1, 2, 3, 4],
+            },
+            corners: Vec::new(),
+        }
+    }
+
+    /// The row comes back saying what it is: known, at that size and timestamp,
+    /// and not a picture.
+    #[test]
+    fn a_file_that_is_not_a_picture_is_written_down_as_looked_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        let tx = conn.transaction().expect("transaction");
+        not_a_picture(&tx, &looked("notes.png", 13, 700), 1).expect("write");
+        tx.commit().expect("commit");
+
+        let known = load_known(&conn).expect("read");
+        let entry = known.get("notes.png").expect("the row");
+        assert!(entry.not_a_picture, "the row does not say it was looked at");
+        assert_eq!((entry.size_bytes, entry.mtime_ms), (13, 700));
+    }
+
+    /// A file that was not a picture and is one now is indexed in the ordinary
+    /// way, and the row stops saying otherwise.
+    #[test]
+    fn a_file_that_became_a_picture_stops_being_marked_as_not_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        let tx = conn.transaction().expect("transaction");
+        not_a_picture(&tx, &looked("a.png", 13, 700), 1).expect("write");
+        tx.commit().expect("commit");
+
+        let record = a_record("a.png", 0x1234, 900);
+        let tx = conn.transaction().expect("transaction");
+        upsert(&tx, &record, 2).expect("upsert");
+        tx.commit().expect("commit");
+
+        let known = load_known(&conn).expect("read");
+        let entry = known.get("a.png").expect("the row");
+        assert!(!entry.not_a_picture, "the row still says it is not a picture");
+        assert_eq!(entry.fingerprint_version, fingerprint::FINGERPRINT_VERSION);
+    }
+
+    /// And the other way: a picture replaced by something that is not one loses
+    /// what the index held about it as a picture.
+    #[test]
+    fn a_picture_that_stopped_being_one_loses_what_was_held_about_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        let record = a_record("a.png", 0x1234, 900);
+        let tx = conn.transaction().expect("transaction");
+        upsert(&tx, &record, 1).expect("upsert");
+        tx.commit().expect("commit");
+
+        let tx = conn.transaction().expect("transaction");
+        not_a_picture(&tx, &looked("a.png", 13, 700), 2).expect("write");
+        tx.commit().expect("commit");
+
+        let known = load_known(&conn).expect("read");
+        let entry = known.get("a.png").expect("the row");
+        assert!(entry.not_a_picture);
+        assert_eq!(entry.fingerprint_version, -1, "the fingerprints outlived the picture");
+        let pictures: i64 = conn
+            .query_row("SELECT count(*) FROM images", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(pictures, 0, "the index still says it is a picture");
+    }
+}
+
+/// A review is written down as it happens, and taken away when it is over. Its
+/// two tables are made where they are written, so a folder nobody has reviewed
+/// has neither and reads as one nobody has reviewed.
+#[cfg(test)]
+mod reviewing {
+    use super::*;
+
+    fn three_files(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_ms, last_scanned_at)
+             VALUES (1, 'a.jpg', 1, 1, 1), (2, 'b.jpg', 1, 1, 1), (3, 'c.jpg', 1, 1, 1)",
+        )
+        .expect("files");
+    }
+
+    fn table(conn: &Connection, name: &str) -> bool {
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")
+            .expect("ask")
+            .exists([name])
+            .expect("ask")
+    }
+
+    /// A fresh index holds neither table. Reading a review out of one is not a
+    /// failure: it is a folder nobody has reviewed.
+    #[test]
+    fn an_index_nobody_has_reviewed_has_no_marks_and_no_sets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        assert!(!table(&conn, "keep"), "a fresh index was given a marks table");
+        assert!(!table(&conn, "duplicate_sets"), "a fresh index was given a sets table");
+        assert!(kept(&conn).expect("read").is_empty());
+        assert!(stored_sets(&conn).expect("read").is_empty());
+    }
+
+    /// A review is both tables, and they are made where a review begins: sets
+    /// being built into the review page, which is the one way anybody reaches it.
+    /// Not by the first mark, so a review nobody has marked anything in yet is a
+    /// review with nothing marked and not a folder that has no such thing.
+    #[test]
+    fn a_review_beginning_makes_the_tables_it_is_written_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+
+        begin_review(&conn).expect("begin");
+        assert!(table(&conn, "keep"), "a review began with nowhere to mark a picture");
+        assert!(table(&conn, "duplicate_sets"), "a review began with nowhere to put its sets");
+        assert!(kept(&conn).expect("read").is_empty(), "something was marked by nobody");
+        assert!(stored_sets(&conn).expect("read").is_empty(), "sets appeared out of nothing");
+
+        // And beginning one on a folder that already has one leaves what is there.
+        keep_these(&conn, &[1]).expect("write");
+        begin_review(&conn).expect("begin again");
+        assert_eq!(kept(&conn).expect("read"), vec![1], "reopening a review lost its marks");
+    }
+
+    /// A mark going on is one row written and a mark coming off is one row
+    /// deleted. Nothing else in the review is touched, which is what keeps a
+    /// click on a picture to a single statement.
+    #[test]
+    fn a_mark_written_is_a_mark_read_back_and_the_rest_are_left_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+        begin_review(&conn).expect("begin");
+
+        keep_these(&conn, &[1, 3]).expect("write");
+        let mut held = kept(&conn).expect("read");
+        held.sort();
+        assert_eq!(held, vec![1, 3]);
+
+        keep_these(&conn, &[2]).expect("write");
+        let mut held = kept(&conn).expect("read");
+        held.sort();
+        assert_eq!(held, vec![1, 2, 3], "marking one picture disturbed the others");
+
+        unkeep_these(&conn, &[1]).expect("write");
+        let mut held = kept(&conn).expect("read");
+        held.sort();
+        assert_eq!(held, vec![2, 3], "unmarking one picture disturbed the others");
+
+        // Saying it twice says it once, and taking off what is not on is nothing.
+        keep_these(&conn, &[2]).expect("write");
+        unkeep_these(&conn, &[1]).expect("write");
+        let mut held = kept(&conn).expect("read");
+        held.sort();
+        assert_eq!(held, vec![2, 3]);
+    }
+
+    /// A mark on a file that is gone is not a mark, so the rows go when the
+    /// files do.
+    #[test]
+    fn a_mark_goes_when_its_picture_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+        begin_review(&conn).expect("begin");
+        keep_these(&conn, &[1, 2]).expect("write");
+
+        conn.execute("DELETE FROM files WHERE id = 1", []).expect("delete");
+        assert_eq!(kept(&conn).expect("read"), vec![2]);
+    }
+
+    /// The review is a list and somebody left off partway down it, so the sets
+    /// come back in the order they were shown in.
+    #[test]
+    fn the_sets_come_back_in_the_order_they_were_stored_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+        begin_review(&conn).expect("begin");
+
+        store_sets(&conn, &[(3, vec![3, 1]), (2, vec![2, 1])]).expect("write");
+        assert_eq!(stored_sets(&conn).expect("read"), vec![(3, vec![1, 3]), (2, vec![1, 2])]);
+    }
+
+    /// A set that has lost a picture is not that set, so its rows go with the
+    /// file. What is left of it is what comes back.
+    #[test]
+    fn a_stored_set_loses_the_pictures_its_files_lost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+        begin_review(&conn).expect("begin");
+        store_sets(&conn, &[(1, vec![1, 2, 3])]).expect("write");
+
+        conn.execute("DELETE FROM files WHERE id = 2", []).expect("delete");
+        assert_eq!(stored_sets(&conn).expect("read"), vec![(1, vec![1, 3])]);
+    }
+
+    /// The end of a review takes the review away and leaves everything that is
+    /// not the review alone.
+    ///
+    /// The pairs somebody said are not copies of each other are not part of one
+    /// sitting: they are a decision about those pictures that holds for as long
+    /// as the pictures do. A cleanup drops the marks and the sets and never
+    /// touches them.
+    #[test]
+    fn a_cleanup_leaves_the_ignored_pairs_where_they_are() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+        ignore(&conn, &[(1, 2)]).expect("ignore");
+        begin_review(&conn).expect("begin");
+        keep_these(&conn, &[1]).expect("write");
+        store_sets(&conn, &[(1, vec![1, 2])]).expect("write");
+
+        clear_keep(&conn).expect("clear the marks");
+        clear_sets(&conn).expect("clear the sets");
+
+        assert!(!table(&conn, "keep"), "the marks table outlived the review");
+        assert!(!table(&conn, "duplicate_sets"), "the sets table outlived the review");
+        assert!(table(&conn, "ignore"), "the ignored pairs went with the review");
+        assert_eq!(
+            ignored(&conn).expect("read"),
+            vec![(1, 2)],
+            "a pair somebody said is not a pair of copies was forgotten by a cleanup"
+        );
+    }
+
+    /// The end of a review takes both tables away, and the next review makes
+    /// them again.
+    #[test]
+    fn a_review_that_is_over_leaves_neither_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open_and_migrate(&dir.path().join("index.sqlite")).expect("open");
+        three_files(&conn);
+        begin_review(&conn).expect("begin");
+        keep_these(&conn, &[1]).expect("write");
+        store_sets(&conn, &[(1, vec![1, 2])]).expect("write");
+
+        clear_keep(&conn).expect("clear");
+        clear_sets(&conn).expect("clear");
+        assert!(kept(&conn).expect("read").is_empty());
+        assert!(stored_sets(&conn).expect("read").is_empty());
+
+        // And the next review makes them again.
+        begin_review(&conn).expect("begin");
+        keep_these(&conn, &[2]).expect("write");
+        store_sets(&conn, &[(2, vec![2, 3])]).expect("write");
+        assert_eq!(kept(&conn).expect("read"), vec![2]);
+        assert_eq!(stored_sets(&conn).expect("read"), vec![(2, vec![2, 3])]);
     }
 }
 
