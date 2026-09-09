@@ -16,7 +16,7 @@
 //! manager holds nothing, and no file is touched.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -506,15 +506,56 @@ fn close_index(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> R
 }
 
 fn compact(current_open_index: &mut Option<OpenIndex>, writer: &Writer) -> Result<()> {
-    with_mut(current_open_index, |it| {
-        it.conn.execute_batch("VACUUM").context("giving back the space of deleted rows")
-    })?;
-    // A VACUUM in memory does not change the size of the file, and a smaller
-    // file is what the caller asked for.
-    writer.apply(Box::new(|file| {
-        file.execute_batch("VACUUM").context("giving back the space of deleted rows")
-    }));
-    writer.drain()
+    // Tidied on this machine's own disk, never on the folder's.
+    //
+    // Tidying writes a database out a page at a time. The folder can be on
+    // another machine, and done there that is the whole index across the network
+    // in small writes with a journal beside it: a minute on a hundred-megabyte
+    // index. On a local disk those pages cost nothing, and what crosses the
+    // network afterwards is one finished file, written once.
+    //
+    // This is the one thing that replaces the index file rather than writing
+    // changes into it, because it is the one thing that changes every byte of it.
+    //
+    // Written out by SQLite rather than built in memory first: the index is
+    // already held whole, a large folder's being hundreds of megabytes, and
+    // taking the tidied database as bytes as well would be a second copy of it
+    // beside the first.
+    let path = {
+        let it = current_open_index.as_ref().context("no folder is open")?;
+        it.path.clone()
+    };
+    // One name per tidying, not one per program: two folders can be tidied at
+    // once, and they would otherwise write over each other's file.
+    static TIDYINGS: AtomicU64 = AtomicU64::new(0);
+    let local = std::env::temp_dir().join(format!(
+        "imgdedupe-tidying-{}-{}.sqlite",
+        std::process::id(),
+        TIDYINGS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&local);
+    {
+        let it = current_open_index.as_ref().context("no folder is open")?;
+        it.conn
+            .execute("VACUUM INTO ?1", [local.to_string_lossy().as_ref()])
+            .with_context(|| format!("tidying the index at {}", local.display()))?;
+    }
+
+    // The writer's connection is closed while the file underneath it is replaced,
+    // and opened again on the new one. Closing it is also what waits: the writer
+    // takes its errands in order, so everything written before this has reached
+    // the file by the time the close comes back, and any trouble with it is
+    // reported here.
+    writer.close()?;
+    // Back over the index, in one copy. If that fails the folder still has the
+    // index it had: the tidied file is the copy, and nothing has been taken away
+    // from the folder until this succeeds.
+    let put_back = std::fs::copy(&local, &path).with_context(|| {
+        format!("putting the tidied index back at {}", path.display())
+    });
+    let _ = std::fs::remove_file(&local);
+    put_back?;
+    writer.open(&path)
 }
 
 /// Remove the index from the folder and close it.
@@ -977,6 +1018,44 @@ mod tests {
         assert!(index.clear_keep().is_err());
         assert!(index.clear_sets().is_err());
         index.synced().expect("the writer was handed work it had nowhere to do");
+    }
+
+    /// Tidying replaces the index file with the tidied database from memory, so
+    /// everything written before it has to be in that file afterwards — both what
+    /// had already reached the disk and what was still on its way there.
+    #[test]
+    fn tidying_the_index_keeps_everything_written_before_it() {
+        let (_dir, path) = temp();
+        let index = Index::start();
+        index.open(&path).expect("open");
+        index.upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1).expect("upsert");
+        index.synced().expect("wait for the disk");
+        let known = index.known().expect("known");
+        let (a, b) = (known["a.jpg"].id, known["b.jpg"].id);
+        index.begin_review().expect("begin the review");
+        // Written and not waited for: this is still on the writer's queue when
+        // the tidying starts.
+        index.keep_these(&[a]).expect("mark");
+        index.ignore(&[db::pair(a, b)]).expect("ignore");
+
+        index.compact().expect("tidy the index");
+
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        assert_eq!(db::kept(&conn).expect("marks"), vec![a], "a mark was lost by the tidying");
+        assert_eq!(
+            db::ignored(&conn).expect("pairs"),
+            vec![db::pair(a, b)],
+            "an ignored pair was lost by the tidying"
+        );
+        assert_eq!(db::load_known(&conn).expect("known").len(), 2, "the pictures were lost");
+
+        // And the index is still being written to afterwards.
+        index.keep_these(&[b]).expect("mark again");
+        index.synced().expect("wait for the disk");
+        let conn = rusqlite::Connection::open(&path).expect("read the file");
+        let mut held = db::kept(&conn).expect("marks");
+        held.sort();
+        assert_eq!(held, vec![a, b], "the file stopped taking changes after the tidying");
     }
 
     /// Giving back the space of deleted rows is asked for to make the file

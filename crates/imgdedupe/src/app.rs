@@ -734,6 +734,9 @@ fn count_line(
 /// them: the button.
 const TOOLBAR_HEIGHT: f32 = 28.0;
 
+/// Between the two buttons at the left of the review toolbar.
+const TOOLBAR_BUTTON_GAP: f32 = 14.0;
+
 /// Room around a preset's name. Four of these sit under the slider and are read
 /// at a glance, so they are no bigger than the words in them.
 const PRESET_PADDING: egui::Vec2 = egui::vec2(6.0, 2.0);
@@ -2931,6 +2934,10 @@ impl App {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
+            if left.button("keep everything").clicked() {
+                self.keep_everything();
+            }
+            left.add_space(TOOLBAR_BUTTON_GAP);
             if left.button("auto-mark to keep").clicked() {
                 self.auto_mark_to_keep();
             }
@@ -3525,6 +3532,29 @@ impl App {
         self.selected = Some(self.sets[visible[set]].members[member].file_id);
         self.scroll_to = Some(set);
         self.show_selected = true;
+    }
+
+    /// Mark every picture in every set that is a set of copies, so a cleanup
+    /// takes nothing from any of them.
+    ///
+    /// A set nobody calls a set of copies is left alone, the way it is everywhere
+    /// else: nothing goes from it and nothing is marked in it.
+    fn keep_everything(&mut self) {
+        let mut went_on = Vec::new();
+        let sets: Vec<(i64, Vec<i64>)> = self
+            .sets
+            .iter()
+            .filter(|set| !self.is_ignored(set))
+            .map(|set| (set.set_id, set.members.iter().map(|member| member.file_id).collect()))
+            .collect();
+        for (set_id, all) in sets {
+            let already = self.keep.get(&set_id).map(Keep::marked).unwrap_or_default();
+            went_on.extend(all.iter().copied().filter(|id| !already.contains(id)));
+            if let Some(keep) = as_keep(all) {
+                self.keep.insert(set_id, keep);
+            }
+        }
+        self.marked(&went_on);
     }
 
     /// Mark the best copy in every set that has not been dealt with, leaving
@@ -7114,6 +7144,29 @@ mod tests {
         assert_eq!(app.keep.get(&set_id), None, "twice more did not let it go again");
     }
 
+    /// "keep everything" marks every picture in every set that is a set of
+    /// copies, so a cleanup takes nothing. A set nobody calls a set of copies is
+    /// left alone, the way it is everywhere else.
+    #[test]
+    fn keeping_everything_marks_every_picture_that_is_in_a_set_of_copies() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.sets.len(), 2, "the two sets were not found");
+        let ignored = app.sets[1].set_id;
+        app.ignore_set(ignored);
+        // One picture already marked, to show that marking the rest disturbs it.
+        app.selected = Some(app.sets[0].members[0].file_id);
+        app.keep_selected();
+
+        app.keep_everything();
+
+        let marked = app.keep.get(&app.sets[0].set_id).expect("the set marks nothing").marked();
+        let all: Vec<i64> = app.sets[0].members.iter().map(|member| member.file_id).collect();
+        assert_eq!(marked, all, "not every picture in the set was marked");
+        assert!(app.keep.get(&ignored).is_none(), "a set that is not a set of copies was marked");
+        assert_eq!(app.plan.files(), 0, "a cleanup would still take something");
+    }
+
     /// The toolbar over the review holds three things in one row, and each is in
     /// its own place: the marking button against the left edge, the counts in
     /// the middle of the window, and the cleanup button against the right edge.
@@ -7125,7 +7178,10 @@ mod tests {
         app.auto_mark_to_keep();
 
         let ctx = window();
-        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 500.0));
+        // Wide enough for the row: two buttons at the left, the counts in the
+        // middle and the cleanup button at the right come to more than a narrow
+        // window has.
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0));
         let shapes = crate::shot::frame(
             "the_review_toolbar_holds_the_box_left_the_counts_centred_and_the_button_right",
             &ctx,
@@ -7146,16 +7202,26 @@ mod tests {
                 .map(|(_, rect)| *rect)
                 .unwrap_or_else(|| panic!("{wanted} was not drawn in the toolbar: {painted:?}"))
         };
+        let everything = one("keep everything");
         let marking = one("auto-mark to keep");
         let button = one("Clean up");
         let counts = painted
             .iter()
-            .filter(|(text, _)| text != "auto-mark to keep" && text != "Clean up")
+            .filter(|(text, _)| {
+                text != "keep everything" && text != "auto-mark to keep" && text != "Clean up"
+            })
             .map(|(_, rect)| *rect)
             .reduce(|all, rect| all.union(rect))
             .expect("no counts were drawn");
 
-        assert!(marking.left() < 60.0, "the button is not against the left edge: {marking:?}");
+        assert!(
+            everything.left() < 60.0,
+            "the first button is not against the left edge: {everything:?}"
+        );
+        assert!(
+            marking.left() > everything.right(),
+            "auto-marking is not to the right of keeping everything"
+        );
         assert!(
             button.right() > screen.right() - 60.0,
             "the button is not against the right edge: {button:?}"

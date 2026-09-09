@@ -277,6 +277,14 @@ open. Asking for a mark then is refused, and — this is the point — the write
 not handed the change anyway: work it has nowhere to do would be kept and reported
 as trouble the next time somebody closed the index.
 
+### tidying_the_index_keeps_everything_written_before_it
+
+Tidying replaces the index file with the tidied database from memory, so
+everything written before it has to be in that file afterwards — what had reached
+the disk already and what was still on the writer's queue. Marks, ignored pairs
+and pictures are all read back out of the file, and the file goes on taking
+changes afterwards, because the writer is opened again on the new one.
+
 ### compacting_makes_the_file_smaller
 
 Four hundred rows written, then deleted, then a compaction: the file is smaller
@@ -1567,12 +1575,20 @@ Really clicks twice on the picture in a scanned set that the search did not
 choose. It becomes the one being kept, and two more clicks a moment later let it
 go again, which is what the space bar does on the picture being shown.
 
+### keeping_everything_marks_every_picture_that_is_in_a_set_of_copies
+
+The "keep everything" button marks every picture in every set that is a set of
+copies, including ones already marked, so a cleanup would take nothing. A set
+somebody said is not a set of copies is left alone, the way it is everywhere else.
+
 ### the_review_toolbar_holds_marking_left_the_counts_centred_and_cleanup_right
 
-Draws the review over a scanned folder and reads the toolbar off the frame. The
-auto-mark to keep button sits against the left edge, the clean up button against
-the right, and the counts in the middle of the window rather than in the middle
-of what is left of the row.
+Draws the review over a scanned folder and reads the toolbar off the frame. Keep
+everything sits against the left edge with auto-mark to keep beside it, the clean
+up button against the right, and the counts in the middle of the window rather
+than in the middle of what is left of the row. Drawn on a wide window: the two
+buttons, the counts and the cleanup button together are more than a narrow one
+holds, and they overlap there.
 
 ### a_click_on_the_preview_fills_the_window_and_escape_puts_it_back
 
