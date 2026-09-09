@@ -122,7 +122,7 @@ enum Opened {
 ///
 /// One reason, and it is the only one there can be: a file was added, removed or
 /// written since the review was saved, so the sets in it are not certainly the
-/// sets of what is there now. Nothing having changed is not a question — the
+/// sets of what is there now. Nothing having changed is not a question: the
 /// review stands and is opened. A folder set to rescan itself is not a question
 /// either: with something to bring up to date it is brought up to date, which is
 /// what the box says, and with nothing to bring up to date the pass has no work.
@@ -734,8 +734,12 @@ fn count_line(
 /// them: the button.
 const TOOLBAR_HEIGHT: f32 = 28.0;
 
-/// Between the two buttons at the left of the review toolbar.
+/// Between the buttons at the left of the review toolbar.
 const TOOLBAR_BUTTON_GAP: f32 = 14.0;
+
+/// The cleanup button at the right of it, which is a fixed width so the counts
+/// know how much of the row is left for them.
+const CLEANUP_BUTTON_WIDTH: f32 = 120.0;
 
 /// Room around a preset's name. Four of these sit under the slider and are read
 /// at a glance, so they are no bigger than the words in them.
@@ -1273,7 +1277,7 @@ pub struct App {
     ///
     /// Held rather than worked out where it is drawn. It follows from the marks,
     /// the sets and the ignored pairs, and every place any of those changes works
-    /// it out again — derived whole each time, so it cannot come to disagree with
+    /// it out again, derived whole each time, so it cannot come to disagree with
     /// them, and derived on the change rather than on the frame, so a review
     /// nobody is touching costs nothing.
     plan: cleanup::Plan,
@@ -2934,7 +2938,11 @@ impl App {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            if left.button("keep everything").clicked() {
+            if left.button("unmark all").clicked() {
+                self.unmark_everything();
+            }
+            left.add_space(TOOLBAR_BUTTON_GAP);
+            if left.button("mark all").clicked() {
                 self.keep_everything();
             }
             left.add_space(TOOLBAR_BUTTON_GAP);
@@ -2942,9 +2950,17 @@ impl App {
                 self.auto_mark_to_keep();
             }
 
+            // In the middle of what is left between the buttons, not the middle
+            // of the window: the buttons take the ends of the row, and centring
+            // on the window puts the counts over them as soon as there are
+            // enough of them.
+            let between = egui::Rect::from_min_max(
+                egui::pos2(left.min_rect().right() + TOOLBAR_BUTTON_GAP, rect.top()),
+                egui::pos2(rect.right() - CLEANUP_BUTTON_WIDTH - TOOLBAR_BUTTON_GAP, rect.bottom()),
+            );
             let mut middle = ui.new_child(
                 egui::UiBuilder::new()
-                    .max_rect(rect)
+                    .max_rect(between)
                     .layout(egui::Layout::top_down(egui::Align::Center)),
             );
             // One line rather than four labels beside each other: a row of
@@ -2962,7 +2978,7 @@ impl App {
                 egui::RichText::new("Clean up").strong().color(egui::Color32::WHITE),
             )
             .fill(egui::Color32::from_rgb(60, 110, 180))
-            .min_size(egui::vec2(120.0, 28.0));
+            .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, 28.0));
             if right.add_enabled(going > 0, go).clicked() {
                 self.view = View::Cleanup;
             }
@@ -3081,7 +3097,7 @@ impl App {
         // What the set kept stays with it, and so does where the preview was.
         // Neither is acted on while it is ignored: nothing goes from a set that
         // is not a set of copies, and no ring is drawn round a picture in one.
-        // Both are what taking it back gives back — the mark is where it was —
+        // Both are what taking it back gives back, the mark where it was,
         // and the preview is where the cursor keys walk from: left and up out of
         // a set that has just been ignored go to the set before it, right and
         // down to the set after it, which they cannot do from nowhere.
@@ -3484,7 +3500,7 @@ impl App {
     /// index, so redoing every mark on every click cost as many of those as the
     /// review had marks, and they piled up behind the person all session.
     ///
-    /// Not called where the marks are cleared wholesale — another folder, a pass,
+    /// Not called where the marks are cleared wholesale: another folder, a pass,
     /// a search coming back, the end of a cleanup. None of those is somebody
     /// unmarking a picture, and what is written down outlives all of them.
     #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
@@ -3532,6 +3548,29 @@ impl App {
         self.selected = Some(self.sets[visible[set]].members[member].file_id);
         self.scroll_to = Some(set);
         self.show_selected = true;
+    }
+
+    /// Take every mark off every set, so the person can start choosing again.
+    ///
+    /// A set nobody calls a set of copies is left alone, the way it is everywhere
+    /// else: what it was keeping before it was ignored is what it gets back if it
+    /// is taken back.
+    fn unmark_everything(&mut self) {
+        let ignored: Vec<i64> = self
+            .sets
+            .iter()
+            .filter(|set| self.is_ignored(set))
+            .map(|set| set.set_id)
+            .collect();
+        let mut came_off = Vec::new();
+        self.keep.retain(|set_id, keep| {
+            if ignored.contains(set_id) {
+                return true;
+            }
+            came_off.extend(keep.marked());
+            false
+        });
+        self.unmarked(&came_off);
     }
 
     /// Mark every picture in every set that is a set of copies, so a cleanup
@@ -4392,8 +4431,13 @@ impl App {
                 // goes around the picture, not around the space kept clear for it.
                 let bordered = framed.response.rect.shrink2(egui::vec2(TILE_RING, 0.0));
                 if showing {
+                    // Inside the keep border, not around it. Drawn outside, the
+                    // ring for the picture being looked at sits over the border
+                    // that says the picture is being kept, and the one thing a
+                    // person needs to see about the picture in front of them is
+                    // hidden by the fact that they are looking at it.
                     ui.painter().rect_stroke(
-                        bordered.expand(3.0),
+                        bordered.shrink(3.0),
                         2.0,
                         egui::Stroke::new(3.0_f32, ui.style().visuals.selection.bg_fill),
                     );
@@ -4797,6 +4841,29 @@ impl App {
         // What went is out of the sets. What would not go stays, with its keeper,
         // so another destination can be chosen and the same files tried again.
         self.forget_members(&outcome.removed);
+        // And out of the pictures held in memory, which the search runs over.
+        //
+        // The window removed those files itself, so what the folder holds now is
+        // what it held less that list. Nothing has to be looked at to know it:
+        // reading the folder again, or converting the index again, is asking a
+        // question this already has the answer to. Until another folder is
+        // opened, everything here is what it says it is.
+        if let Some(images) = self.images.take() {
+            // Taken apart rather than copied: this is the whole index in memory,
+            // hundreds of megabytes on a large folder. Nothing else is holding it
+            // here, since a cleanup runs from the cleanup page with no search on,
+            // and if something were, the pictures are left as they are and the
+            // next search reads them again.
+            self.images = match std::sync::Arc::try_unwrap(images) {
+                Ok(held) => {
+                    Some(std::sync::Arc::new(matching::without(held, &outcome.removed)))
+                }
+                Err(held) => {
+                    runlog::log_line!("something else is holding the pictures; leaving them");
+                    Some(held)
+                }
+            };
+        }
 
         // The review has been carried out, so it is over: the files it took are
         // gone and the sets it took them from describe a folder that no longer
@@ -4942,6 +5009,12 @@ mod tests {
         crate::fonts::install(&ctx);
         install_style(&ctx);
         ctx
+    }
+
+    /// The ring drawn around the picture being looked at, which is a different
+    /// thing from the border that says a picture is being kept.
+    fn selection_colour() -> egui::Color32 {
+        window().style().visuals.selection.bg_fill
     }
 
     fn member(id: i64, path: &str, size: i64) -> Member {
@@ -7113,8 +7186,11 @@ mod tests {
         let mut pictures: Vec<egui::Rect> = drawn
             .iter()
             .filter_map(|clipped| match &clipped.shape {
+                // Not the ring around the picture being looked at: that is drawn
+                // inside the tile now, so it is close to the tile's own size.
                 egui::Shape::Rect(rect)
-                    if (rect.rect.width() - TILE.x).abs() < 6.0
+                    if rect.stroke.color != selection_colour()
+                        && (rect.rect.width() - TILE.x).abs() < 6.0
                         && (rect.rect.height() - TILE.y).abs() < 6.0 =>
                 {
                     Some(rect.rect)
@@ -7142,6 +7218,64 @@ mod tests {
         frame(&mut app, Some(at), 0, 2.0);
         frame(&mut app, Some(at), 2, 2.1);
         assert_eq!(app.keep.get(&set_id), None, "twice more did not let it go again");
+    }
+
+    /// A cleanup removes files the window chose itself, so afterwards the folder
+    /// is what it was less that list, and the pictures held in memory say so
+    /// without the folder being read or the index converted again. Searching
+    /// again finds what is left, and no pass runs.
+    #[test]
+    fn what_a_cleanup_took_is_out_of_the_pictures_held_in_memory() {
+        let found = folder_with_a_duplicate();
+        let mut app = reviewing(found.path());
+        assert_eq!(app.images.as_ref().expect("pictures").len(), 3);
+        app.auto_mark_to_keep();
+        app.keep_index = true;
+        app.destination = Destination::Delete;
+        let plan = app.plan.clone();
+        let going = plan.removals[0].rel_path.clone();
+
+        app.view = View::Cleanup;
+        app.run_cleanup(&plan);
+        let ctx = window();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.removing.is_some() && std::time::Instant::now() < until {
+            app.pump_cleanup(&ctx);
+        }
+
+        let left = app.images.as_ref().expect("the pictures were thrown away");
+        assert_eq!(left.len(), 2, "the picture the cleanup took is still in memory");
+
+        // And searching again runs on those, with no pass over the folder.
+        app.load_sets();
+        settle(&mut app);
+        assert!(app.running.is_none(), "the folder was read again after a cleanup");
+        assert!(app.sets.is_empty(), "the copies survived the cleanup");
+        let _ = going;
+    }
+
+    /// "unmark all" takes every mark off, so somebody can choose again from
+    /// nothing. A set nobody calls a set of copies keeps what it was keeping,
+    /// which is what taking it back gives back.
+    #[test]
+    fn unmarking_all_leaves_nothing_marked_but_what_an_ignored_set_was_keeping() {
+        let found = folder_with_two_sets();
+        let mut app = reviewing(found.path());
+        let (first, second) = (app.sets[0].set_id, app.sets[1].set_id);
+        app.selected = Some(app.sets[1].members[0].file_id);
+        app.keep_selected();
+        app.ignore_set(second);
+        app.keep_everything();
+        assert!(app.keep.contains_key(&first), "the set that is a set of copies marks nothing");
+
+        app.unmark_everything();
+
+        assert!(app.keep.get(&first).is_none(), "a mark survived unmarking everything");
+        assert!(
+            app.keep.get(&second).is_some(),
+            "an ignored set lost what it was keeping before it was ignored"
+        );
+        assert_eq!(app.plan.files(), 2, "what a cleanup would take did not follow the marks");
     }
 
     /// "keep everything" marks every picture in every set that is a set of
@@ -7202,35 +7336,46 @@ mod tests {
                 .map(|(_, rect)| *rect)
                 .unwrap_or_else(|| panic!("{wanted} was not drawn in the toolbar: {painted:?}"))
         };
-        let everything = one("keep everything");
+        let unmark = one("unmark all");
+        let everything = one("mark all");
         let marking = one("auto-mark to keep");
         let button = one("Clean up");
         let counts = painted
             .iter()
             .filter(|(text, _)| {
-                text != "keep everything" && text != "auto-mark to keep" && text != "Clean up"
+                text != "unmark all"
+                    && text != "mark all"
+                    && text != "auto-mark to keep"
+                    && text != "Clean up"
             })
             .map(|(_, rect)| *rect)
             .reduce(|all, rect| all.union(rect))
             .expect("no counts were drawn");
 
         assert!(
-            everything.left() < 60.0,
-            "the first button is not against the left edge: {everything:?}"
+            unmark.left() < 60.0,
+            "the first button is not against the left edge: {unmark:?}"
+        );
+        assert!(
+            everything.left() > unmark.right(),
+            "marking all is not to the right of unmarking all"
         );
         assert!(
             marking.left() > everything.right(),
-            "auto-marking is not to the right of keeping everything"
+            "auto-marking is not to the right of marking all"
         );
         assert!(
             button.right() > screen.right() - 60.0,
             "the button is not against the right edge: {button:?}"
         );
+        // In the middle of what is left between the buttons. Centred on the
+        // window instead, they sit over the buttons as soon as there are enough
+        // of them, which there now are.
+        let middle_of_the_gap = (marking.right() + button.left()) / 2.0;
         assert!(
-            (counts.center().x - screen.center().x).abs() < 12.0,
-            "the counts are centred on {} and the window on {}",
+            (counts.center().x - middle_of_the_gap).abs() < 12.0,
+            "the counts are centred on {} and the space between the buttons on {middle_of_the_gap}",
             counts.center().x,
-            screen.center().x
         );
         assert!(
             counts.left() > marking.right() && counts.right() < button.left(),
@@ -8159,6 +8304,36 @@ mod tests {
         assert_eq!(outlined(&both, ring_colour), 1, "the ring went when the picture was marked");
         assert_eq!(outlined(&both, keep_colour), 1, "the marked picture had no border");
 
+        // And the ring is inside the border, not over it. Drawn outside, the ring
+        // for the picture being looked at covers the border that says the picture
+        // is being kept, and that is the one thing somebody needs to see about
+        // the picture in front of them.
+        let inside = |drawn: &[egui::epaint::ClippedShape],
+                      colour: egui::Color32|
+         -> egui::Rect {
+            drawn
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.stroke.width >= 2.0 => {
+                        let painted = rect.stroke.color;
+                        let faded = colour
+                            .gamma_multiply(f32::from(painted.a()) / f32::from(colour.a()));
+                        let (painted, faded) = (painted.to_array(), faded.to_array());
+                        (0..3)
+                            .all(|channel| painted[channel].abs_diff(faded[channel]) <= 2)
+                            .then_some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .expect("nothing was drawn in that colour")
+        };
+        let ring = inside(&both, ring_colour);
+        let border = inside(&both, keep_colour);
+        assert!(
+            border.contains_rect(ring),
+            "the ring is not inside the keep border: ring {ring:?}, border {border:?}"
+        );
+
         // Marks off: the ring stays, because it was never about the marks.
         app.keep.remove(&set_id);
         let after = set_frames(&mut app, &ctx, &root);
@@ -8725,8 +8900,11 @@ mod tests {
         let mut pictures: Vec<egui::Rect> = drawn
             .iter()
             .filter_map(|clipped| match &clipped.shape {
+                // Not the ring around the picture being looked at: that is drawn
+                // inside the tile now, so it is close to the tile's own size.
                 egui::Shape::Rect(rect)
-                    if (rect.rect.width() - TILE.x).abs() < 6.0
+                    if rect.stroke.color != selection_colour()
+                        && (rect.rect.width() - TILE.x).abs() < 6.0
                         && (rect.rect.height() - TILE.y).abs() < 6.0 =>
                 {
                     Some(rect.rect)

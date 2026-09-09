@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     /// Tidying replaces the index file with the tidied database from memory, so
-    /// everything written before it has to be in that file afterwards — both what
+    /// everything written before it has to be in that file afterwards: both what
     /// had already reached the disk and what was still on its way there.
     #[test]
     fn tidying_the_index_keeps_everything_written_before_it() {

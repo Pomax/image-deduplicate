@@ -132,7 +132,7 @@ in `crates/imgdedupe/src`:
 Two tests in `crates/imgdedupe-core/src/index.rs` are about the whole-file write
 and stop meaning anything once it is gone. Both make a write fail by creating a
 directory named `imgdedupe.sqlite.writing`, so the file a write went to first
-could not be written, and then check that the index was left as it was — which
+could not be written, and then check that the index was left as it was, which
 was the point of writing beside the file and renaming.
 
 - `a_compaction_that_cannot_finish_leaves_the_index_where_it_was` goes. A
@@ -164,7 +164,7 @@ died. It does not hold now. The writer keeps a connection on the file, so a
 journal exists for as long as each transaction takes, and a second manager
 opening the same folder in that moment reads a working index as a broken one.
 
-The check goes. What it was for — an index left half written by a run that died —
+The check goes. What it was for, an index left half written by a run that died,
 is SQLite's own job: opening the file rolls the journal back. The refusal for an
 index that is not a database, and the one for a schema version this build does
 not speak, both stay.

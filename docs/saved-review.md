@@ -5,12 +5,12 @@ marked to keep, and the sets a search found. Closing the window loses neither,
 and opening the folder again goes straight back to the review rather than
 searching for what is already known.
 
-They are separate pieces of work. The marks stand on their own — they are worth
-keeping whether or not the sets ever are — so they finish before the sets start.
+They are separate pieces of work. The marks stand on their own, worth keeping
+whether or not the sets ever are, so they finish before the sets start.
 
 Underneath both is the one thing a review is: which files are being kept and
 which are going. Every mark, every set, every ignored pair is a statement about
-that list, and the window has to hold it correctly at every moment — not work it
+that list, and the window has to hold it correctly at every moment, not work it
 out again on each frame that happens to draw, which is what it does today.
 Keeping it right across a mark, across a search, across a cleanup, and across
 being closed and opened again is the same job as writing it down, so it is
@@ -19,7 +19,7 @@ decided here and not somewhere else.
 ## What opening a folder does
 
 One flow, and it runs every time a folder is opened. Open the index, take its
-settings — they are the folder's — and compare the folder against it. The
+settings, which are the folder's, and compare the folder against it. The
 comparison is the listing and the difference and nothing after them: no file is
 read.
 
@@ -37,8 +37,8 @@ for: it says that when something has moved, do not ask, bring it up to date. Wit
 no saved review there is nothing to protect and nothing to ask about, so the pass
 runs either way.
 
-Then, with no rescan left to do — nothing had changed, or the pass has finished,
-or they said load — the flow parts on the one thing that can part it:
+Then, with no rescan left to do, because nothing had changed, or the pass has
+finished, or they said load, the flow parts on the one thing that can part it:
 
 - a saved review: open it, on the sets the index holds. No search runs.
 - no saved review: search, on the pictures the open already read. No pass runs.
@@ -59,7 +59,7 @@ same five values. They cannot disagree, so nothing asks about them.
 A file the index does not name is not the same as a file nobody has looked at.
 
 The walk lists every file whose name claims a supported format. The index names
-every file that was indexed — sniffed, decoded, fingerprinted. A file that claims
+every file that was indexed: sniffed, decoded, fingerprinted. A file that claims
 a format and is not one, or is animated, or could not be read, is in the first
 list and not the second, so it reads as new on every opening for ever. On the
 folder this was found on, three `.tif` files did exactly that, and the question
@@ -67,7 +67,7 @@ went up the moment the window opened.
 
 So the index also records the files a pass looked at and did not index: the path,
 the size and the timestamp, and nothing else. The comparison then has a third
-answer — known, unchanged, and not a picture — which is neither new nor changed.
+answer, known and unchanged and not a picture, which is neither new nor changed.
 
 A pass stops reading those files as well. Today they are read in full on every
 pass, which for a video named `.tif` on another machine is the whole file across
@@ -192,14 +192,14 @@ In `crates/imgdedupe/src/app.rs`.
   `SetAction::KeepAll` and `SetAction::KeepNone` arms of the match in `set_row`,
   and the "Keep this one" button in the preview pane. Each of them says which
   pictures changed, because each of them knows.
-- Not from the places that clear the marks wholesale — opening another folder,
+- Not from the places that clear the marks wholesale: opening another folder,
   starting a pass, taking a search result, finishing a cleanup. Those are tasks
   of their own below.
 - What changed, not the review. Marking one picture is one row written: the
   index is a file, often on another machine, and every statement against it is a
   journal written and deleted beside it. Redoing the whole review on every click
   cost one of those per mark the review held, and they queue up behind the person
-  all session. There is no transaction here — one statement is not a batch.
+  all session. There is no transaction here: one statement is not a batch.
   Transactions are for what a scan and a search hand over.
 
 ## 5. The window reads the marks back when a folder opens
@@ -280,7 +280,7 @@ apart from what its sets were found under: they are the same fact.
 Two keys join the eight in `crates/imgdedupe/src/notes.rs`: `sensitivity` and
 `ignore_colour`. Field on the `Notes` struct, constant for the key, read in the
 function `read`, applied in the method `take_notes`. The three that already exist
-— `match_whole_frame`, `match_corners`, `within_a_folder` — stop being written
+`match_whole_frame`, `match_corners` and `within_a_folder`, stop being written
 when their boxes are ticked and are written with the other two instead.
 
 What stays written on being clicked is `auto_rescan` and `auto_mark`. Those are
@@ -312,7 +312,7 @@ In `crates/imgdedupe/src/app.rs`.
   from the `matching::Image` of the same `file_id`, out of the pictures the same
   open already read, so nothing about a picture is written down twice and nothing
   can drift between the two.
-- A stored set that has lost members — its rows went when the files did — is
+- A stored set that has lost members, its rows going with the files, is
   dropped if fewer than two are left. One picture is not a set of copies.
 
 ## 12. Learning whether the folder's content has changed
@@ -348,8 +348,8 @@ In `crates/imgdedupe/src/app.rs`.
   and "scan", which discards them and runs a new scan.
 - It goes up for either of two reasons, and says which:
   - the folder asks to be rescanned when it is opened, with nothing about the
-    folder changed — "Previous session found. Load or rescan?"
-  - a file was added, removed or written since —
+    folder changed: "Previous session found. Load or rescan?"
+  - a file was added, removed or written since:
     "Previous session found but folder content has changed. Load previous
     session or rescan?"
 - Both at once says the second: the files are the stronger statement.
@@ -375,7 +375,7 @@ still there; the next search hangs them on whatever sets it finds.
 
 "load" leaves the sets exactly as they are, including a file the pass found
 changed: the person was asked and said to carry on. That is also the answer to a
-folder that asked to be rescanned — the request is not a decision, and saying
+folder that asked to be rescanned: the request is not a decision, and saying
 "load" is the person declining it for this opening. The setting itself is left
 ticked; it is what that folder does on opening, and this was one opening.
 
@@ -421,7 +421,7 @@ is a place the plan is worked out again, and there is nowhere else.
 
 In `crates/imgdedupe/src/app.rs`: a method `replan(&mut self)`, which is
 `self.plan = self.build_plan();` and nothing else. `build_plan` stays exactly as
-it is — it is the rule, and the rule does not change here.
+it is, because it is the rule, and the rule does not change here.
 
 ## 19. The drawing reads the field
 

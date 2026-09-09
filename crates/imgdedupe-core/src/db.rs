@@ -426,7 +426,7 @@ pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<
 /// nothing marked, not a folder that has no such thing.
 ///
 /// The pairs somebody said are not copies of each other are not made here. They
-/// are not one sitting's work — they are a decision about the pictures — so they
+/// are not one sitting's work, but a decision about the pictures, so they
 /// are part of the index itself and a cleanup never touches them.
 pub fn begin_review(conn: &Connection) -> Result<()> {
     conn.execute(DUPLICATE_SETS_TABLE, [])?;

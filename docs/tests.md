@@ -22,7 +22,7 @@ fills the triangles the toolkit's tessellator produces into a buffer of its own
 and writes a PNG named after the check. The window is drawn by a graphics card and
 a test has none, so this is the only way to look at what a check was measuring.
 The pictures go to `IMGDEDUPE_SHOT_DIR`, or the temporary folder when that says
-nothing, and only the last frame a check drew is filled in — that is the frame it
+nothing, and only the last frame a check drew is filled in, that being the one it
 went on to measure, and filling one is the slow part.
 
 ## crates/imgdedupe-core/src/cleanup.rs
@@ -108,8 +108,8 @@ downstream is left describing a picture that is not there.
 
 ### a_review_beginning_makes_the_tables_it_is_written_in
 
-A review is its two tables, and they are made where a review begins — sets being
-built into the review page — not by the first mark somebody happens to make. So a
+A review is its two tables, and they are made where a review begins, which is
+sets being built into the review page, not by the first mark made. So a
 review nobody has marked anything in yet is a review with nothing marked, and not
 a folder that has no such thing. Beginning one on a folder that already has a
 review leaves its marks where they are.
@@ -117,8 +117,8 @@ review leaves its marks where they are.
 ### a_cleanup_leaves_the_ignored_pairs_where_they_are
 
 The end of a review takes the review away and nothing else. The pairs somebody
-said are not copies of each other are not one sitting's work — they are a decision
-about those pictures — so a cleanup drops the marks and the sets and never touches
+said are not copies of each other are not one sitting's work, but a decision about
+those pictures, so a cleanup drops the marks and the sets and never touches
 them.
 
 ### an_index_nobody_has_reviewed_has_no_marks_and_no_sets
@@ -239,8 +239,8 @@ next run migrated it again.
 
 ### every_change_reaches_the_file
 
-One of every kind of change — rows written, rows deleted, a setting set, a
-setting forgotten, a pair marked, a compaction — then the index is closed, and
+One of every kind of change: rows written, rows deleted, a setting set, a setting
+forgotten, a pair marked, a compaction. Then the index is closed, and
 all of them are in the file.
 
 ### a_change_is_in_the_file_once_the_writing_is_waited_for
@@ -273,14 +273,14 @@ a folder nobody has reviewed.
 ### a_review_written_with_no_index_open_is_refused_and_leaves_the_writer_clean
 
 A window writes a review as it happens, and a folder is chosen before its index is
-open. Asking for a mark then is refused, and — this is the point — the writer is
+open. Asking for a mark then is refused, and, this being the point, the writer is
 not handed the change anyway: work it has nowhere to do would be kept and reported
 as trouble the next time somebody closed the index.
 
 ### tidying_the_index_keeps_everything_written_before_it
 
 Tidying replaces the index file with the tidied database from memory, so
-everything written before it has to be in that file afterwards — what had reached
+everything written before it has to be in that file afterwards: what had reached
 the disk already and what was still on the writer's queue. Marks, ignored pairs
 and pictures are all read back out of the file, and the file goes on taking
 changes afterwards, because the writer is opened again on the new one.
@@ -993,7 +993,7 @@ reading; the bytes decide what it is.
 
 A picture, a file that claims a format and is not one, and a broken picture. The
 first pass indexes one and fails on one; the second indexes nothing, fails on
-nothing, and counts all three as unchanged — a file counted as unchanged is a
+nothing, and counts all three as unchanged, because a file counted as unchanged is a
 file the pass did not open. Without the row for what it could not index, those
 two are read in full on every pass for ever.
 
@@ -1016,7 +1016,7 @@ A broken picture is reported by name and the pass carries on.
 ### a_pass_over_the_subfolders_stays_out_of_dot_and_at_folders
 
 A folder whose name begins with a dot or an at sign is something else's
-workings — `.git`, `.thumbnails`, `@eaDir` — and a pass over the subfolders does
+workings, such as `.git`, `.thumbnails` or `@eaDir`, and a pass over the subfolders does
 not go into one, nor into anything under it.
 
 ### the_folder_the_pass_was_pointed_at_is_scanned_whatever_it_is_called
@@ -1288,8 +1288,8 @@ index and reports how many rows went.
 ### what_was_skipped_and_what_broke_are_not_counted_as_found
 
 A real folder holding two pictures, a text file, a file named `.png` that is not
-one, and a broken PNG, scanned twice. The pass looks at four of the five — the
-text file claims no format, so it is never read — counts the one that lied about
+one, and a broken PNG, scanned twice. The pass looks at four of the five, since
+the text file claims no format and is never read. It counts the one that lied about
 its name as ignored and the broken one as a failure, and reports two found. The
 second pass finds nothing new and reads nothing at all: all four are unchanged,
 including the two it could not index, because the first pass wrote down that it
@@ -1575,6 +1575,13 @@ Really clicks twice on the picture in a scanned set that the search did not
 choose. It becomes the one being kept, and two more clicks a moment later let it
 go again, which is what the space bar does on the picture being shown.
 
+### what_a_cleanup_took_is_out_of_the_pictures_held_in_memory
+
+A cleanup removes files the window chose itself, so afterwards the folder is what
+it was less that list, and nothing has to be looked at to know it. The pictures
+held in memory lose the ones that went, and searching again runs on those with no
+pass over the folder and no second conversion of the index.
+
 ### keeping_everything_marks_every_picture_that_is_in_a_set_of_copies
 
 The "keep everything" button marks every picture in every set that is a set of
@@ -1660,8 +1667,8 @@ marking its best copy, without anybody pressing the button.
 ### the_index_keeps_which_ways_of_matching_were_ticked
 
 Both ways of matching are on when a folder is opened. Switching the corner match
-off writes nothing on its own — a control moved and never used has changed
-nothing — and searching with it off is what the index takes. Opening the folder
+off writes nothing on its own, because a control moved and never used has changed
+nothing, and searching with it off is what the index takes. Opening the folder
 again comes back with it off and the other still on.
 
 ### the_index_keeps_matching_within_folders_and_running_on_opening
@@ -1790,7 +1797,7 @@ scanned and nothing is searched.
 A caller is answered when the copy in memory has its change, not when the file
 does, so the window has to close the index as it ends: closing is what waits for
 the writer. What is checked is that it closed it, not that a mark happened to
-have landed — on a small folder the writer wins that race anyway, and a test that
+have landed: on a small folder the writer wins that race anyway, and a test that
 reads the file would pass whether or not the window waited. That closing waits is
 `letting_go_of_a_folder_waits_for_the_file_to_catch_up`.
 
@@ -1816,8 +1823,8 @@ marks named, which says nothing, and there are no sets for them to be marks in.
 
 What a cleanup would take is held rather than worked out on every frame that
 draws, so every interaction that changes it has to work it out again. After each
-one — a mark on, a mark off, shift, auto-marking, a set ignored, a set taken back,
-a picture removed, work cancelled, a pass started — the held plan is compared with
+one of a mark on, a mark off, shift, auto-marking, a set ignored, a set taken
+back, a picture removed, work cancelled and a pass started, the held plan is compared with
 one derived then and there. This is the test that catches a site that forgot.
 
 ### drawing_the_review_does_not_change_the_plan

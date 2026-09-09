@@ -1018,6 +1018,18 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
         .collect()
 }
 
+/// The pictures without the ones a cleanup took.
+///
+/// A cleanup removes files the window chose itself, so what the folder holds
+/// afterwards is known without looking: everything that was there, less that
+/// list. Reading the folder again to find that out is asking a question already
+/// answered, and on a folder on another machine it is a listing and a read of
+/// the whole index for nothing.
+pub fn without(images: Vec<Image>, gone: &[String]) -> Vec<Image> {
+    let gone: std::collections::HashSet<&str> = gone.iter().map(String::as_str).collect();
+    images.into_iter().filter(|image| !gone.contains(image.rel_path.as_str())).collect()
+}
+
 /// Build the sets a previous search wrote down, from the pictures as they are
 /// now.
 ///
@@ -1025,7 +1037,7 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
 /// everything a set says about a picture is read out of the index that was just
 /// opened. Nothing about a picture is stored twice and the two cannot drift.
 ///
-/// A set that has lost pictures — their rows went when the files did — comes back
+/// A set that has lost pictures, their rows going with the files, comes back
 /// without them, and one left with fewer than two does not come back at all,
 /// because one picture is not a set of copies.
 pub fn sets_from_stored(images: &[Image], stored: &[(i64, Vec<i64>)]) -> Vec<DuplicateSet> {

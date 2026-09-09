@@ -63,7 +63,7 @@ walk passes over them without being told about them.
 - Every format's extensions map back to that format, and an unknown extension
   maps to nothing.
 - An extension in capitals is the same extension.
-- A folder holding a file with no picture extension — the index itself — comes
+- A folder holding a file with no picture extension, the index itself, comes
   back from the walk without it, and the file is not read.
 - A file named `.jpg` that is not a JPEG is still refused, so the magic number is
   still what decides.
