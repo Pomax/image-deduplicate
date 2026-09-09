@@ -142,6 +142,7 @@ jobs:
       # main never carries megabytes of executables around with it.
       - name: Put the three of them on the releases branch
         env:
+          TAG: ${{ needs.check.outputs.tag }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
           if git ls-remote --exit-code --heads origin releases >/dev/null 2>&1; then
@@ -163,6 +164,24 @@ jobs:
           mv built/*.zip "$VERSION"/
           ls -l "$VERSION"
 
-          git add "$VERSION"
+          # The README is the list of what is on this branch, newest first, so
+          # the new version goes in directly under the heading. A branch that
+          # has none yet gets the heading first.
+          if [ ! -f README.md ]; then
+            printf '# imgdedupe releases\n' > README.md
+          fi
+          {
+            head -n 1 README.md
+            printf '\n## %s\n\n' "$VERSION"
+            printf -- '- [Windows](./%s/imgdedupe-%s-windows.zip)\n' "$VERSION" "$VERSION"
+            printf -- '- [macOS](./%s/imgdedupe-%s-macos.zip)\n' "$VERSION" "$VERSION"
+            printf -- '- [Linux](./%s/imgdedupe-%s-linux.zip)\n' "$VERSION" "$VERSION"
+            printf -- '- [Source code](../../tree/%s)\n' "$TAG"
+            tail -n +2 README.md
+          } > README.next
+          mv README.next README.md
+          cat README.md
+
+          git add "$VERSION" README.md
           git commit -m "$VERSION"
           git push origin releases
