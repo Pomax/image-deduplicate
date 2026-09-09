@@ -1070,6 +1070,13 @@ mark to the picture the preview is on, does not touch the other set, does nothin
 with no selection, and takes the mark off again when pressed on the picture
 already kept.
 
+### escape_on_the_scan_page_is_the_cancel_button
+
+Escape pressed on the scan page with nothing running does nothing at all, because
+the Cancel button is greyed out then. With a pass running it stops it and leaves
+the page as the button does: no counts, no lamps, no half-read index. The key
+never means something the page does not show.
+
 ### nothing_that_starts_work_is_offered_while_work_is_going
 
 The window is busy while a real pass, a real search and a real cleanup are

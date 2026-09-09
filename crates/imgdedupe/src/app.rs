@@ -1711,6 +1711,14 @@ impl App {
         });
         self.scan_content = measured;
         self.scan_row = tallest;
+
+        // The escape key is the Cancel button. It stops whatever that button
+        // would stop, and where the button is greyed out it does nothing, so the
+        // key never means something the page does not show.
+        if self.can_cancel() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.cancel_work();
+        }
+
         self.progress_section(ui);
 
         // Only the lamps scroll. The boxes and the bars are the page: a window
@@ -2357,11 +2365,20 @@ impl App {
         )
     }
 
+    /// Whether there is work the Cancel button would stop.
+    ///
+    /// Cancel covers the indexing and the search, which are the two a person
+    /// waits through. It does not cover a removal: files are going, and stopping
+    /// halfway leaves a job half done with nothing said about it.
+    ///
+    /// Asked here rather than worked out where the button is drawn, because the
+    /// escape key is that button and has to be able to say the same thing.
+    fn can_cancel(&self) -> bool {
+        self.running.is_some() || self.searching.is_some()
+    }
+
     fn run_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
-        // Cancel covers the indexing and the search, which are the two a person
-        // waits through. It does not cover a removal: files are going, and
-        // stopping halfway leaves a job half done with nothing said about it.
-        let stoppable = self.running.is_some() || self.searching.is_some();
+        let stoppable = self.can_cancel();
         let busy = self.busy();
         let have_folder = self.folder.is_some();
 
@@ -4466,6 +4483,60 @@ mod tests {
             Some(&Keep::One(other_in_first)),
             "the mark did not go back on"
         );
+    }
+
+    /// The escape key on the scan page is the Cancel button: it stops whatever
+    /// that button would stop, and where the button is greyed out it does
+    /// nothing, so the key never means something the page does not show.
+    #[test]
+    fn escape_on_the_scan_page_is_the_cancel_button() {
+        let scanned = folder_with_a_duplicate();
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(scanned.path().to_path_buf());
+
+        let ctx = window();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 700.0));
+        let mut clock = 0.0;
+        let mut escape = |app: &mut App| {
+            clock += 0.1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(clock),
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.scan_view(ui));
+                },
+            );
+        };
+
+        // Nothing is running, so the button is greyed out and the key does
+        // nothing: not a folder forgotten, not a page changed, nothing.
+        let folder = app.folder.clone();
+        assert!(!app.can_cancel(), "there was something to cancel before anything started");
+        escape(&mut app);
+        assert_eq!(app.folder, folder, "escape did something on a page with nothing to stop");
+        assert!(app.error.is_none());
+
+        // A pass running is what the button is for, and the key stops it.
+        app.start_scan();
+        assert!(app.can_cancel(), "a pass that is running cannot be cancelled");
+        escape(&mut app);
+        assert!(app.running.is_none(), "escape did not stop the pass");
+        assert!(!app.can_cancel(), "there is still something to cancel");
+        // And the page is back to before the run, which is what the button does:
+        // a cancelled pass leaves counts and lamps that are true of nothing.
+        assert_eq!(app.scan.total, 0, "the cancelled run left its numbers on the page");
+        assert!(app.lit.is_empty(), "the cancelled run left its lamps lit");
+        assert!(app.images.is_none(), "the cancelled run left half an index in memory");
     }
 
     /// Starting a second pass while one is going means nothing, so everything
