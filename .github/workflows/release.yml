@@ -167,15 +167,27 @@ jobs:
           # The README is the list of what is on this branch, newest first, so
           # the new version goes in directly under the heading. A branch that
           # has none yet gets the heading first.
+          #
+          # The date is the day the tagged commit was made, not the day the
+          # build ran: what is being dated is the version, and a rebuild of the
+          # same commit is the same version.
+          #
+          # The checksum is beside each download because that is where somebody
+          # checks it, against the file they have just fetched.
           if [ ! -f README.md ]; then
             printf '# imgdedupe releases\n' > README.md
           fi
+          made_on=$(git log -1 --format=%cs "$GITHUB_SHA")
+          sum() { sha256sum "$VERSION/imgdedupe-$VERSION-$1.zip" | cut -d' ' -f1; }
           {
             head -n 1 README.md
-            printf '\n## %s\n\n' "$VERSION"
-            printf -- '- [Windows](./%s/imgdedupe-%s-windows.zip)\n' "$VERSION" "$VERSION"
-            printf -- '- [macOS](./%s/imgdedupe-%s-macos.zip)\n' "$VERSION" "$VERSION"
-            printf -- '- [Linux](./%s/imgdedupe-%s-linux.zip)\n' "$VERSION" "$VERSION"
+            printf '\n## %s (%s)\n\n' "$VERSION" "$made_on"
+            printf -- '- [Windows](./%s/imgdedupe-%s-windows.zip) (sha256 %s)\n' \
+              "$VERSION" "$VERSION" "$(sum windows)"
+            printf -- '- [macOS](./%s/imgdedupe-%s-macos.zip) (sha256 %s)\n' \
+              "$VERSION" "$VERSION" "$(sum macos)"
+            printf -- '- [Linux](./%s/imgdedupe-%s-linux.zip) (sha256 %s)\n' \
+              "$VERSION" "$VERSION" "$(sum linux)"
             printf -- '- [Source code](../../tree/%s)\n' "$TAG"
             tail -n +2 README.md
           } > README.next
