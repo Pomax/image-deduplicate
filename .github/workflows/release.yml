@@ -1,9 +1,15 @@
 name: Release
 
-# Windows, macOS, and Linux build in parallel and their executables go into one
-# release, named after the version in Cargo.toml and tagged with it. Nothing
-# runs until the version has been compared with the previous commit's: a push to
-# main whose version did not change builds nothing and releases nothing.
+# Windows, macOS, and Linux build in parallel. The commit is tagged with the
+# version in Cargo.toml and the three archives are committed to the `releases`
+# branch, in a directory named after that version. Nothing runs until the
+# version has been compared with the previous commit's: a push to main whose
+# version did not change builds nothing and releases nothing.
+#
+# Not a GitHub release. Those attach two "Source code" archives of their own that
+# cannot be turned off, and fold the downloads away on every release but the
+# newest. A branch of directories is the whole history of builds, plainly, and
+# every file in it has a permanent address.
 on:
   push:
     branches:
@@ -19,6 +25,7 @@ jobs:
       build: ${{ steps.decide.outputs.build }}
       release: ${{ steps.decide.outputs.release }}
       tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
     steps:
       # Two commits, so this commit's version can be compared to the one before.
       - uses: actions/checkout@v4
@@ -39,15 +46,12 @@ jobs:
           - os: windows-latest
             name: windows
             built: imgdedupe.exe
-            asset: imgdedupe-windows.zip
           - os: macos-latest
             name: macos
             built: imgdedupe
-            asset: imgdedupe-macos.zip
           - os: ubuntu-latest
             name: linux
             built: imgdedupe
-            asset: imgdedupe-linux.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -81,52 +85,84 @@ jobs:
         run: bash scripts/build.sh
 
       # The executable keeps the name the build gave it on every platform. What
-      # says where it came from is the zip around it, which is also what keeps
-      # the executable bit through the download on macOS and Linux. The Windows
-      # runner has 7-Zip and no zip, the other two have zip.
-      - name: Zip it under the platform it was built on
+      # says which version it is and where it came from is the zip around it,
+      # which is also what keeps the executable bit through the download on macOS
+      # and Linux. A file sitting in somebody's downloads folder a year later
+      # still says which version it is. The Windows runner has 7-Zip and no zip,
+      # the other two have zip.
+      - name: Zip it under the version and the platform it was built on
         if: matrix.name == 'windows'
         shell: cmd
         run: |
           mkdir out
-          7z a "out\${{ matrix.asset }}" "${{ matrix.built }}"
+          7z a "out\imgdedupe-${{ needs.check.outputs.version }}-${{ matrix.name }}.zip" "${{ matrix.built }}"
 
-      - name: Zip it under the platform it was built on
+      - name: Zip it under the version and the platform it was built on
         if: matrix.name != 'windows'
         shell: bash
         run: |
           mkdir -p out
-          zip -j "out/${{ matrix.asset }}" "${{ matrix.built }}"
+          zip -j "out/imgdedupe-${{ needs.check.outputs.version }}-${{ matrix.name }}.zip" "${{ matrix.built }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: out/${{ matrix.asset }}
+          name: imgdedupe-${{ needs.check.outputs.version }}-${{ matrix.name }}.zip
+          path: out/imgdedupe-${{ needs.check.outputs.version }}-${{ matrix.name }}.zip
           if-no-files-found: error
 
   release:
-    # The release is always created, never edited, so an existing release is
-    # never changed or overwritten. If the tag already exists this fails, which
-    # is the right outcome: that version has already been released.
+    # A version is released once. The tag is created here and never moved, so a
+    # tag that already exists fails the run, which is the right outcome: that
+    # version has already been released.
     needs: [check, build]
     if: needs.check.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: built
           merge-multiple: true
 
-      # One release holding all three, made with the tool GitHub ships on its
-      # own runners rather than somebody else's action.
-      - name: Put the three of them out as one release
+      - name: Tag the commit this was built from
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
           TAG: ${{ needs.check.outputs.tag }}
         run: |
-          gh release create "$TAG" --repo "$REPO" --target "$GITHUB_SHA" \
-            --title "$TAG" --generate-notes \
-            built/imgdedupe-windows.zip \
-            built/imgdedupe-macos.zip \
-            built/imgdedupe-linux.zip
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+
+      # The `releases` branch holds nothing but builds: one directory per
+      # version, named after it, holding that version's three archives. It has a
+      # history of its own and shares no commit with the source, so a checkout of
+      # main never carries megabytes of executables around with it.
+      - name: Put the three of them on the releases branch
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --heads origin releases >/dev/null 2>&1; then
+            git fetch origin releases
+            git checkout releases
+          else
+            git checkout --orphan releases
+            # Take the source out of the index and the tree, so the first commit
+            # on this branch holds one version's builds and nothing else. The
+            # archives are untracked at this point and are left where they are.
+            git rm -rf --quiet .
+          fi
+
+          if [ -d "$VERSION" ]; then
+            echo "$VERSION is already on the releases branch" >&2
+            exit 1
+          fi
+          mkdir "$VERSION"
+          mv built/*.zip "$VERSION"/
+          ls -l "$VERSION"
+
+          git add "$VERSION"
+          git commit -m "$VERSION"
+          git push origin releases
