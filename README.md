@@ -1,5 +1,12 @@
 # imgdedupe releases
 
+## 0.6.0 (2026-09-10)
+
+- [Windows](./0.6.0/imgdedupe-0.6.0-windows.zip) (sha256 628c49414e6d372dd698e8a784c7257124c1ce3fc1097bc76d6244c011e6ba7d)
+- [macOS](./0.6.0/imgdedupe-0.6.0-macos.zip) (sha256 ede95c12422f304718b41e3ba995e21e41a6ef4bc1066f57f0970dca143c11da)
+- [Linux](./0.6.0/imgdedupe-0.6.0-linux.zip) (sha256 6c521d97c1c677a75a6f90e291dd665d8108984807d539af939bae088085fc96)
+- [Source code](../../tree/v0.6.0)
+
 ## 0.5.0 (2026-09-09)
 
 - [Windows](./0.5.0/imgdedupe-0.5.0-windows.zip) (sha256 fee070c4f7afac1bbb2266c0541f10b90d032d79a9535adeae22fc8e2af271c6)
