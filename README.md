@@ -4,7 +4,7 @@ A cross-platform desktop program that indexes a folder of images, finds duplicat
 
 ## Downloads
 
-You can find versioned downloads over on [the releases branch](../tree/releases), with the release log [here](../tree/releases/RELEASE_LOG.md).
+You can find versioned downloads over on [the releases branch](../../tree/releases), with the release log [here](../../tree/releases/RELEASE_LOG.md).
 
 <sub>This repo does not use GitHub's "releases" format, as there is no way to force it to always show assets, and has no way to only show actual releases, always injecting source code downloads when you're literally on the code repository webpage already. With the added benefit that updating the release information is a normal PR that can be tracked like everything else.</sub>
 
