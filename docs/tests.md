@@ -192,12 +192,19 @@ Opening brings the file itself to the current shape before anything is served
 from it. Checked against the file on disk, not against what was read out of it,
 because a migration that lives only in memory is lost the moment it is dropped.
 
-### an_index_written_in_nanoseconds_comes_back_in_milliseconds
+### an_index_written_in_nanoseconds_comes_back_in_seconds
 
-An index from a build that kept stamps in nanoseconds comes back holding
-milliseconds and no nanosecond column, checked against the file rather than the
-copy handed back. Shown to fail with the carrying step taken out before it was
-claimed to catch anything.
+An index from a build that kept stamps in nanoseconds comes back holding whole
+seconds and no nanosecond column, checked against the file rather than the copy
+handed back. Shown to fail with the carrying step taken out before it was claimed
+to catch anything.
+
+### an_index_written_in_milliseconds_comes_back_in_seconds
+
+The same for the build that kept milliseconds. Milliseconds were as wrong as
+nanoseconds: Windows writes the sub-second part of a stamp and macOS reports none
+for the same file, so every file in an index written on one machine read as
+changed on the other. Shown to fail with the dividing taken out.
 
 ### a_half_converted_index_is_finished_rather_than_converted_twice
 
@@ -209,6 +216,14 @@ divided, because the old column is what says whether the dividing has happened.
 
 The other half of that: a run killed after the column was added and before the
 stamps were carried. The next open carries them.
+
+### an_index_already_in_the_current_shape_is_not_written_again
+
+A folder with no index gets one written, and opening that one again leaves the
+file alone. The migration works on the copy in memory and only puts it back when
+it changed something, because the file can be on another machine and writing it
+back costs the whole index across the mount. Shown to fail with the migration
+always reporting a change.
 
 ### a_fresh_index_records_its_schema_version
 

@@ -138,7 +138,7 @@ struct Candidate {
     rel_path: String,
     abs_path: PathBuf,
     size_bytes: i64,
-    mtime_ms: i64,
+    mtime_seconds: i64,
 }
 
 /// Walk the tree and list every file, ignoring the index and its sidecars.
@@ -229,7 +229,7 @@ fn walk(
                 rel_path,
                 abs_path: path,
                 size_bytes: entry.size_bytes,
-                mtime_ms: entry.mtime_ms,
+                mtime_seconds: entry.mtime_seconds,
             });
         }
         report(Event::Walking { found: out.len() as u64, of });
@@ -277,7 +277,8 @@ fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db
         // its fingerprints being current, and a file the pass has already read
         // and found not to be a picture is settled by having been read.
         let where_it_was = entry.is_some_and(|entry| {
-            entry.size_bytes == candidate.size_bytes && entry.mtime_ms == candidate.mtime_ms
+            entry.size_bytes == candidate.size_bytes
+                && entry.mtime_seconds == candidate.mtime_seconds
         });
         let fresh = where_it_was
             && entry.is_some_and(|entry| {
@@ -316,7 +317,7 @@ fn looked_at(candidate: &Candidate) -> db::Looked {
     db::Looked {
         rel_path: candidate.rel_path.clone(),
         size_bytes: candidate.size_bytes,
-        mtime_ms: candidate.mtime_ms,
+        mtime_seconds: candidate.mtime_seconds,
     }
 }
 
@@ -420,7 +421,7 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
     Outcome::Indexed(Box::new(Record {
         rel_path: candidate.rel_path.clone(),
         size_bytes: candidate.size_bytes,
-        mtime_ms: candidate.mtime_ms,
+        mtime_seconds: candidate.mtime_seconds,
         width,
         height,
         format,
@@ -1499,8 +1500,8 @@ mod tests {
         other
             .execute_batch(
                 "DROP VIEW IF EXISTS indexed_images;
-                 ALTER TABLE files RENAME COLUMN mtime_ms TO mtime_ns;
-                 UPDATE files SET mtime_ns = mtime_ns * 1000000 + 654321;",
+                 ALTER TABLE files RENAME COLUMN mtime_seconds TO mtime_ns;
+                 UPDATE files SET mtime_ns = mtime_ns * 1000000000 + 654321;",
             )
             .expect("an index in nanoseconds");
         drop(other);

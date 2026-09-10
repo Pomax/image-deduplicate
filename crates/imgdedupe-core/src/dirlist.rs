@@ -8,7 +8,7 @@ pub struct Listed {
     pub is_dir: bool,
     pub is_file: bool,
     pub size_bytes: i64,
-    pub mtime_ms: i64,
+    pub mtime_seconds: i64,
     /// The file system's own number for this file, which on most file systems
     /// rises with where the file sits on the storage. Reading in this order is
     /// closer to reading the disk in a line than jumping about it, which is what
@@ -44,14 +44,14 @@ pub fn entry_count(dir: &Path) -> Option<u64> {
     imp::entry_count(dir)
 }
 
-/// A modification time as milliseconds since the epoch, which is how the index
+/// A modification time as whole seconds since the epoch, which is how the index
 /// stores it. Truncated, not rounded.
-pub fn mtime_millis(metadata: &std::fs::Metadata) -> i64 {
+pub fn mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|delta| delta.as_millis().min(i64::MAX as u128) as i64)
+        .map(|delta| delta.as_secs().min(i64::MAX as u64) as i64)
         .unwrap_or(0)
 }
 
@@ -253,9 +253,9 @@ mod imp {
         let objtype = field.cast::<u32>().read_unaligned();
         field = field.add(4);
 
-        // ATTR_CMN_MODTIME, a `struct timespec` of two 64 bit numbers.
+        // ATTR_CMN_MODTIME, a `struct timespec` of two 64 bit numbers. The
+        // nanoseconds are stepped over: the index keeps whole seconds.
         let seconds = field.cast::<i64>().read_unaligned();
-        let nanos = field.add(8).cast::<i64>().read_unaligned();
         field = field.add(16);
 
         // ATTR_CMN_FILEID, a `u64`. Comes after the times because the fields
@@ -273,9 +273,7 @@ mod imp {
             is_file: objtype == VREG,
             size_bytes: size,
             file_id,
-            mtime_ms: seconds
-                .saturating_mul(1_000)
-                .saturating_add(nanos.clamp(0, 999_999_999) / 1_000_000),
+            mtime_seconds: seconds,
         };
         (Some(entry), length)
     }
@@ -318,7 +316,7 @@ mod imp {
                 is_dir: metadata.is_dir(),
                 is_file: metadata.is_file(),
                 size_bytes: metadata.len() as i64,
-                mtime_ms: super::mtime_millis(&metadata),
+                mtime_seconds: super::mtime_seconds(&metadata),
                 file_id: {
                     #[cfg(unix)]
                     {

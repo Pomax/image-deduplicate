@@ -347,12 +347,12 @@ const SCROLL_BAR: f32 = 12.0;
 
 /// When a file was last written, as `YYYY-MM-DD HH:MM`, in UTC.
 ///
-/// The stamp is milliseconds since the epoch, which is what the index stores.
+/// The stamp is whole seconds since the epoch, which is what the index stores.
 /// Nothing here reads a date out of the picture's own metadata: most of the
 /// formats this reads do not carry one.
-fn file_date(mtime_ms: i64) -> String {
-    let seconds = mtime_ms.div_euclid(1_000);
-    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+fn file_date(mtime_seconds: i64) -> String {
+    let (days, rest) =
+        (mtime_seconds.div_euclid(86_400), mtime_seconds.rem_euclid(86_400));
     let (year, month, day) = civil_from_days(days);
     format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", rest / 3600, (rest % 3600) / 60)
 }
@@ -4516,7 +4516,11 @@ impl App {
                     .weak(),
                     width,
                 );
-                clipped_line_in(ui, egui::RichText::new(file_date(member.mtime_ms)).weak(), width);
+                clipped_line_in(
+                    ui,
+                    egui::RichText::new(file_date(member.mtime_seconds)).weak(),
+                    width,
+                );
                 clipped_line_in(ui, egui::RichText::new(&member.rel_path).weak(), width);
             });
         });
@@ -5052,7 +5056,7 @@ mod tests {
             format: "jpeg".to_string(),
             channels: 3,
             size_bytes: size,
-            mtime_ms: 1_700_000_000_000,
+            mtime_seconds: 1_700_000_000,
             auto_keep: false,
         }
     }
@@ -5062,21 +5066,21 @@ mod tests {
     #[test]
     fn a_file_stamp_becomes_the_date_and_time_it_stands_for() {
         assert_eq!(file_date(0), "1970-01-01 00:00");
-        assert_eq!(file_date(1_000), "1970-01-01 00:00");
-        assert_eq!(file_date(86_399 * 1_000), "1970-01-01 23:59");
-        assert_eq!(file_date(86_400 * 1_000), "1970-01-02 00:00");
+        assert_eq!(file_date(1), "1970-01-01 00:00");
+        assert_eq!(file_date(86_399), "1970-01-01 23:59");
+        assert_eq!(file_date(86_400), "1970-01-02 00:00");
 
         // 2024-02-29, a leap day in a year that is a multiple of four.
-        assert_eq!(file_date(1_709_164_800 * 1_000), "2024-02-29 00:00");
+        assert_eq!(file_date(1_709_164_800), "2024-02-29 00:00");
         // 2000-02-29: a multiple of a hundred that is still a leap year.
-        assert_eq!(file_date(951_782_400 * 1_000), "2000-02-29 00:00");
+        assert_eq!(file_date(951_782_400), "2000-02-29 00:00");
         // 1900 was not one, being a multiple of a hundred but not four hundred,
         // so the day after the 28th of February is the first of March.
-        assert_eq!(file_date(-2_203_977_600 * 1_000), "1900-02-28 00:00");
-        assert_eq!(file_date(-2_203_891_200 * 1_000), "1900-03-01 00:00");
+        assert_eq!(file_date(-2_203_977_600), "1900-02-28 00:00");
+        assert_eq!(file_date(-2_203_891_200), "1900-03-01 00:00");
 
-        assert_eq!(file_date(1_700_000_000 * 1_000), "2023-11-14 22:13");
-        assert_eq!(file_date(2_000_000_000 * 1_000), "2033-05-18 03:33");
+        assert_eq!(file_date(1_700_000_000), "2023-11-14 22:13");
+        assert_eq!(file_date(2_000_000_000), "2033-05-18 03:33");
     }
 
     /// The space bar keeps whatever the preview is showing, in whichever set it

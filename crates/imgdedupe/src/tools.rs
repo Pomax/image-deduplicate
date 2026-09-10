@@ -261,7 +261,7 @@ mod tests {
             format: "jpeg".to_string(),
             channels: 3,
             size_bytes: size,
-            mtime_ms: 1,
+            mtime_seconds: 1,
             auto_keep,
         }
     }
@@ -341,7 +341,7 @@ mod tests {
         imgdedupe_core::db::Record {
             rel_path: rel_path.to_string(),
             size_bytes: 1,
-            mtime_ms: 1,
+            mtime_seconds: 1,
             width: 10,
             height: 10,
             format: imgdedupe_core::format::Format::Jpeg,
