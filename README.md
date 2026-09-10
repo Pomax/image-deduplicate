@@ -1,4 +1,4 @@
-# imgdedupe v0.4.0
+# imgdedupe v0.5.0
 
 A cross-platform desktop program that indexes a folder of images, finds duplicates in it, and removes the ones you don't keep. Written in Rust with egui. Builds to one executable, with no installer and no runtime dependencies.
 
