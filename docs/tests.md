@@ -1879,6 +1879,10 @@ folder reads it again. Both are answered by the one thing that owns the index, s
 the opening read can come back after the pass has finished, holding the folder as
 it was before it. The pass's pictures stay, and the search still finds the copies.
 
+### the_duplicates_bar_is_full_for_a_review_that_came_back_from_the_index
+
+A folder searched in one run and opened again in another with nothing added to it. The review comes back out of the index without a search running, and the bar that measures finding duplicates reads full. The work happened, in an earlier session, and this open confirmed there is nothing new to do it to. A folder that did change puts the question up instead, and that path leaves the bar alone.
+
 ### the_checkbox_follows_the_folder_that_is_opened
 
 Opening a different folder resets the checkbox and the subfolder setting.

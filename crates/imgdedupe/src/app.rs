@@ -3396,7 +3396,12 @@ impl App {
         // A saved review is what the folder was left in the middle of; without
         // one, the folder was opened to be searched.
         if saved {
-            self.open_the_stored_review();
+            // The search these sets came out of ran in an earlier session, and
+            // this open has just found there is nothing new to run one on. An
+            // empty bar would say that work never happened.
+            if self.open_the_stored_review() {
+                self.search.done = true;
+            }
         } else {
             self.load_sets();
         }
@@ -10022,6 +10027,26 @@ mod tests {
             }
         }
         panic!("the folder was never decided about");
+    }
+
+    /// A folder searched in an earlier run and opened again with nothing added
+    /// to it. The review comes back out of the index without a search running,
+    /// and the bar that measures finding duplicates is full: that work was done,
+    /// in the past, and this open confirmed there is nothing new to do it to.
+    #[test]
+    fn the_duplicates_bar_is_full_for_a_review_that_came_back_from_the_index() {
+        let found = folder_with_a_duplicate();
+        let first = reviewing(found.path());
+        assert!(!first.sets.is_empty(), "the first run found nothing to leave behind");
+        closed(&first);
+
+        let mut app = App::from_settings(crate::settings::Settings::default());
+        app.open_folder(found.path().to_path_buf());
+        settle_the_question(&mut app);
+
+        assert!(app.question.is_none(), "the folder was asked about, so files had moved");
+        assert!(!app.sets.is_empty(), "the saved review did not come back");
+        assert!(app.search.done, "the duplicates bar was emptied for work already done");
     }
 
     /// The checkbox belongs to the folder that is open. Opening a different

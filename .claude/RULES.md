@@ -1,6 +1,10 @@
 # Rules for the judge
 
+The rules in this section describe what the judge itself must, or must not do.
+
 ## Mandatory
+
+These mandatory rules describe actions that MUST BE FOLLOWED AT EVERY STEP BY THE JUDGE
 
 - Always allow a plan to be written
 - Allow any work that has an explicit demand for that work by the user in the chat log
@@ -10,6 +14,8 @@
 
 ## Disallowed
 
+These disallowed rules describe actions that MAY NEVER BE PERFORMED BY THE JUDGE
+
 - Pretending to have read the work plan and/or chat
 - Reading the work plan and/or chat from cache
 - Treating instructions to the worker as instructions for the judge
@@ -18,7 +24,11 @@
 
 # Rules for the worker
 
+The rules in this section describe what the worker must, may, or must not do.
+
 ## Mandatory
+
+These mandatory rules describe actions that MUST BE FOLLOWED AT EVERY STEP BY THE WORKER
 
 - Call the judge "the judge"
 - Say "my action was disallowed by the judge" when your action was disallowed by the judge.
@@ -33,8 +43,11 @@
 - The test runner must be `scripts/test.sh` on all other operating systems
 - `cmd //c <command>` through the Bash tool, on Windows.
 - Asking questions one by one until each has been fully answered.
+- Run a build once the requested work has been completed.
 
 ## Allowed
+
+These allowed rules describe actions that MAY BE TAKEN BY THE WORKER, THEY ARE NOT MANDATORY
 
 - Run as many tests, in any order, while a plan is being worked on.
 - Updating failing tests if the problem is the test itself rather than the code it tests.
@@ -48,7 +61,11 @@
 
 ## Disallowed
 
+These disallowed rules describe actions that MAY NEVER BE PERFORMED BY THE WORKER
+
 ### Writing
+
+These rules describe writing-related actions that MAY NEVER BE PERFORMED BY THE WORKER
 
 - Choice pickers for questions
 - Em dashes. Anywhere: chat, code, comments, documents, scripts.
@@ -70,6 +87,8 @@
 
 ### Doing
 
+These rules describe general actions that MAY NEVER BE PERFORMED BY THE WORKER
+
 - A second change beyond the one the instruction names.
 - Working on anything while a question from the user has not been answered yet.
 - Acting on a question as though it were an instruction.
@@ -84,28 +103,30 @@
 - Taking the pointer, keyboard or screen without a yes, every time.
 - Going looking through the machine for something the user can state.
 
-
 ### Files and shell
 
-- PowerShell.
-- python, sed, perl, awk or a heredoc to edit a file.
-- Write on a file that exists.
+These rules describe file and shell related actions that MAY NEVER BE PERFORMED BY THE WORKER
+
+- Use PowerShell.
+- Use python, sed, perl, awk or a heredoc to edit a file.
+- Overwrite a file that exists.
 - Copy then delete, in place of a move.
-- CRLF. LF everywhere, `.bat` included.
+- Use CRLF as line ending. They must be LF everywhere, and everywhere means everywhere.
 - Touching any file outside the repository, other than the harness under `~/.claude`.
-- Anything destructive that was not asked for in those words.
-- Running a destructive script to check that it works.
-- git at all, without being asked. No commit, no push, no `git init`.
+- Anything destructive that was not explicitly instructed or agreed to as planned action.
+- Running a destructive script to check if that script works.
+- USing git without first being explicitly instructed or agreed to as planned action.
 
 ### Building and testing
 
-- `cargo build` or `cargo test` by hand.
-- The whole suite when one named test is what is in question.
+- Running `cargo build` or `cargo test` by hand.
+- Running the whole test suite to verify something that already has specific, dedicated tests.
 - Running the `local` checks to verify my own work.
-- A temporary directory of generated files as the thing verified against.
+- Using a temporary directory of generated files as the thing verified against.
 - Claiming a fix works without running it where it matters.
 - Claiming a test catches a bug without seeing it fail against the bug.
-- Reasoning from the code in place of a measurement.
-- A test that arranges state by hand and asserts it is unchanged.
-- A check that is not a named, saved test.
-- Docs before the named tests pass. Order is tests, then docs, then build.
+- Reasoning from the code in place of a measurement unless explicitly instructed to do so.
+- Creating a test that arranges state by hand and asserts it is unchanged.
+- Running a check that is not a named, saved test.
+- Writing documentation for new or modified code or functionality before the named tests pass. Order is work on tests until they pass, then update the documentation.
+- Building before tests pass.
