@@ -1,5 +1,9 @@
 # Release log
 
+## 0.5.0 (2026-09-09)
+
+- Fixed the preview metadata scrollbar refusing to actually scroll to the bottom
+
 ## 0.4.0 (2026-09-08)
 
 This version fundamentally changes how review works, as a session-based, "you make the decisions but there are helpers to let you perform broad actions" review system
