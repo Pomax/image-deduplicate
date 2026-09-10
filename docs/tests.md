@@ -2082,6 +2082,10 @@ Everywhere but macOS. Reads the pixels: the corners are clear, nothing is behind
 the two pictures, the picture in front holds its sky, its sun and its hill, and
 what shows of the one behind is an outline.
 
+### the_picture_in_front_is_centred_and_the_one_behind_steps_off_it
+
+Everywhere but macOS. Reads where each colour reaches: the picture in front is the same distance from the top as from the bottom and the same from the left as from the right, and the one behind reaches further down and further right than it does without running off the canvas. An icon lined up on the two of them together sits the picture in front up and to the left of the middle, which is what a taskbar button shows.
+
 ### the_picture_in_front_is_the_size_the_dock_draws_and_the_other_overhangs
 
 macOS only. Finds how far each colour reaches, row by row and column by column.

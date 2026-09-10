@@ -1,9 +1,11 @@
 //! The window's icon, drawn rather than stored.
 //!
 //! A picture with a second one behind it, a step down and to the right: two of
-//! a thing, which is what the program is about. It fills the icon corner to
-//! corner and stands on nothing, because a title bar draws it sixteen points
-//! across and anything that is a mark inside a card is a card at that size.
+//! a thing, which is what the program is about. The one in front is centred on
+//! the icon and the one behind steps out of it, into the room that centring
+//! leaves. They stand on nothing, because a title bar draws the icon sixteen
+//! points across and anything that is a mark inside a card is a card at that
+//! size.
 //!
 //! macOS is the other way round. The dock draws every icon as a card of its own,
 //! a rounded square inset in its canvas with the mark inside it, and one that
@@ -53,7 +55,7 @@ const FRAME: f32 = 50.0;
 const FRAME_ROUND: f32 = FRAME * 185.4 / 824.0;
 #[cfg(not(target_os = "macos"))]
 const FRAME_ROUND: f32 = 6.3;
-const FRONT_AT: (f32, f32) = (2.0, 2.0);
+const FRONT_AT: (f32, f32) = (7.0, 7.0);
 /// How far the one behind steps out from the one in front.
 ///
 /// On macOS that step is the overhang: the picture in front is the size the dock
@@ -63,7 +65,7 @@ const FRONT_AT: (f32, f32) = (2.0, 2.0);
 #[cfg(target_os = "macos")]
 const STEP: f32 = OVERHANG / SCALE;
 #[cfg(not(target_os = "macos"))]
-const STEP: f32 = 8.0;
+const STEP: f32 = 6.0;
 const OUTLINE: f32 = 4.0;
 
 /// The box the dock draws an icon in, in the proportions macOS uses: of a canvas
@@ -86,10 +88,10 @@ const FRONT_ON_CANVAS: f32 = (EDGE - CARD) / 2.0;
 const OVERHANG: f32 = FRONT_ON_CANVAS * 0.86;
 
 /// The sun in the picture in front, and where the hills in it stand.
-const SUN_AT: (f32, f32) = (17.0, 17.0);
+const SUN_AT: (f32, f32) = (22.0, 22.0);
 const SUN: f32 = 5.9;
 const HILLS: [(f32, f32); 5] =
-    [(5.5, 43.1), (19.9, 27.0), (29.7, 36.8), (37.8, 29.7), (48.4, 43.1)];
+    [(10.5, 48.1), (24.9, 32.0), (34.7, 41.8), (42.8, 34.7), (53.4, 48.1)];
 
 /// The icon at `EDGE` points a side, as the rows of pixels a window wants.
 pub fn window_icon() -> egui::IconData {
@@ -250,13 +252,58 @@ mod tests {
         assert_eq!(at(&icon, 0, 0)[3], 0, "the corner of the icon is not clear");
         assert_eq!(at(&icon, 62, 6)[3], 0, "there is something behind the pictures");
         // The picture in front: its sky, its sun, and its hills.
-        assert_eq!(at(&icon, 8, 8), solid(PICTURE), "the front picture has no sky");
-        assert_eq!(at(&icon, 17, 17), solid(INSIDE), "the sun is not in the picture");
-        assert_eq!(at(&icon, 20, 35), solid(INSIDE), "the hills are not in the picture");
+        assert_eq!(at(&icon, 12, 12), solid(PICTURE), "the front picture has no sky");
+        assert_eq!(at(&icon, 22, 22), solid(INSIDE), "the sun is not in the picture");
+        assert_eq!(at(&icon, 25, 40), solid(INSIDE), "the hills are not in the picture");
         // The one behind: its edge, and nothing at all inside what that edge
         // encloses, because the picture in front is standing in it.
-        assert_eq!(at(&icon, 58, 50), solid(BEHIND), "the one behind has no edge");
-        assert_eq!(at(&icon, 54, 20)[3], 0, "the one behind is not an outline");
+        assert_eq!(at(&icon, 60, 50), solid(BEHIND), "the one behind has no edge");
+        assert_eq!(at(&icon, 58, 20)[3], 0, "the one behind is not an outline");
+    }
+
+    /// The first and last row, and the first and last column, holding a colour.
+    #[cfg(not(target_os = "macos"))]
+    fn bounds(icon: &egui::IconData, wanted: [u8; 3]) -> (u32, u32, u32, u32) {
+        let (mut top, mut bottom, mut left, mut right) = (u32::MAX, 0, u32::MAX, 0);
+        for y in 0..icon.height {
+            for x in 0..icon.width {
+                if at(icon, x, y) == solid(wanted) {
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                    left = left.min(x);
+                    right = right.max(x);
+                }
+            }
+        }
+        assert!(top != u32::MAX, "the icon holds none of that colour");
+        (top, bottom, left, right)
+    }
+
+    /// The picture in front is what the icon lines up on: centred on the canvas,
+    /// with the one behind stepping out below it and to the right. Lining up on
+    /// the two of them together puts the picture in front up and to the left of
+    /// the middle, which is what a taskbar button shows.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_picture_in_front_is_centred_and_the_one_behind_steps_off_it() {
+        let icon = window_icon();
+        let (top, bottom, left, right) = bounds(&icon, PICTURE);
+        let under = SIDE - 1 - bottom;
+        let beside = SIDE - 1 - right;
+        assert!(
+            top.abs_diff(under) <= 1,
+            "the picture in front is {top} from the top and {under} from the bottom"
+        );
+        assert!(
+            left.abs_diff(beside) <= 1,
+            "the picture in front is {left} from the left and {beside} from the right"
+        );
+
+        let (_, behind_bottom, _, behind_right) = bounds(&icon, BEHIND);
+        assert!(behind_bottom > bottom, "the one behind does not step below the picture");
+        assert!(behind_right > right, "the one behind does not step right of the picture");
+        assert!(behind_bottom < SIDE - 1, "the one behind runs off the bottom of the canvas");
+        assert!(behind_right < SIDE - 1, "the one behind runs off the side of the canvas");
     }
 
     /// On macOS the mark stands on a card the shape and size the dock draws
