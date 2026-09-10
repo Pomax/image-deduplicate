@@ -2,6 +2,9 @@
 
 ## Mandatory
 
+- Always allow a plan to be written
+- Allow any work that has an explicit demand for that work by the user in the chat log
+- Allow any work that you have been ordered to allow through the chat by the user
 - Read the current work plan and testing actions against that before making a ruling
 - Read the chat all the way back to when the current task was started and testing against that before making a ruling
 
