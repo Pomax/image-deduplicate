@@ -1,5 +1,9 @@
 # Release log
 
+## 0.6.0 (2026-09-10)
+
+- Fixed a MacOS issue around loading indexes for network locations, where it would seemingly just lock up.
+
 ## 0.5.0 (2026-09-09)
 
 - Fixed the preview metadata scrollbar refusing to actually scroll to the bottom
@@ -11,7 +15,7 @@ This version fundamentally changes how review works, as a session-based, "you ma
 - Reviews are now sessions, stored in your index (if you use one of course) so you can simply close the app mid-review and resume at a later date
 - Folder rescanning was drastically improved. IF you have a stored session but there are folder differences, you will be given the choice to resume your old session, or update your index and start a new session
 - Images can be marked/unmarked via space/double click, "only pick this image" is set to shift+space/shift+doubleclick
-- Review has three convenience buttons to either unmark everything, mark everything, or automatically mark each set with a single image that the code thinks is the most probable image worth keeping. 
+- Review has three convenience buttons to either unmark everything, mark everything, or automatically mark each set with a single image that the code thinks is the most probable image worth keeping.
 - You can now cancel scans with the "esc" key
 - Working with network folders is way faster now.
 - The app tries to use as much ram as your machine will let it, because that's what you bought that ram for. The whole point of RAM is to speed up otherwise-disk-based operations
@@ -33,7 +37,7 @@ The window title now includes the version number so you know what you're running
 
 ## 0.1.0 (2026-09-03)
 
-Initial version. 
+Initial version.
 
 The app has three parts: a scan, a review, and a clean up. The scan parses folder content and (optionally) stores that in an index file (a sqlite database) so that you don't have to reparse an entire folder or tree with thousands of files every time you open the app.
 
