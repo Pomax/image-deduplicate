@@ -407,16 +407,19 @@ fn arrow(painter: &egui::Painter, button: egui::Rect, towards: f32, down: bool, 
 /// the toolkit's: a strip taken out of the space, a button at each end of it, and
 /// a handle between them.
 ///
-/// `step` is how far one click of an end button moves. Gives back what was shown,
-/// how far along it is, and how much of it is on screen.
+/// `step` is how far one click of an end button moves. `wheel_over` is a
+/// rectangle a wheel turned anywhere inside counts as a turn on this list, for a
+/// list that is one part of a larger pane. Gives back what was shown, how far
+/// along it is, how much of it is on screen, and how much of it there is.
 fn scrolled<R>(
     ui: &mut egui::Ui,
     id: egui::Id,
     down: bool,
     step: f32,
+    wheel_over: Option<egui::Rect>,
     area: egui::ScrollArea,
     show: impl FnOnce(egui::ScrollArea, &mut egui::Ui) -> egui::scroll_area::ScrollAreaOutput<R>,
-) -> (R, f32, f32) {
+) -> (R, f32, f32, f32) {
     let room = ui.available_rect_before_wrap();
     let (content_rect, strip) = if down {
         (
@@ -492,11 +495,25 @@ fn scrolled<R>(
     let content = output.content_size[axis];
     let viewport = output.inner_rect.size()[axis];
     let offset = output.state.offset[axis];
-    if let Some(wanted) = paint_scroll_bar(ui, strip, down, step, content, viewport, offset) {
+    // The bar first, so a drag on it beats a wheel turned at the same time.
+    let wanted = paint_scroll_bar(ui, strip, down, step, content, viewport, offset).or_else(|| {
+        let pane = wheel_over?;
+        let (wheel, pointer) =
+            ui.input(|input| (input.smooth_scroll_delta, input.pointer.latest_pos()));
+        let at = pointer?;
+        // Over the list itself the toolkit has already applied the wheel, and
+        // applying it again here is one turn counted twice.
+        if wheel[axis] == 0.0 || !pane.contains(at) || output.inner_rect.contains(at) {
+            return None;
+        }
+        let moved = (offset - wheel[axis]).clamp(0.0, (content - viewport).max(0.0));
+        (moved != offset).then_some(moved)
+    });
+    if let Some(wanted) = wanted {
         ui.data_mut(|data| data.insert_temp(id, wanted));
         ui.ctx().request_repaint();
     }
-    (output.inner, offset, viewport)
+    (output.inner, offset, viewport, content)
 }
 
 /// Draw the bar for one scrolling area, and say where a click or a drag on it
@@ -1839,6 +1856,7 @@ impl App {
             egui::Id::new("scan lamps"),
             true,
             step,
+            None,
             egui::ScrollArea::vertical().auto_shrink([false, false]),
             |area, ui| area.show(ui, |ui| self.lamps(ui)),
         );
@@ -2660,6 +2678,7 @@ impl App {
                         egui::Id::new("scan failures"),
                         true,
                         line,
+                        None,
                         egui::ScrollArea::vertical().max_height(160.0),
                         |area, ui| {
                             area.show(ui, |ui| {
@@ -3054,7 +3073,7 @@ impl App {
         // known: inside a scroll area nothing is told where the area ends.
         let row_width = (room.width() - SCROLL_BAR - PAGE_MARGIN).max(0.0);
 
-        let (_, offset, viewport) = ui
+        let (_, offset, viewport, _) = ui
             .allocate_new_ui(egui::UiBuilder::new().max_rect(room), |ui| {
                 let list_id = egui::Id::new("review list");
                 scrolled(
@@ -3062,6 +3081,7 @@ impl App {
                     list_id,
                     true,
                     row_height + spacing,
+                    None,
                     list,
                     |list, ui| {
                         // The gap above the first set, taken here rather than
@@ -3976,13 +3996,12 @@ impl App {
         // turned over the picture is a scroll wheel turned over this pane, and
         // the list is the only thing in it that can move.
         let where_it_is = ui.max_rect();
-        let (scroll_wheel, pointer) =
-            ui.input(|input| (input.smooth_scroll_delta, input.pointer.latest_pos()));
-        let (_, offset, viewport) = scrolled(
+        scrolled(
             ui,
             bar,
             true,
             line * 3.0,
+            Some(where_it_is),
             egui::ScrollArea::vertical()
                 .id_salt(("metadata", member.file_id))
                 .max_height(room)
@@ -4038,18 +4057,6 @@ impl App {
             },
         );
 
-        // The scroll wheel, applied here rather than left to the toolkit. Inside
-        // a panel it does not reach this list on its own, and a list nothing can
-        // scroll is a list nobody can read past the first dozen lines of.
-        let over = pointer.is_some_and(|at| where_it_is.contains(at));
-        if over && scroll_wheel.y != 0.0 {
-            let content = lines.len() as f32 * line;
-            let wanted = (offset - scroll_wheel.y).clamp(0.0, (content - viewport).max(0.0));
-            if wanted != offset {
-                ui.data_mut(|data| data.insert_temp(bar, wanted));
-                ui.ctx().request_repaint();
-            }
-        }
     }
 
     /// The picture, filling the window, over everything else.
@@ -4179,7 +4186,7 @@ impl App {
                 // moves by, and the first tile's is as good a step as any.
                 let step = members.first().map_or(TILE.x, tile_width);
                 let bar = egui::Id::new(("set bar", set_id));
-                let (_, offset, viewport) = ui
+                let (_, offset, viewport, _) = ui
                     .allocate_new_ui(egui::UiBuilder::new().max_rect(strip), |ui| {
                         // A set nobody calls a set of copies is barely there:
                         // everything above the buttons, the pictures and every
@@ -4194,6 +4201,7 @@ impl App {
                             bar,
                             false,
                             step,
+                            None,
                             egui::ScrollArea::horizontal().id_salt(("set", set_id)),
                             |area, ui| {
                                 // The pictures keep the box's padding on either
@@ -4681,6 +4689,7 @@ impl App {
                 egui::Id::new("cleanup list"),
                 true,
                 line,
+                None,
                 egui::ScrollArea::vertical().auto_shrink([false, false]),
                 |area, ui| {
                     area.show_rows(ui, line, plan.removals.len(), |ui, range| {
@@ -6118,6 +6127,7 @@ mod tests {
                         egui::Id::new("a list"),
                         true,
                         20.0,
+                        None,
                         egui::ScrollArea::vertical().auto_shrink([false, false]),
                         |area, ui| {
                             area.show(ui, |ui| {
@@ -6138,6 +6148,96 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// How far one turn of the wheel asks for, in the checks below.
+    const WHEEL_TURN: f32 = 40.0;
+
+    /// A point in the strip above the list, and a point in the list itself.
+    const BESIDE_THE_LIST: egui::Pos2 = egui::pos2(200.0, 40.0);
+    const ON_THE_LIST: egui::Pos2 = egui::pos2(150.0, 250.0);
+
+    /// A list with a strip above it standing in for the picture, the two of them
+    /// making up a pane, with the wheel counted over the whole pane.
+    ///
+    /// `turns` wheel events arrive with the pointer at `at`, and then the frames
+    /// run on without any until the list settles, because a turn arrives spread
+    /// over the frames that follow it. Gives back where the list ended up, how
+    /// much there is of it and how much of it shows.
+    fn wheeled(at: egui::Pos2, turns: usize) -> (f32, f32, f32) {
+        let ctx = window();
+        install_style(&ctx);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let mut out = (0.0, 0.0, 0.0);
+        let mut clock = 0.0;
+        for frame in 0..turns + 40 {
+            clock += 0.1;
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(clock),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(at));
+            if frame < turns {
+                input.events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -WHEEL_TURN),
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            crate::shot::frame("a_wheel_over_a_list", &ctx, input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let pane = ui.max_rect();
+                    ui.allocate_space(egui::vec2(ui.available_width(), 100.0));
+                    let (_, offset, viewport, content) = scrolled(
+                        ui,
+                        egui::Id::new("a wheeled list"),
+                        true,
+                        WHEEL_TURN,
+                        Some(pane),
+                        egui::ScrollArea::vertical().auto_shrink([false, false]),
+                        |area, ui| {
+                            area.show_rows(ui, 20.0, 200, |ui, rows| {
+                                for row in rows {
+                                    ui.label(format!("row {row}"));
+                                }
+                            })
+                        },
+                    );
+                    out = (offset, content, viewport);
+                });
+            });
+        }
+        out
+    }
+
+    /// The wheel over the list is the toolkit's to apply, and applying it a
+    /// second time by hand is what made the list jump.
+    #[test]
+    fn a_wheel_over_the_list_moves_it_once() {
+        let (offset, _, _) = wheeled(ON_THE_LIST, 1);
+        assert!(
+            (offset - WHEEL_TURN).abs() < 1.0,
+            "one turn of the wheel moved the list {offset} rather than {WHEEL_TURN}"
+        );
+    }
+
+    /// Turning the wheel until it stops moving arrives at the end of the list,
+    /// rather than somewhere short of it. From beside the list, which is the
+    /// side this works out for itself rather than leaving to the toolkit.
+    #[test]
+    fn the_wheel_reaches_the_bottom_of_the_list() {
+        let (offset, content, viewport) = wheeled(BESIDE_THE_LIST, 200);
+        let furthest = content - viewport;
+        assert!((offset - furthest).abs() < 1.0, "the wheel stopped at {offset} of {furthest}");
+    }
+
+    /// The list is one part of a pane, and a wheel turned over the rest of that
+    /// pane is a wheel turned on the only thing in it that moves.
+    #[test]
+    fn a_wheel_beside_the_list_still_scrolls_it() {
+        let (offset, _, _) = wheeled(BESIDE_THE_LIST, 1);
+        assert!(offset > 0.0, "the list did not move for a wheel beside it");
     }
 
     /// The review view as it is really built, panels and all, rather than a bare

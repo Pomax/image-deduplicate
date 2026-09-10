@@ -1389,6 +1389,18 @@ A narrow list still has its scroll bar.
 
 The handle is drawn at the right edge of the list at its full width.
 
+### a_wheel_over_the_list_moves_it_once
+
+A list inside a pane, with a strip above it standing in for the picture. One turn of the wheel with the pointer over the list moves it by that one turn. The toolkit scrolls a list the pointer is over, so a second turn applied by hand is the same turn counted twice, which is what made the panel in issue 24 spring back.
+
+### a_wheel_beside_the_list_still_scrolls_it
+
+The same pane, with the pointer in the strip above the list rather than on it. The list moves: it is the only thing in the pane that can, and the toolkit does not scroll it from there.
+
+### the_wheel_reaches_the_bottom_of_the_list
+
+Wheel turns from beside the list until it stops moving. It ends at the content less the viewport, both as the list measured them. Against a ceiling worked out from a guessed content height rather than the measured one, it stops short by the difference.
+
 ### a_set_removes_everything_but_the_marked_file
 
 On a real result, the plan is every picture in the set except the marked one, and
