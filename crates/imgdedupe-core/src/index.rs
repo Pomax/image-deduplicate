@@ -724,7 +724,7 @@ mod tests {
         Record {
             rel_path: rel_path.to_string(),
             size_bytes,
-            mtime_ms: 1,
+            mtime_seconds: 1,
             width: 10,
             height: 10,
             format: crate::format::Format::Jpeg,
@@ -839,10 +839,10 @@ mod tests {
         assert_eq!(corners, 1, "the file was not left in the shape this build reads");
 
         // And the other thing an index that old needs: the stamp carried into
-        // milliseconds and the nanosecond column gone.
+        // whole seconds and the nanosecond column gone.
         let known = db::load_known(&conn).expect("read the file back");
         assert_eq!(
-            known["a.jpg"].mtime_ms, 1_700_000_000_123,
+            known["a.jpg"].mtime_seconds, 1_700_000_000,
             "the stamp was not carried across"
         );
         let nanos: i64 = conn

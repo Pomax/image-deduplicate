@@ -58,7 +58,7 @@ fn build(path: &std::path::Path, files: usize) -> Connection {
         let record = Record {
             rel_path: format!("folder{}/picture{index}.jpeg", index % 50),
             size_bytes: 4_000_000 + index as i64,
-            mtime_ms: 1,
+            mtime_seconds: 1,
             width: 3000,
             height: 4000,
             format: Format::Jpeg,
@@ -169,7 +169,7 @@ fn time_corners(path: &std::path::Path, pictures: usize) -> f64 {
         let record = Record {
             rel_path: format!("picture{index}.jpeg"),
             size_bytes: 4_000_000 + index as i64,
-            mtime_ms: 1,
+            mtime_seconds: 1,
             width: 3000,
             height: 4000,
             format: Format::Jpeg,
@@ -216,7 +216,7 @@ fn time_copies(path: &std::path::Path, copies: usize) -> f64 {
         let record = Record {
             rel_path: format!("copy{index}.jpeg"),
             size_bytes: 4_000_000,
-            mtime_ms: 1,
+            mtime_seconds: 1,
             width: 3000,
             height: 4000,
             format: Format::Jpeg,

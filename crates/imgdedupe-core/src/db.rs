@@ -23,8 +23,11 @@ pub const INDEX_FILENAME: &str = "imgdedupe.sqlite";
 /// removes. Which folder it is about is the folder the file sits in, so that is
 /// not written down anywhere.
 ///
-/// `files.mtime_ms` is milliseconds since the epoch; `files.last_scanned_at` is
-/// seconds.
+/// `files.mtime_seconds` and `files.last_scanned_at` are both whole seconds
+/// since the epoch. Whole seconds because that is the finest a network mount
+/// reports the same way on every platform: Windows hands back the file system's
+/// own sub-second ticks and macOS hands back none, so anything finer makes an
+/// index written on one machine read as changed on the other.
 ///
 /// `fingerprints.corners` holds the picture's corners and what each one looks
 /// like, and is empty for a picture with nothing corner-shaped in it: a flat
@@ -58,7 +61,7 @@ CREATE TABLE IF NOT EXISTS files (
     id              INTEGER PRIMARY KEY,
     rel_path        TEXT    NOT NULL UNIQUE,
     size_bytes      INTEGER NOT NULL,
-    mtime_ms        INTEGER NOT NULL,
+    mtime_seconds   INTEGER NOT NULL,
     last_scanned_at INTEGER NOT NULL,
     not_a_picture   INTEGER NOT NULL DEFAULT 0
 );
@@ -88,7 +91,7 @@ CREATE TABLE IF NOT EXISTS ignore (
 DROP TABLE IF EXISTS phash_bands;
 
 CREATE VIEW IF NOT EXISTS indexed_images AS
-SELECT f.id, f.rel_path, f.size_bytes, f.mtime_ms,
+SELECT f.id, f.rel_path, f.size_bytes, f.mtime_seconds,
        i.width, i.height, i.format, i.channels,
        p.dct_hashes, p.ring_stats, p.corners
 FROM files f
@@ -96,53 +99,89 @@ JOIN images i       ON i.file_id = f.id
 JOIN fingerprints p ON p.file_id = f.id;
 ";
 
-/// Open a folder's index: bring the file to the current shape, then read it in.
+/// Open a folder's index: read it in, bring the copy to the current shape, and
+/// put it back only if that changed anything.
 ///
 /// Only the manager calls this, and nothing else opens the index.
+///
+/// The copy is what is migrated, not the file. Every statement against a
+/// database on another machine is a round trip, and `DROP COLUMN` has SQLite
+/// rewrite the whole table, which on a hundred-megabyte index across a mount is
+/// a quarter of a minute. In memory those statements are free, and what crosses
+/// the network is one sequential read and, when there was something to change,
+/// one finished file written once. Nothing can be handed a connection in an
+/// older shape either way: the copy is brought up to date before it is returned.
 pub fn open_and_migrate(path: &Path) -> Result<Connection> {
-    // The file is brought to the current shape first, on disk, so no reader can
-    // be handed a connection to an index that is still in an older one.
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
-    migrate_the_file(path)?;
-    crate::log_line!("    migrate the file: {:.2}s", at.elapsed().as_secs_f64());
-
-    // Then read in one go. Every statement against a database on another machine
-    // is a round trip; in memory they are free, and what reaches the network is
-    // one sequential read of a file that is a few megabytes.
-    #[cfg(feature = "logging")]
-    let at = std::time::Instant::now();
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("reading the index at {}", path.display()))?;
+    // A folder with no index yet starts from an empty database, which the
+    // migration then gives the current shape and which is written out below.
+    let bytes = std::fs::read(path).unwrap_or_default();
     crate::log_line!("    read {} bytes of index: {:.2}s", bytes.len(), at.elapsed().as_secs_f64());
+
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
-    let conn = into_memory(bytes, path)?;
+    let conn = if bytes.is_empty() {
+        Connection::open_in_memory().context("opening an index in memory")?
+    } else {
+        into_memory(bytes, path)?
+    };
     conn.pragma_update(None, "foreign_keys", "ON")?;
     crate::log_line!("    hand it to sqlite: {:.2}s", at.elapsed().as_secs_f64());
+
+    #[cfg(feature = "logging")]
+    let at = std::time::Instant::now();
+    let changed = migrate_the_copy(&conn)?;
+    crate::log_line!("    migrate the copy: {:.2}s", at.elapsed().as_secs_f64());
+
+    if changed {
+        #[cfg(feature = "logging")]
+        let at = std::time::Instant::now();
+        put_the_index_back(&conn, path)?;
+        crate::log_line!("    write it back: {:.2}s", at.elapsed().as_secs_f64());
+    }
     Ok(conn)
 }
 
-/// Bring the file itself to the current shape: the schema, the columns an older
-/// build lacks, and the version it is written under.
+/// Write the whole index over the folder's file, in one copy.
+///
+/// Written out by SQLite to this machine's own disk first. Done straight onto
+/// the folder's file it would be the whole index across the network in page-sized
+/// writes with a journal beside it.
+fn put_the_index_back(conn: &Connection, path: &Path) -> Result<()> {
+    static MIGRATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let local = std::env::temp_dir().join(format!(
+        "imgdedupe-migrating-{}-{}.sqlite",
+        std::process::id(),
+        MIGRATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&local);
+    conn.execute("VACUUM INTO ?1", [local.to_string_lossy().as_ref()])
+        .with_context(|| format!("writing the migrated index to {}", local.display()))?;
+    // If this fails the folder still has the index it had.
+    let put_back = std::fs::copy(&local, path)
+        .with_context(|| format!("putting the migrated index back at {}", path.display()));
+    let _ = std::fs::remove_file(&local);
+    put_back?;
+    Ok(())
+}
+
+/// Bring the copy to the current shape: the schema, the columns an older build
+/// lacks, and the version it is written under. Says whether anything changed,
+/// which is what decides if the folder's file has to be written again.
 ///
 /// This happens before anything reads a row.
-fn migrate_the_file(path: &Path) -> Result<()> {
+fn migrate_the_copy(conn: &Connection) -> Result<bool> {
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
-    let conn = Connection::open(path)
-        .with_context(|| format!("opening the index at {}", path.display()))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    crate::log_line!("      open the file: {:.2}s", at.elapsed().as_secs_f64());
-    #[cfg(feature = "logging")]
-    let at = std::time::Instant::now();
+    let fresh = !has_table(conn, "files")?;
     conn.execute_batch(SCHEMA).context("applying the schema")?;
     crate::log_line!("      apply the schema: {:.2}s", at.elapsed().as_secs_f64());
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
-    add_new_columns(&conn)?;
-    carry_the_stamps_across(&conn)?;
-    drop_dead_columns(&conn)?;
+    let added = add_new_columns(conn)?;
+    let carried = carry_the_stamps_across(conn)?;
+    let dropped = drop_dead_columns(conn)?;
     crate::log_line!("      the columns: {:.2}s", at.elapsed().as_secs_f64());
 
     let existing: Option<i64> = conn
@@ -151,15 +190,27 @@ fn migrate_the_file(path: &Path) -> Result<()> {
         })
         .ok()
         .and_then(|value| value.parse().ok());
-    match existing {
+    let stamped = match existing {
         Some(version) if version != SCHEMA_VERSION => {
             anyhow::bail!("index was written by schema version {version}, this build speaks {SCHEMA_VERSION}");
         }
-        Some(_) => {}
-        None => set_meta(&conn, "schema_version", &SCHEMA_VERSION.to_string())?,
-    }
-    drop(conn);
-    Ok(())
+        Some(_) => false,
+        None => {
+            set_meta(conn, "schema_version", &SCHEMA_VERSION.to_string())?;
+            true
+        }
+    };
+    Ok(fresh || added || carried || dropped || stamped)
+}
+
+/// Whether the database has a table.
+fn has_table(conn: &Connection, table: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        params![table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 /// Where the index is written before it is moved onto itself.
@@ -167,9 +218,13 @@ fn migrate_the_file(path: &Path) -> Result<()> {
 ///
 /// A file already on disk keeps whatever columns it was made with, and the ones
 /// that are `NOT NULL` would refuse every insert that no longer names them.
-fn drop_dead_columns(conn: &Connection) -> Result<()> {
-    let dead =
-        [("files", "bytes_hash"), ("fingerprints", "dct_hash"), ("files", "mtime_ns")];
+fn drop_dead_columns(conn: &Connection) -> Result<bool> {
+    let dead = [
+        ("files", "bytes_hash"),
+        ("fingerprints", "dct_hash"),
+        ("files", "mtime_ns"),
+        ("files", "mtime_ms"),
+    ];
     let mut found = Vec::new();
     for (table, column) in dead {
         let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
@@ -182,7 +237,7 @@ fn drop_dead_columns(conn: &Connection) -> Result<()> {
         }
     }
     if found.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     // The view names them, and a column a view reads cannot be dropped.
     conn.execute_batch("DROP VIEW IF EXISTS indexed_images")?;
@@ -192,7 +247,7 @@ fn drop_dead_columns(conn: &Connection) -> Result<()> {
             .with_context(|| format!("dropping {table}.{column}"))?;
     }
     conn.execute_batch(SCHEMA).context("rebuilding the schema")?;
-    Ok(())
+    Ok(true)
 }
 
 /// Add the columns a newer build writes to an index made by an older one.
@@ -201,10 +256,10 @@ fn drop_dead_columns(conn: &Connection) -> Result<()> {
 /// was, so a file from an older build keeps the shape it was made with. The rows
 /// in it are re-fingerprinted anyway, because the fingerprint version moved, and
 /// they need somewhere to be written to.
-fn add_new_columns(conn: &Connection) -> Result<()> {
+fn add_new_columns(conn: &Connection) -> Result<bool> {
     let wanted = [
         ("fingerprints", "corners", "BLOB NOT NULL DEFAULT x''"),
-        ("files", "mtime_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("files", "mtime_seconds", "INTEGER NOT NULL DEFAULT 0"),
         ("files", "not_a_picture", "INTEGER NOT NULL DEFAULT 0"),
     ];
     let mut added = false;
@@ -217,23 +272,30 @@ fn add_new_columns(conn: &Connection) -> Result<()> {
         added = true;
     }
     if !added {
-        return Ok(());
+        return Ok(false);
     }
     // The view was made without them and would go on reading the old shape.
     conn.execute_batch("DROP VIEW IF EXISTS indexed_images")?;
     conn.execute_batch(SCHEMA).context("rebuilding the schema")?;
-    Ok(())
+    Ok(true)
 }
 
-/// Fill `files.mtime_ms` from the nanoseconds an older build wrote. Runs between
-/// the column being added and `mtime_ns` being dropped.
-fn carry_the_stamps_across(conn: &Connection) -> Result<()> {
-    if !has_column(conn, "files", "mtime_ns")? {
-        return Ok(());
+/// Fill `files.mtime_seconds` from the nanoseconds or milliseconds an older
+/// build wrote. Runs between the column being added and the old ones being
+/// dropped.
+fn carry_the_stamps_across(conn: &Connection) -> Result<bool> {
+    let mut carried = false;
+    if has_column(conn, "files", "mtime_ns")? {
+        conn.execute_batch("UPDATE files SET mtime_seconds = mtime_ns / 1000000000")
+            .context("carrying the modification times across from nanoseconds")?;
+        carried = true;
     }
-    conn.execute_batch("UPDATE files SET mtime_ms = mtime_ns / 1000000")
-        .context("carrying the modification times across")?;
-    Ok(())
+    if has_column(conn, "files", "mtime_ms")? {
+        conn.execute_batch("UPDATE files SET mtime_seconds = mtime_ms / 1000")
+            .context("carrying the modification times across from milliseconds")?;
+        carried = true;
+    }
+    Ok(carried)
 }
 
 /// Whether a table has a column.
@@ -310,7 +372,7 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 pub struct Known {
     pub id: i64,
     pub size_bytes: i64,
-    pub mtime_ms: i64,
+    pub mtime_seconds: i64,
     pub fingerprint_version: i64,
     /// The pass read this file and it is not a picture: not one of the formats,
     /// or animated, or it could not be read. There is nothing else in the index
@@ -322,7 +384,7 @@ pub struct Known {
 /// are missing reads as version -1 so it is always treated as stale.
 pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
     let mut statement = conn.prepare(
-        "SELECT f.rel_path, f.id, f.size_bytes, f.mtime_ms, COALESCE(p.fingerprint_version, -1),
+        "SELECT f.rel_path, f.id, f.size_bytes, f.mtime_seconds, COALESCE(p.fingerprint_version, -1),
                 f.not_a_picture
          FROM files f LEFT JOIN fingerprints p ON p.file_id = f.id",
     )?;
@@ -332,7 +394,7 @@ pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
             Known {
                 id: row.get(1)?,
                 size_bytes: row.get(2)?,
-                mtime_ms: row.get(3)?,
+                mtime_seconds: row.get(3)?,
                 fingerprint_version: row.get(4)?,
                 not_a_picture: row.get::<_, i64>(5)? != 0,
             },
@@ -350,7 +412,7 @@ pub fn load_known(conn: &Connection) -> Result<HashMap<String, Known>> {
 pub struct Record {
     pub rel_path: String,
     pub size_bytes: i64,
-    pub mtime_ms: i64,
+    pub mtime_seconds: i64,
     pub width: u32,
     pub height: u32,
     pub format: Format,
@@ -366,14 +428,14 @@ pub fn upsert(tx: &Transaction<'_>, record: &Record, scanned_at: i64) -> Result<
     // A file that was not a picture and is one now loses the flag with the same
     // statement that records what it is.
     tx.execute(
-        "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at, not_a_picture)
+        "INSERT INTO files(rel_path, size_bytes, mtime_seconds, last_scanned_at, not_a_picture)
          VALUES (?1, ?2, ?3, ?4, 0)
          ON CONFLICT(rel_path) DO UPDATE SET
              size_bytes = excluded.size_bytes,
-             mtime_ms = excluded.mtime_ms,
+             mtime_seconds = excluded.mtime_seconds,
              last_scanned_at = excluded.last_scanned_at,
              not_a_picture = 0",
-        params![record.rel_path, record.size_bytes, record.mtime_ms, scanned_at],
+        params![record.rel_path, record.size_bytes, record.mtime_seconds, scanned_at],
     )?;
     let file_id: i64 = tx.query_row(
         "SELECT id FROM files WHERE rel_path = ?1",
@@ -444,14 +506,14 @@ pub fn begin_review(conn: &Connection) -> Result<()> {
 /// cascade takes those rows with the ones written here.
 pub fn not_a_picture(tx: &Transaction<'_>, looked_at: &Looked, scanned_at: i64) -> Result<()> {
     tx.execute(
-        "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at, not_a_picture)
+        "INSERT INTO files(rel_path, size_bytes, mtime_seconds, last_scanned_at, not_a_picture)
          VALUES (?1, ?2, ?3, ?4, 1)
          ON CONFLICT(rel_path) DO UPDATE SET
              size_bytes = excluded.size_bytes,
-             mtime_ms = excluded.mtime_ms,
+             mtime_seconds = excluded.mtime_seconds,
              last_scanned_at = excluded.last_scanned_at,
              not_a_picture = 1",
-        params![looked_at.rel_path, looked_at.size_bytes, looked_at.mtime_ms, scanned_at],
+        params![looked_at.rel_path, looked_at.size_bytes, looked_at.mtime_seconds, scanned_at],
     )?;
     let file_id: i64 = tx.query_row(
         "SELECT id FROM files WHERE rel_path = ?1",
@@ -468,7 +530,7 @@ pub fn not_a_picture(tx: &Transaction<'_>, looked_at: &Looked, scanned_at: i64) 
 pub struct Looked {
     pub rel_path: String,
     pub size_bytes: i64,
-    pub mtime_ms: i64,
+    pub mtime_seconds: i64,
 }
 
 /// Remove paths that are no longer on disk. The cascade clears the derived tables.
@@ -669,7 +731,7 @@ mod ignoring {
         let path = dir.path().join("index.sqlite");
         let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch(
-            "INSERT INTO files (id, rel_path, size_bytes, mtime_ms, last_scanned_at)
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_seconds, last_scanned_at)
              VALUES (7, 'a.jpg', 1, 1, 1), (9, 'b.jpg', 1, 1, 1), (11, 'c.jpg', 1, 1, 1)",
         )
         .expect("files");
@@ -688,7 +750,7 @@ mod ignoring {
         let path = dir.path().join("index.sqlite");
         let conn = open_and_migrate(&path).expect("open");
         conn.execute_batch(
-            "INSERT INTO files (id, rel_path, size_bytes, mtime_ms, last_scanned_at)
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_seconds, last_scanned_at)
              VALUES (1, 'a.jpg', 1, 1, 1), (2, 'b.jpg', 1, 1, 1)",
         )
         .expect("files");
@@ -719,7 +781,7 @@ mod looked_at {
     use super::*;
 
     fn looked(path: &str, size: i64, mtime: i64) -> Looked {
-        Looked { rel_path: path.to_string(), size_bytes: size, mtime_ms: mtime }
+        Looked { rel_path: path.to_string(), size_bytes: size, mtime_seconds: mtime }
     }
 
     /// A picture as the index holds one, so a file can be indexed and then not,
@@ -730,7 +792,7 @@ mod looked_at {
         Record {
             rel_path: path.to_string(),
             size_bytes: size,
-            mtime_ms: 900,
+            mtime_seconds: 900,
             width: 800,
             height: 600,
             format: Format::Jpeg,
@@ -756,7 +818,7 @@ mod looked_at {
         let known = load_known(&conn).expect("read");
         let entry = known.get("notes.png").expect("the row");
         assert!(entry.not_a_picture, "the row does not say it was looked at");
-        assert_eq!((entry.size_bytes, entry.mtime_ms), (13, 700));
+        assert_eq!((entry.size_bytes, entry.mtime_seconds), (13, 700));
     }
 
     /// A file that was not a picture and is one now is indexed in the ordinary
@@ -815,7 +877,7 @@ mod reviewing {
 
     fn three_files(conn: &Connection) {
         conn.execute_batch(
-            "INSERT INTO files (id, rel_path, size_bytes, mtime_ms, last_scanned_at)
+            "INSERT INTO files (id, rel_path, size_bytes, mtime_seconds, last_scanned_at)
              VALUES (1, 'a.jpg', 1, 1, 1), (2, 'b.jpg', 1, 1, 1), (3, 'c.jpg', 1, 1, 1)",
         )
         .expect("files");
@@ -1009,7 +1071,7 @@ mod tests {
         Record {
             rel_path: path.to_string(),
             size_bytes: 1234,
-            mtime_ms: 999,
+            mtime_seconds: 999,
             width: 800,
             height: 600,
             format: Format::Jpeg,
@@ -1106,7 +1168,7 @@ mod tests {
         let known = load_known(&conn).expect("load");
         let entry = known.get("a.jpg").expect("path present");
         assert_eq!(entry.size_bytes, 1234);
-        assert_eq!(entry.mtime_ms, 999);
+        assert_eq!(entry.mtime_seconds, 999);
         assert_eq!(entry.fingerprint_version, fingerprint::FINGERPRINT_VERSION);
     }
 
@@ -1114,7 +1176,7 @@ mod tests {
     fn a_file_without_fingerprints_reads_as_stale() {
         let conn = memory_db();
         conn.execute(
-            "INSERT INTO files(rel_path, size_bytes, mtime_ms, last_scanned_at)
+            "INSERT INTO files(rel_path, size_bytes, mtime_seconds, last_scanned_at)
              VALUES ('orphan.png', 1, 1, 1)",
             [],
         )
@@ -1186,9 +1248,9 @@ mod tests {
     }
 
     /// An index from a build that kept stamps in nanoseconds comes back holding
-    /// milliseconds, and the nanosecond column is gone.
+    /// whole seconds, and the nanosecond column is gone.
     #[test]
-    fn an_index_written_in_nanoseconds_comes_back_in_milliseconds() {
+    fn an_index_written_in_nanoseconds_comes_back_in_seconds() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("index.sqlite");
         make_an_old_index(&path, "mtime_ns", 1_700_000_000_123_456_789);
@@ -1199,16 +1261,42 @@ mod tests {
         // The file itself, not the copy that was handed back.
         let file = Connection::open(&path).expect("open the file");
         let columns = column_names(&file, "files");
-        assert!(columns.iter().any(|name| name == "mtime_ms"), "no mtime_ms: {columns:?}");
+        assert!(columns.iter().any(|name| name == "mtime_seconds"), "no column: {columns:?}");
         assert!(!columns.iter().any(|name| name == "mtime_ns"), "mtime_ns left: {columns:?}");
-        let stamp: i64 =
-            file.query_row("SELECT mtime_ms FROM files", [], |row| row.get(0)).expect("the row");
-        assert_eq!(stamp, 1_700_000_000_123, "the stamp was not carried across");
+        let stamp: i64 = file
+            .query_row("SELECT mtime_seconds FROM files", [], |row| row.get(0))
+            .expect("the row");
+        assert_eq!(stamp, 1_700_000_000, "the stamp was not carried across");
         drop(file);
 
         let conn = open_and_migrate(&path).expect("reopen");
         let known = load_known(&conn).expect("load");
-        assert_eq!(known["a.jpg"].mtime_ms, 1_700_000_000_123);
+        assert_eq!(known["a.jpg"].mtime_seconds, 1_700_000_000);
+    }
+
+    /// An index from the build that kept stamps in milliseconds comes back
+    /// holding whole seconds, and the millisecond column is gone.
+    ///
+    /// Milliseconds are as wrong as nanoseconds here: Windows writes the sub-second
+    /// part and macOS reports none, so every file read as changed on the machine
+    /// that did not write the index.
+    #[test]
+    fn an_index_written_in_milliseconds_comes_back_in_seconds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        make_an_old_index(&path, "mtime_ms", 1_700_000_000_810);
+
+        let conn = open_and_migrate(&path).expect("open");
+        let known = load_known(&conn).expect("load");
+        assert_eq!(
+            known["a.jpg"].mtime_seconds, 1_700_000_000,
+            "the sub-second part was kept, so the file still reads as changed"
+        );
+        drop(conn);
+
+        let file = Connection::open(&path).expect("open the file");
+        let columns = column_names(&file, "files");
+        assert!(!columns.iter().any(|name| name == "mtime_ms"), "mtime_ms left: {columns:?}");
     }
 
     /// A run killed after the stamps were carried across and before the old
@@ -1222,8 +1310,8 @@ mod tests {
         {
             let conn = Connection::open(&path).expect("open");
             conn.execute_batch(
-                "ALTER TABLE files ADD COLUMN mtime_ms INTEGER NOT NULL DEFAULT 0;
-                 UPDATE files SET mtime_ms = 1700000000123;",
+                "ALTER TABLE files ADD COLUMN mtime_seconds INTEGER NOT NULL DEFAULT 0;
+                 UPDATE files SET mtime_seconds = 1700000000;",
             )
             .expect("half of it");
         }
@@ -1231,7 +1319,7 @@ mod tests {
         let conn = open_and_migrate(&path).expect("open");
         let known = load_known(&conn).expect("load");
         assert_eq!(
-            known["a.jpg"].mtime_ms, 1_700_000_000_123,
+            known["a.jpg"].mtime_seconds, 1_700_000_000,
             "the stamp was divided a second time"
         );
         drop(conn);
@@ -1250,13 +1338,15 @@ mod tests {
         make_an_old_index(&path, "mtime_ns", 1_700_000_000_123_456_789);
         {
             let conn = Connection::open(&path).expect("open");
-            conn.execute_batch("ALTER TABLE files ADD COLUMN mtime_ms INTEGER NOT NULL DEFAULT 0")
-                .expect("the column and nothing else");
+            conn.execute_batch(
+                "ALTER TABLE files ADD COLUMN mtime_seconds INTEGER NOT NULL DEFAULT 0",
+            )
+            .expect("the column and nothing else");
         }
 
         let conn = open_and_migrate(&path).expect("open");
         let known = load_known(&conn).expect("load");
-        assert_eq!(known["a.jpg"].mtime_ms, 1_700_000_000_123, "the stamp was left at nought");
+        assert_eq!(known["a.jpg"].mtime_seconds, 1_700_000_000, "the stamp was left at nought");
         drop(conn);
 
         let file = Connection::open(&path).expect("open the file");
@@ -1299,5 +1389,28 @@ mod tests {
             get_meta(&conn, "schema_version").expect("meta"),
             Some(SCHEMA_VERSION.to_string())
         );
+    }
+
+    /// A folder with no index gets one written, and opening that one again
+    /// leaves the file alone.
+    ///
+    /// The file is what the folder is on the far side of a network mount, and
+    /// writing it back costs the whole index across it. An index already in the
+    /// current shape has nothing to carry across, so nothing is written.
+    #[test]
+    fn an_index_already_in_the_current_shape_is_not_written_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.sqlite");
+        drop(open_and_migrate(&path).expect("create"));
+        assert!(path.is_file(), "the index was never written");
+
+        let written = std::fs::metadata(&path).expect("the file").modified().expect("a stamp");
+        // Coarse clocks: without this a second write inside the same tick reads
+        // as no write at all.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        drop(open_and_migrate(&path).expect("reopen"));
+        let after = std::fs::metadata(&path).expect("the file").modified().expect("a stamp");
+        assert_eq!(written, after, "the index was written back with nothing to change");
     }
 }

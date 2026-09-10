@@ -117,9 +117,9 @@ pub struct Member {
     pub format: String,
     pub channels: u8,
     pub size_bytes: i64,
-    /// When the file was last written, as milliseconds since the epoch. Nothing
+    /// When the file was last written, as whole seconds since the epoch. Nothing
     /// here reads a date out of the file's own metadata.
-    pub mtime_ms: i64,
+    pub mtime_seconds: i64,
     /// The one the search would keep if it were choosing: the largest, least
     /// re-encoded copy in the set. Nothing is kept or removed on account of it.
     /// It is what "auto-mark to keep" marks.
@@ -188,7 +188,7 @@ pub struct Image {
     format: String,
     channels: u8,
     size_bytes: i64,
-    mtime_ms: i64,
+    mtime_seconds: i64,
     /// How good a keeper this is. Fixed by the file, so it is worked out once.
     score: f64,
     /// The hash the image was indexed under, and the seven for its rotations and
@@ -204,7 +204,7 @@ pub struct Image {
 }
 
 const LOAD_IMAGES: &str = "
-SELECT id, rel_path, width, height, format, channels, size_bytes, mtime_ms,
+SELECT id, rel_path, width, height, format, channels, size_bytes, mtime_seconds,
        dct_hashes, ring_stats, corners
 FROM indexed_images
 ORDER BY id
@@ -756,7 +756,7 @@ pub fn load_images(
             format,
             channels,
             size_bytes,
-            mtime_ms: row.get(7)?,
+            mtime_seconds: row.get(7)?,
             variants: hashes.map(|hash| fingerprint::words(&hash)),
             bands: hashes.map(|hash| fingerprint::bands(&hash)),
             ring: fingerprint::ring_weighted(&ring),
@@ -986,7 +986,7 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
                     a.score
                         .partial_cmp(&b.score)
                         .expect("no NaN in a keep score")
-                        .then(b.mtime_ms.cmp(&a.mtime_ms))
+                        .then(b.mtime_seconds.cmp(&a.mtime_seconds))
                         .then(b.rel_path.cmp(&a.rel_path))
                 })
                 .expect("a set has members");
@@ -1003,16 +1003,18 @@ fn build_sets(images: &[Image], members: &[(u32, u32)]) -> Vec<DuplicateSet> {
                         format: image.format.clone(),
                         channels: image.channels,
                         size_bytes: image.size_bytes,
-                        mtime_ms: image.mtime_ms,
+                        mtime_seconds: image.mtime_seconds,
                         auto_keep: *position == keeper,
                     }
                 })
                 .collect();
             // Oldest first: a duplicate is usually a copy made after the picture
             // it came from, so the set reads left to right in the order the
-            // files appeared. The path settles two written in the same
-            // millisecond, so a set comes back in the same order every time.
-            members.sort_by(|a, b| a.mtime_ms.cmp(&b.mtime_ms).then(a.rel_path.cmp(&b.rel_path)));
+            // files appeared. The path settles two written in the same second,
+            // so a set comes back in the same order every time.
+            members.sort_by(|a, b| {
+                a.mtime_seconds.cmp(&b.mtime_seconds).then(a.rel_path.cmp(&b.rel_path))
+            });
             DuplicateSet { set_id: images[root as usize].file_id, members }
         })
         .collect()
@@ -1128,13 +1130,13 @@ mod tests {
         height: u32,
         size: i64,
         ring: Vec<u8>,
-        mtime_ms: i64,
+        mtime_seconds: i64,
     ) {
         let hash = hash_seeded(seed);
         let record = db::Record {
             rel_path: path.to_string(),
             size_bytes: size,
-            mtime_ms,
+            mtime_seconds,
             width,
             height,
             format: Format::Jpeg,
