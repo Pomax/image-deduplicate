@@ -43,7 +43,7 @@ These mandatory rules describe actions that MUST BE FOLLOWED AT EVERY STEP BY TH
 - The test runner must be `scripts/test.sh` on all other operating systems
 - `cmd //c <command>` through the Bash tool, on Windows.
 - Asking questions one by one until each has been fully answered.
-- Run a build once the requested work has been completed.
+- If work touched code that could lead to a different build, run a build after completing the work.
 
 ## Allowed
 

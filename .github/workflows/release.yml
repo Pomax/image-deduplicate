@@ -34,7 +34,7 @@ jobs:
 
       - name: Check whether the version changed
         id: decide
-        run: sh .github/workflows/check-version.sh
+        run: sh .github/workflows/scripts/check-version.sh
 
   build:
     needs: check
@@ -144,59 +144,7 @@ jobs:
         env:
           TAG: ${{ needs.check.outputs.tag }}
           VERSION: ${{ needs.check.outputs.version }}
-        run: |
-          if git ls-remote --exit-code --heads origin releases >/dev/null 2>&1; then
-            git fetch origin releases
-            git checkout releases
-          else
-            git checkout --orphan releases
-            # Take the source out of the index and the tree, so the first commit
-            # on this branch holds one version's builds and nothing else. The
-            # archives are untracked at this point and are left where they are.
-            git rm -rf --quiet .
-          fi
-
-          if [ -d "$VERSION" ]; then
-            echo "$VERSION is already on the releases branch" >&2
-            exit 1
-          fi
-          mkdir "$VERSION"
-          mv built/*.zip "$VERSION"/
-          ls -l "$VERSION"
-
-          # The README is the list of what is on this branch, newest first, so
-          # the new version goes in directly under the heading. A branch that
-          # has none yet gets the heading first.
-          #
-          # The date is the day the tagged commit was made, not the day the
-          # build ran: what is being dated is the version, and a rebuild of the
-          # same commit is the same version.
-          #
-          # The checksum is beside each download because that is where somebody
-          # checks it, against the file they have just fetched.
-          if [ ! -f README.md ]; then
-            printf '# imgdedupe releases\n' > README.md
-          fi
-          made_on=$(git log -1 --format=%cs "$GITHUB_SHA")
-          sum() { sha256sum "$VERSION/imgdedupe-$VERSION-$1.zip" | cut -d' ' -f1; }
-          {
-            head -n 1 README.md
-            printf '\n## %s (%s)\n\n' "$VERSION" "$made_on"
-            printf -- '- [Windows](./%s/imgdedupe-%s-windows.zip) (sha256 %s)\n' \
-              "$VERSION" "$VERSION" "$(sum windows)"
-            printf -- '- [macOS](./%s/imgdedupe-%s-macos.zip) (sha256 %s)\n' \
-              "$VERSION" "$VERSION" "$(sum macos)"
-            printf -- '- [Linux](./%s/imgdedupe-%s-linux.zip) (sha256 %s)\n' \
-              "$VERSION" "$VERSION" "$(sum linux)"
-            printf -- '- [Source code](../../tree/%s)\n' "$TAG"
-            tail -n +2 README.md
-          } > README.next
-          mv README.next README.md
-          cat README.md
-
-          git add "$VERSION" README.md
-          git commit -m "$VERSION"
-          git push origin releases
+        run: sh .github/workflows/scripts/put-on-releases-branch.sh "$TAG" "$VERSION"
 
       # And the version somebody arriving at the repository sees. The title of
       # the README on main is the version that was last released, so the front
@@ -206,21 +154,7 @@ jobs:
       # the first job: the commit changes the README and not `Cargo.toml`, so the
       # version is the same as the commit before it and there is nothing to build
       # or release.
-      - name: Say the version in the title of main's readme
+      - name: Set the version in the title of main's readme
         env:
           VERSION: ${{ needs.check.outputs.version }}
-        run: |
-          git checkout main
-          git pull --ff-only origin main
-          printf '# imgdedupe v%s\n' "$VERSION" > README.next
-          tail -n +2 README.md >> README.next
-          mv README.next README.md
-          head -n 1 README.md
-
-          if git diff --quiet -- README.md; then
-            echo "the title already says v$VERSION"
-            exit 0
-          fi
-          git add README.md
-          git commit -m "v$VERSION"
-          git push origin main
+        run: sh .github/workflows/scripts/set-main-readme-title.sh "$VERSION"

@@ -1,11 +1,8 @@
 #!/bin/sh
 set -e
-# Decides whether this run builds and whether it releases, and under what tag.
-# Writes build, release, and tag to $GITHUB_OUTPUT for the workflow to read.
-cd "$(dirname "$0")/../.."
 
-# The version from the [package] section of the Cargo.toml on stdin, ignoring
-# the dependency versions further down the file.
+cd "$(dirname "$0")/../../.."
+
 read_version() {
     awk '
         /^\[(workspace\.)?package\]/ { in_package = 1; next }
@@ -42,6 +39,4 @@ fi
 echo "build=$build" >> "$GITHUB_OUTPUT"
 echo "release=$release" >> "$GITHUB_OUTPUT"
 echo "tag=$tag" >> "$GITHUB_OUTPUT"
-# The tag without its v, which is what the built archives are named after: a
-# file sitting in somebody's downloads folder says which version it is.
 echo "version=$version" >> "$GITHUB_OUTPUT"
