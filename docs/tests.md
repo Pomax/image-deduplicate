@@ -2078,9 +2078,22 @@ keeps whatever it had.
 
 ### the_icon_is_one_picture_over_another
 
-Reads the pixels: the corners are clear, the card is behind everything, the
-picture in front holds its sky, its sun and its hill, and what shows of the one
-behind is an outline with the card inside it.
+Everywhere but macOS. Reads the pixels: the corners are clear, nothing is behind
+the two pictures, the picture in front holds its sky, its sun and its hill, and
+what shows of the one behind is an outline.
+
+### the_picture_in_front_is_the_size_the_dock_draws_and_the_other_overhangs
+
+macOS only. Finds how far each colour reaches, row by row and column by column.
+The picture in front has to fill the box the dock draws every icon in, 824 of a
+canvas 1024 across, so it is the same width and sits on the same margin as the
+icons beside it. The one behind has to step out past it into that margin without
+reaching the edge of the canvas. The canvas corners are clear and the picture's
+own corner is rounded rather than square.
+
+What this catches is the icon being the wrong size in the dock, which it was
+twice: once filling the whole canvas, and once with both pictures squeezed into
+the box so the front one came out smaller than every other icon.
 
 ## crates/imgdedupe/src/indexer.rs
 
