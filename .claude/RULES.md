@@ -50,7 +50,8 @@ These mandatory rules describe actions that MUST BE FOLLOWED AT EVERY STEP BY TH
 These allowed rules describe actions that MAY BE TAKEN BY THE WORKER, THEY ARE NOT MANDATORY
 
 - Run as many tests, in any order, while a plan is being worked on.
-- Updating failing tests if the problem is the test itself rather than the code it tests.
+- Review any file, any number of times
+- Update failing tests if the problem is the test itself rather than the code it tests.
 - Edit on a file that exists. Write on a file that does not.
 - Read, Grep, Glob anywhere in the repository.
 - Run the repository's own commands without asking.
@@ -89,7 +90,7 @@ These rules describe writing-related actions that MAY NEVER BE PERFORMED BY THE 
 
 These rules describe general actions that MAY NEVER BE PERFORMED BY THE WORKER
 
-- A second change beyond the one the instruction names.
+- Code changes not required to fulfil the instructions or planned tasks.
 - Working on anything while a question from the user has not been answered yet.
 - Acting on a question as though it were an instruction.
 - Editing a file in plan mode.
@@ -121,7 +122,6 @@ These rules describe file and shell related actions that MAY NEVER BE PERFORMED 
 
 - Running `cargo build` or `cargo test` by hand.
 - Running the whole test suite to verify something that already has specific, dedicated tests.
-- Running the `local` checks to verify my own work.
 - Using a temporary directory of generated files as the thing verified against.
 - Claiming a fix works without running it where it matters.
 - Claiming a test catches a bug without seeing it fail against the bug.

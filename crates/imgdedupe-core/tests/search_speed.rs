@@ -20,7 +20,9 @@ use imgdedupe_core::matching::{self, Thresholds};
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 fn a_turn() -> MutexGuard<'static, ()> {
-    ONE_AT_A_TIME.lock().unwrap_or_else(|held| held.into_inner())
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
 }
 
 const FILES: usize = 4_000;
@@ -36,7 +38,11 @@ const FEW_FILES: usize = 1_000;
 /// have to give hashes that are far apart, or the bands fill up with near
 /// neighbours and what gets measured is the fixture rather than the search.
 fn hash_for(index: usize) -> fingerprint::Hash {
-    let seed = if index % 10 == 0 && index > 0 { index as u64 - 1 } else { index as u64 };
+    let seed = if index % 10 == 0 && index > 0 {
+        index as u64 - 1
+    } else {
+        index as u64
+    };
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut out = [0u8; fingerprint::HASH_BYTES];
     for byte in out.iter_mut() {
@@ -82,7 +88,10 @@ fn what_a_search_costs_on_a_folder_worth_running_it_on() {
     let path = dir.path().join("speed.sqlite");
     let started = Instant::now();
     let conn = build(&path, FILES);
-    println!("built {FILES} files in {:.1}s", started.elapsed().as_secs_f64());
+    println!(
+        "built {FILES} files in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
 
     let started = Instant::now();
     let sets = matching::find_sets(&conn, Thresholds::preset("balanced")).expect("search");
@@ -153,7 +162,9 @@ fn a_folder_of_pictures_with_corners_does_not_become_quadratic() {
     let large = time_corners(&dir.path().join("many.sqlite"), 2_000);
 
     let grew = large / small.max(0.000_001);
-    println!("500 pictures in {small:.2}s, 2000 in {large:.2}s: 4x the folder, {grew:.1}x the time");
+    println!(
+        "500 pictures in {small:.2}s, 2000 in {large:.2}s: 4x the folder, {grew:.1}x the time"
+    );
     assert!(
         grew < 8.0,
         "4x the pictures cost {grew:.1}x the time, which is the shape of comparing every \
@@ -238,4 +249,3 @@ fn time_copies(path: &std::path::Path, copies: usize) -> f64 {
     assert_eq!(sets[0].members.len(), copies, "the set lost copies");
     took
 }
-

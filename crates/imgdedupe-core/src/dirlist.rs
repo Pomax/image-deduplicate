@@ -349,7 +349,10 @@ pub fn read_whole(path: &Path, length: i64) -> std::io::Result<Vec<u8>> {
 
     let mut file = std::fs::File::open(path)?;
     if length > 0 {
-        let want = Radvisory { ra_offset: 0, ra_count: length.min(i32::MAX as i64) as _ };
+        let want = Radvisory {
+            ra_offset: 0,
+            ra_count: length.min(i32::MAX as i64) as _,
+        };
         // Advice, not a request: a file system that does not take it says so and
         // the read below is what it always was.
         unsafe { fcntl(file.as_raw_fd(), F_RDADVISE, &want) };
@@ -380,7 +383,10 @@ pub fn ask_for_it_early(path: &Path, length: i64) {
     let Ok(file) = std::fs::File::open(path) else {
         return;
     };
-    let want = Radvisory { ra_offset: 0, ra_count: length.min(i32::MAX as i64) as _ };
+    let want = Radvisory {
+        ra_offset: 0,
+        ra_count: length.min(i32::MAX as i64) as _,
+    };
     unsafe { fcntl(file.as_raw_fd(), F_RDADVISE, &want) };
 }
 
@@ -402,4 +408,3 @@ const F_RDADVISE: std::os::raw::c_int = 44;
 extern "C" {
     fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
 }
-

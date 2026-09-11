@@ -41,7 +41,9 @@ fn jpeg_fixture() -> Vec<u8> {
 fn scaled_dimensions(bytes: &[u8]) -> (u32, u32) {
     let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     decoder.read_info().expect("header");
-    let (w, h) = decoder.scale(WIDTH as u16 / 8, HEIGHT as u16 / 8).expect("scale");
+    let (w, h) = decoder
+        .scale(WIDTH as u16 / 8, HEIGHT as u16 / 8)
+        .expect("scale");
     decoder.decode().expect("decode");
     (w as u32, h as u32)
 }
@@ -50,7 +52,9 @@ fn scaled_dimensions(bytes: &[u8]) -> (u32, u32) {
 fn scaled_path(bytes: &[u8]) -> GrayImage {
     let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
     decoder.read_info().expect("header");
-    let (w, h) = decoder.scale(WIDTH as u16 / 8, HEIGHT as u16 / 8).expect("scale");
+    let (w, h) = decoder
+        .scale(WIDTH as u16 / 8, HEIGHT as u16 / 8)
+        .expect("scale");
     let pixels = decoder.decode().expect("decode");
     let image = RgbImage::from_raw(w as u32, h as u32, pixels).expect("buffer");
     shrink(&image)
