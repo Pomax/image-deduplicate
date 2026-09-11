@@ -136,6 +136,8 @@ A file whose split leaves anything failing must be fixed before anything else is
 
 No behaviour changes are allowed during this work, only refactoring is allowed.
 
+You MUST stop after each file and ask permission to process the next file.
+
 ## What says it is done
 
 - Every named test that runs today runs after, under the same name and in the same module path. The test files are not touched.

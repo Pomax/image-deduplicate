@@ -2,14 +2,16 @@
 
 The rules in this section describe what the judge itself must, or must not do.
 
+Rules preceded by a `#` are considered "commented off" and should be treated as not part of the document or ruleset.
+
 ## Mandatory
 
 These mandatory rules describe actions that MUST BE FOLLOWED AT EVERY STEP BY THE JUDGE
 
-- Always allow a plan to be written
+- Allow a plan to be written
 - Allow any work that has an explicit demand for that work by the user in the chat log
 - Allow any work that you have been ordered to allow through the chat by the user
-- Read the current work plan and testing actions against that before making a ruling
+- Read the current rules and work plan and test actions against those before making a ruling
 - Read the chat all the way back to when the current task was started and testing against that before making a ruling
 
 ## Disallowed
