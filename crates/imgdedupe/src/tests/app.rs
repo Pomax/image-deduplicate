@@ -1247,7 +1247,7 @@ fn an_index_built_over_the_subfolders_opens_with_the_box_ticked() {
     opened.recurse = false;
     opened.start_scan();
     settle(&mut opened);
-    closed(&app);
+    closed(&opened);
     let mut again = App::from_settings(crate::settings::Settings::default());
     again.open_folder(dir.path().to_path_buf());
     settle(&mut again);
