@@ -1,10 +1,9 @@
-# The big source files come apart
+# Refactor the codebase
 
-Issue 17. Eleven source files carry more than four hundred lines each, one of them five thousand. Each becomes a directory of files named after what is in them.
+Issue 17. Eleven source files each become their own directory of files named after what is in them.
 
 ## What is there now
 
-Line counts, source only. The tests moved out to `src/tests/` already and are not counted here.
 
 | file | lines | becomes |
 |---|---|---|
@@ -25,8 +24,6 @@ Eleven files become fifty three. Everything else is already under four hundred l
 ## The shape
 
 A file `src/foo.rs` keeps its name and gains a directory `src/foo/` beside it. Rust reads a child of `foo` out of `src/foo/`, so `mod parts;` in `src/foo.rs` is `src/foo/parts.rs`. Nothing is renamed to `mod.rs`.
-
-That matters for two reasons. `foo.rs` keeps its `#[cfg(test)] #[path = "tests/foo.rs"] mod tests;`, which is read from the directory `foo.rs` is in, so the test file stays exactly where it is and every test keeps its name. And `docs/tests.md` heads each group of tests with the source file they are about, which is still `src/foo.rs`.
 
 ## What changes besides position
 
@@ -131,11 +128,13 @@ The two platform modules in `dirlist.rs` are both called `imp`, so each gains a 
 
 The suite is run first and its counts written down. Those counts are what the work is measured against: the same named tests, the same number of them, all passing.
 
-Smallest first, largest last, one file at a time. `dirlist.rs` goes first: its split is along a line the compiler already draws, so it says early whether the directory shape works. `app.rs` goes last.
+Smallest first, largest last, one file at a time.
 
-The whole suite must pass after every single file. Not the tests for that file, not the tests for that crate: the whole suite, every time, before the next file is started. A file whose split leaves anything failing is fixed or put back before anything else is touched, because one wrong `pub(super)` in a file split an hour ago is a thing nobody finds once five more files have moved on top of it.
+The whole suite must pass after every single file refactor. Not the tests for that file, not the tests for that crate: the whole suite, every time, and the build (with --log) must succeed before the next file is started.
 
-No behaviour changes while this runs. If a fault turns up in something being moved, it is written down and left alone.
+A file whose split leaves anything failing must be fixed before anything else is touched.
+
+No behaviour changes are allowed during this work, only refactoring is allowed.
 
 ## What says it is done
 
