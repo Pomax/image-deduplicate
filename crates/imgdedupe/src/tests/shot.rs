@@ -119,7 +119,9 @@ impl Camera {
         run: impl FnMut(&egui::Context),
         path: &Path,
     ) -> Vec<egui::epaint::ClippedShape> {
-        let screen = input.screen_rect.expect("a shot needs to know how big the window is");
+        let screen = input
+            .screen_rect
+            .expect("a shot needs to know how big the window is");
         let output = ctx.run(input, run);
         self.take_textures(&output.textures_delta);
         let shapes = output.shapes.clone();
@@ -206,7 +208,8 @@ impl Camera {
     ) -> image::RgbaImage {
         let width = (screen.width() * points).round() as u32;
         let height = (screen.height() * points).round() as u32;
-        let mut out = image::RgbaImage::from_pixel(width, height, image::Rgba([255, 255, 255, 255]));
+        let mut out =
+            image::RgbaImage::from_pixel(width, height, image::Rgba([255, 255, 255, 255]));
 
         for primitive in primitives {
             let Primitive::Mesh(mesh) = &primitive.primitive else {
@@ -244,12 +247,25 @@ fn paint(
         return;
     }
 
-    let left = x0.min(x1).min(x2).max(clip.left() * points).max(0.0).floor() as i64;
-    let right =
-        x0.max(x1).max(x2).min(clip.right() * points).min(out.width() as f32).ceil() as i64;
+    let left = x0
+        .min(x1)
+        .min(x2)
+        .max(clip.left() * points)
+        .max(0.0)
+        .floor() as i64;
+    let right = x0
+        .max(x1)
+        .max(x2)
+        .min(clip.right() * points)
+        .min(out.width() as f32)
+        .ceil() as i64;
     let top = y0.min(y1).min(y2).max(clip.top() * points).max(0.0).floor() as i64;
-    let bottom =
-        y0.max(y1).max(y2).min(clip.bottom() * points).min(out.height() as f32).ceil() as i64;
+    let bottom = y0
+        .max(y1)
+        .max(y2)
+        .min(clip.bottom() * points)
+        .min(out.height() as f32)
+        .ceil() as i64;
 
     for y in top..bottom {
         for x in left..right {
@@ -292,8 +308,12 @@ fn read(held: &Held, uv: [f32; 2]) -> [f32; 4] {
     if held.size[0] == 0 || held.size[1] == 0 {
         return [255.0; 4];
     }
-    let x = (uv[0] * held.size[0] as f32).round().clamp(0.0, held.size[0] as f32 - 1.0) as usize;
-    let y = (uv[1] * held.size[1] as f32).round().clamp(0.0, held.size[1] as f32 - 1.0) as usize;
+    let x = (uv[0] * held.size[0] as f32)
+        .round()
+        .clamp(0.0, held.size[0] as f32 - 1.0) as usize;
+    let y = (uv[1] * held.size[1] as f32)
+        .round()
+        .clamp(0.0, held.size[1] as f32 - 1.0) as usize;
     let pixel = held.pixels[y * held.size[0] + x].to_array();
     [
         f32::from(pixel[0]),

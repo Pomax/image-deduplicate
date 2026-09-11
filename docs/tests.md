@@ -3,15 +3,20 @@
 Every test in the workspace, and what it is for. Run them with `cargo test
 --release --workspace`, or one at a time by name.
 
+A crate keeps its tests in `src/tests/`, one file per source file and named after
+it: what `scan.rs` is tested by is `src/tests/scan.rs`. A test belongs to the
+module of the source file it is about, so `scan::tests::a_removed_file_leaves_the_index`
+is where the runner names it and the heading below says which source file that is.
+A check that uses a crate from the outside, the way anything else would, sits in
+that crate's own `tests/` folder beside `src/` instead, and the heading gives its
+path the same way.
+
 Every one of them runs anywhere. Nothing here reads a folder of somebody's own
 photographs, names a path on anybody's disk, or needs a machine to be set up
 first: a check that wants pictures makes them in a temporary folder and throws
 them away. `.github/workflows/tests.yml` runs the whole suite on Ubuntu, macOS
 and Windows, all three, on every push and every pull request, and a change is
 not good until all three have passed.
-
-The checks that do need a real folder of photographs are not in this repository.
-See the last section.
 
 A behavioural test uses the application: it scans a real folder of pictures,
 searches it, and looks at what the window is left holding. The rest are unit
@@ -1616,6 +1621,13 @@ it was less that list, and nothing has to be looked at to know it. The pictures
 held in memory lose the ones that went, and searching again runs on those with no
 pass over the folder and no second conversion of the index.
 
+### unmarking_all_leaves_nothing_marked_but_what_an_ignored_set_was_keeping
+
+The "unmark all" button takes every mark off, so the choosing starts from nothing
+again. A set somebody said is not a set of copies keeps the mark it was carrying
+when it was set aside, and what a cleanup would take follows the marks that are
+left.
+
 ### keeping_everything_marks_every_picture_that_is_in_a_set_of_copies
 
 The "keep everything" button marks every picture in every set that is a set of
@@ -2285,32 +2297,3 @@ The debug build with no flags opens the window like the release build.
 
 The two debug flags each need a folder and cannot be given together.
 
-## Not in this repository: the checks against a real folder
-
-Eight checks only mean something against a real folder of photographs, on the
-machine and the mount that folder lives on. They read the folder the application
-is set to and print what they find there, so their source is in `local/`, which
-is in `.gitignore` and is never committed. A checkout does not have it and does
-not need it.
-
-They are behind the `local` feature, which is off, so `cargo test --workspace`
-never looks for the directory and CI never turns the feature on. With the
-directory present:
-
-    cargo test --features imgdedupe/local -- --ignored --nocapture
-
-None of them could run in CI even if the source were here. Each is a measurement
-of a large index over a network mount, and a generated folder on a runner's local
-disk answers a different question. What each one checks about the program is
-already checked in the suite proper, on a folder made for the purpose:
-
-| Not in the repository | What checks the behaviour here |
-| --- | --- |
-| `a_search_reports_while_it_runs` | `comparing_is_reported_while_it_is_still_comparing` |
-| `what_the_real_folders_index_says_about_itself` | nothing: it prints, it does not assert |
-| `only_matching_within_folders_holds_on_the_real_folder` | `matching_within_folders_never_puts_two_folders_together` |
-| `every_box_the_window_keeps_survives_the_real_folders_index` | `the_index_keeps_whether_marking_on_opening_was_ticked`, `the_index_keeps_which_ways_of_matching_were_ticked`, `the_index_keeps_matching_within_folders_and_running_on_opening` |
-| `a_pass_says_something_almost_at_once` | `the_event_stream_starts_and_ends` |
-| `a_pass_reaches_its_total_without_reading_the_index_page_by_page` | `a_folder_whose_index_is_in_an_older_shape_still_opens` |
-| `how_fast_new_files_are_read_and_indexed` | nothing: it prints a rate that belongs to the storage |
-| `dropping_a_run_does_not_wait_for_the_pass_to_finish` | `dropping_a_run_stops_the_pass_it_started` |

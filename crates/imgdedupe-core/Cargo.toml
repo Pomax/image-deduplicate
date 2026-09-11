@@ -13,9 +13,6 @@ review = ["dep:trash"]
 # The run log behind `--log`. Off here, and only turned on by `build --test`,
 # so a normal build contains none of it.
 logging = []
-# The checks that only mean something against a real index of a real folder.
-# Their source is in `local/`, which is not in the repository and never will be.
-local = []
 
 [dependencies]
 anyhow.workspace = true

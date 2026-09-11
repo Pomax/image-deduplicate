@@ -10,8 +10,9 @@ Run one test, by name, for the thing that is broken. Not the suite, not a module
 not "everything that could be affected".
 
 **Why:** a suite run buries the one number that matters in a hundred results that
-were never in question, and most of those tests are against local storage where
-the fault does not exist. It also takes the machine for minutes at a time.
+were never in question, and those tests all work on a temporary folder on a fast
+disk, where the fault does not exist. It also takes the machine for minutes at a
+time.
 
 **How to apply:** `cargo test --bin imgdedupe <exact_test_name>` or
 `cargo test -p imgdedupe-core --lib <exact_test_name>`. Related:

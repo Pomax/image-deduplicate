@@ -52,7 +52,10 @@ pub fn read(bytes: &[u8], format: Format) -> Vec<Group> {
 }
 
 fn one(name: &str, value: String) -> Group {
-    Group { name: String::from("File"), entries: vec![(name.to_string(), value)] }
+    Group {
+        name: String::from("File"),
+        entries: vec![(name.to_string(), value)],
+    }
 }
 
 /// Every directory a TIFF holds: the file's own, the camera settings hanging off
@@ -85,14 +88,15 @@ fn from_tiff_as(bytes: &[u8], name: &str, table: Table) -> Vec<Group> {
             continue;
         };
 
-        let mut group = Group { name, entries: Vec::new() };
+        let mut group = Group {
+            name,
+            entries: Vec::new(),
+        };
         for entry in &entries {
             match entry.tag {
-                TAG_EXIF_DIRECTORY => queue.push((
-                    entry.value as usize,
-                    String::from("Settings"),
-                    Table::Exif,
-                )),
+                TAG_EXIF_DIRECTORY => {
+                    queue.push((entry.value as usize, String::from("Settings"), Table::Exif))
+                }
                 TAG_GPS_DIRECTORY => {
                     queue.push((entry.value as usize, String::from("Place"), Table::Gps))
                 }
@@ -132,7 +136,9 @@ fn from_tiff_as(bytes: &[u8], name: &str, table: Table) -> Vec<Group> {
         }
         // Where it was taken, which takes four tags to say and is one line.
         if table == Table::Gps {
-            group.entries.splice(0..0, where_it_was(&entries, bytes, order));
+            group
+                .entries
+                .splice(0..0, where_it_was(&entries, bytes, order));
         }
         out.push(group);
 
@@ -156,11 +162,7 @@ fn from_tiff_as(bytes: &[u8], name: &str, table: Table) -> Vec<Group> {
 /// The file writes a latitude as three numbers and which side of the equator it
 /// is on as a separate letter, and the same again for longitude. Four tags for
 /// one place, so they are put together here and the parts are not shown.
-fn where_it_was(
-    entries: &[preview::Entry],
-    bytes: &[u8],
-    order: Order,
-) -> Vec<(String, String)> {
+fn where_it_was(entries: &[preview::Entry], bytes: &[u8], order: Order) -> Vec<(String, String)> {
     let find = |tag: u16| entries.iter().find(|entry| entry.tag == tag);
     let side = |tag: u16| {
         find(tag)
@@ -195,7 +197,10 @@ fn where_it_was(
     }) {
         let below = side(0x0005).is_some_and(|reference| reference as u8 == 1);
         let sea = if below { "below" } else { "above" };
-        out.push((String::from("Height"), format!("{} m {sea} sea level", trimmed(height))));
+        out.push((
+            String::from("Height"),
+            format!("{} m {sea} sea level", trimmed(height)),
+        ));
     }
     out
 }
@@ -269,7 +274,10 @@ fn from_iptc(bytes: &[u8]) -> Vec<Group> {
     if entries.is_empty() {
         return Vec::new();
     }
-    vec![Group { name: String::from("Description"), entries }]
+    vec![Group {
+        name: String::from("Description"),
+        entries,
+    }]
 }
 
 /// A JPEG keeps IPTC inside a Photoshop block, which is a run of named pieces of
@@ -425,7 +433,10 @@ fn from_xmp(bytes: &[u8]) -> Vec<Group> {
         return Vec::new();
     }
     entries.sort();
-    vec![Group { name: String::from("Description"), entries }]
+    vec![Group {
+        name: String::from("Description"),
+        entries,
+    }]
 }
 
 /// What is inside one property: the text of it, or the items of the list it
@@ -507,7 +518,10 @@ fn from_png(bytes: &[u8]) -> Vec<Group> {
         at += 12 + length;
     }
     if !entries.is_empty() {
-        out.push(Group { name: String::from("Description"), entries });
+        out.push(Group {
+            name: String::from("Description"),
+            entries,
+        });
     }
     out
 }
@@ -539,7 +553,10 @@ fn from_gif(bytes: &[u8]) -> Vec<Group> {
     if entries.is_empty() {
         return Vec::new();
     }
-    vec![Group { name: String::from("Description"), entries }]
+    vec![Group {
+        name: String::from("Description"),
+        entries,
+    }]
 }
 
 /// WebP is a RIFF, and the Exif and XMP sit in chunks of their own.
@@ -593,7 +610,9 @@ fn from_boxes(bytes: &[u8]) -> Vec<Group> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// The segments a JPEG holds before the picture itself.
@@ -658,7 +677,11 @@ struct Named {
 }
 
 const fn tag(number: u16, name: &'static str, shape: Shape) -> Named {
-    Named { number, name, shape }
+    Named {
+        number,
+        name,
+        shape,
+    }
 }
 
 /// One tag's value as something worth reading, or nothing when what it holds
@@ -697,12 +720,19 @@ fn value_of(entry: &preview::Entry, bytes: &[u8], order: Order, shape: Shape) ->
             if stops == 0.0 {
                 String::from("0")
             } else {
-                format!("{}{} EV", if stops > 0.0 { "+" } else { "" }, trimmed(stops))
+                format!(
+                    "{}{} EV",
+                    if stops > 0.0 { "+" } else { "" },
+                    trimmed(stops)
+                )
             }
         }
         Shape::Words(words) => {
             let value = first_number(entry, raw, order)?;
-            words.iter().find(|(number, _)| *number == value).map(|(_, word)| word.to_string())?
+            words
+                .iter()
+                .find(|(number, _)| *number == value)
+                .map(|(_, word)| word.to_string())?
         }
         Shape::Flash => flash(first_number(entry, raw, order)?),
         Shape::Date => said_plainly(&text_of(raw))?,
@@ -746,7 +776,10 @@ fn first_ratio(entry: &preview::Entry, raw: &[u8], order: Order) -> Option<f64> 
 
 /// A number with no trailing nothing after the point.
 fn trimmed(value: f64) -> String {
-    format!("{value:.2}").trim_end_matches('0').trim_end_matches('.').to_string()
+    format!("{value:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 /// A date as somebody would say it.
@@ -806,7 +839,11 @@ fn flash(value: u32) -> String {
     if value & 0x20 != 0 {
         return String::from("No flash on this camera");
     }
-    let mut said = String::from(if value & 1 != 0 { "Fired" } else { "Did not fire" });
+    let mut said = String::from(if value & 1 != 0 {
+        "Fired"
+    } else {
+        "Did not fire"
+    });
     if value & 0x40 != 0 {
         said.push_str(", red-eye reduction");
     }
@@ -865,7 +902,6 @@ const PLACE_TAGS: &[Named] = &[
     tag(0x001D, "Date", Shape::Text),
 ];
 
-
 const PROGRAMS: &[(u32, &str)] = &[
     (1, "Manual"),
     (2, "Program"),
@@ -904,7 +940,12 @@ const LIGHT: &[(u32, &str)] = &[
 
 const BALANCE: &[(u32, &str)] = &[(0, "Automatic"), (1, "Manual")];
 
-const SCENES: &[(u32, &str)] = &[(0, "Standard"), (1, "Landscape"), (2, "Portrait"), (3, "Night")];
+const SCENES: &[(u32, &str)] = &[
+    (0, "Standard"),
+    (1, "Landscape"),
+    (2, "Portrait"),
+    (3, "Night"),
+];
 
 const DEGREES: &[(u32, &str)] = &[(0, "Normal"), (1, "Soft"), (2, "Hard")];
 
@@ -933,184 +974,6 @@ fn iptc_name(field: u8) -> Option<&'static str> {
     })
 }
 
-
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn value(groups: &[Group], name: &str) -> Option<String> {
-        groups
-            .iter()
-            .flat_map(|group| group.entries.iter())
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.clone())
-    }
-
-    /// A TIFF directory as a camera writes one: a make, a model, and a rational
-    /// for the exposure.
-    fn tiff() -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(b"II\x2a\x00");
-        out.extend_from_slice(&8u32.to_le_bytes());
-        let entries: [(u16, u16, u32, u32); 4] = [
-            (0x010F, 2, 6, 0),
-            (0x0110, 2, 6, 0),
-            (0x0112, 3, 1, 6),
-            (0x8769, 4, 1, 0),
-        ];
-        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-        let after = 8 + 2 + entries.len() * 12 + 4;
-        let mut values = Vec::new();
-        for (index, (tag, kind, count, inline)) in entries.iter().enumerate() {
-            out.extend_from_slice(&tag.to_le_bytes());
-            out.extend_from_slice(&kind.to_le_bytes());
-            out.extend_from_slice(&count.to_le_bytes());
-            match index {
-                0 => {
-                    out.extend_from_slice(&((after + values.len()) as u32).to_le_bytes());
-                    values.extend_from_slice(b"NIKON\0");
-                }
-                1 => {
-                    out.extend_from_slice(&((after + values.len()) as u32).to_le_bytes());
-                    values.extend_from_slice(b"Z6\0\0");
-                }
-                3 => {
-                    // The camera directory, written after the values.
-                    out.extend_from_slice(&((after + values.len() + 10) as u32).to_le_bytes());
-                }
-                _ => out.extend_from_slice(&inline.to_le_bytes()),
-            }
-        }
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&values);
-        out.extend_from_slice(&[0; 10]);
-
-        // The camera directory: one exposure time, written as a rational after it.
-        let camera = out.len();
-        out.extend_from_slice(&1u16.to_le_bytes());
-        out.extend_from_slice(&0x829Au16.to_le_bytes());
-        out.extend_from_slice(&5u16.to_le_bytes());
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&((camera + 2 + 12 + 4) as u32).to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes());
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&250u32.to_le_bytes());
-        out
-    }
-
-    #[test]
-    fn a_cameras_own_directory_is_read() {
-        let groups = read(&tiff(), Format::Nef);
-        assert_eq!(value(&groups, "Make").as_deref(), Some("NIKON"));
-        assert_eq!(value(&groups, "Model").as_deref(), Some("Z6"));
-
-    }
-
-    #[test]
-    fn the_camera_settings_hanging_off_it_are_read_too() {
-        let groups = read(&tiff(), Format::Nef);
-        assert!(
-            groups.iter().any(|group| group.name == "Settings"),
-            "the directory of settings was not followed"
-        );
-        assert_eq!(value(&groups, "Shutter speed").as_deref(), Some("1/250 s"));
-    }
-
-    #[test]
-    fn the_numbered_fields_of_a_wire_service_are_read() {
-        let mut block = Vec::new();
-        for (field, text) in [(120u8, "A deer in a garden"), (80, "Pomax"), (25, "deer")] {
-            block.push(0x1C);
-            block.push(2);
-            block.push(field);
-            block.extend_from_slice(&(text.len() as u16).to_be_bytes());
-            block.extend_from_slice(text.as_bytes());
-        }
-        let groups = from_iptc(&block);
-        assert_eq!(value(&groups, "Description").as_deref(), Some("A deer in a garden"));
-        assert_eq!(value(&groups, "Creator").as_deref(), Some("Pomax"));
-        assert_eq!(value(&groups, "Keywords").as_deref(), Some("deer"));
-    }
-
-    /// An editor writes hundreds of its own settings into a file: how much
-    /// clarity was applied, what the highlights were pulled to. None of that is
-    /// about the photograph, and none of it is shown.
-    #[test]
-    fn only_what_a_photographer_would_look_at_is_kept() {
-        assert_eq!(xmp_name("dc:title"), Some("Title"));
-        assert_eq!(xmp_name("dc:subject"), Some("Keywords"));
-        assert_eq!(xmp_name("photoshop:City"), Some("City"));
-        assert_eq!(
-            xmp_name("rdf:Description"),
-            None,
-            "the element every property sits inside was read as a property"
-        );
-        assert_eq!(xmp_name("aux:Lens"), Some("Lens"));
-        assert_eq!(xmp_name("crs:Clarity2012"), None);
-        assert_eq!(xmp_name("crs:Highlights2012"), None);
-        assert_eq!(xmp_name("crs:ToneCurveName2012"), None);
-        assert_eq!(xmp_name("xmpMM:InstanceID"), None);
-    }
-
-    #[test]
-    fn adobes_xml_is_read_in_both_of_its_forms() {
-        let xml = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
-            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-            <rdf:Description photoshop:City="Vancouver">
-            <dc:title>A deer</dc:title>
-            </rdf:Description></rdf:RDF></x:xmpmeta>"#;
-        let groups = from_xmp(xml.as_bytes());
-        assert_eq!(value(&groups, "City").as_deref(), Some("Vancouver"));
-        assert_eq!(value(&groups, "Title").as_deref(), Some("A deer"));
-    }
-
-    /// A file writes a date the way a machine sorts them, on a clock nobody
-    /// outside an armed force reads. Somebody looking at their photographs
-    /// reads neither.
-    #[test]
-    fn a_date_is_said_the_way_somebody_would_say_it() {
-        assert_eq!(
-            said_plainly("2026:06:13 04:18:34").as_deref(),
-            Some("June 13, 2026, 4:18:34 am")
-        );
-        assert_eq!(
-            said_plainly("2026-06-13T16:05:00").as_deref(),
-            Some("June 13, 2026, 4:05:00 pm")
-        );
-        assert_eq!(said_plainly("2026:01:02 00:30:00").as_deref(), Some("January 2, 2026, 12:30:00 am"));
-        assert_eq!(said_plainly("2026:07:04 12:00:00").as_deref(), Some("July 4, 2026, 12:00:00 pm"));
-        assert_eq!(said_plainly("2026:06:13").as_deref(), Some("June 13, 2026"));
-        // Nothing that is not a date, rather than a wrong one.
-        assert_eq!(said_plainly("not a date"), None);
-        assert_eq!(said_plainly("0000:00:00 00:00:00"), None);
-        assert_eq!(said_plainly(""), None);
-    }
-
-    #[test]
-    fn a_file_that_says_nothing_about_itself_has_nothing_to_show() {
-        assert!(read(b"not a picture", Format::Jpeg).is_empty());
-        assert!(read(&[], Format::Nef).is_empty());
-        assert!(read(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10], Format::Jpeg).is_empty());
-    }
-
-    /// The files this reads come off other people's cameras. A length that runs
-    /// past the end of the file is a file to give up on, not to read anyway.
-    #[test]
-    fn a_file_that_lies_about_its_own_lengths_is_survived() {
-        let mut lying = tiff();
-        // The make now claims to be four thousand bytes long.
-        lying[10 + 4] = 0xA0;
-        lying[10 + 5] = 0x0F;
-        let groups = read(&lying, Format::Nef);
-        assert!(groups.iter().all(|group| !group.entries.is_empty()));
-
-        let mut truncated = tiff();
-        truncated.truncate(20);
-        let _ = read(&truncated, Format::Nef);
-
-        let mut iptc = vec![0x1C, 2, 120, 0xFF, 0xFF];
-        iptc.extend_from_slice(b"short");
-        let _ = from_iptc(&iptc);
-    }
-}
+#[path = "tests/metadata.rs"]
+mod tests;

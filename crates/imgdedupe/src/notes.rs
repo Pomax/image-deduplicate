@@ -93,5 +93,3 @@ pub fn ran_under(index: &Index, search: &Search) -> anyhow::Result<()> {
     index.set_meta(IGNORE_COLOUR, mark(search.ignore_colour))?;
     index.set_meta(WITHIN_A_FOLDER, mark(search.within_a_folder))
 }
-
-

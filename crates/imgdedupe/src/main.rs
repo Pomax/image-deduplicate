@@ -5,7 +5,6 @@ use std::process::ExitCode;
 use imgdedupe_core::matching::Thresholds;
 
 mod app;
-mod metadata;
 mod folder_picker;
 mod fonts;
 mod headless;
@@ -13,10 +12,12 @@ mod icon;
 mod indexer;
 #[cfg(target_os = "linux")]
 mod mesa;
+mod metadata;
 mod notes;
-#[cfg(test)]
-mod shot;
 mod settings;
+#[cfg(test)]
+#[path = "tests/shot.rs"]
+mod shot;
 mod thumbs;
 #[cfg(debug_assertions)]
 mod tools;
@@ -95,4 +96,3 @@ fn start() -> anyhow::Result<()> {
 fn start() -> anyhow::Result<()> {
     app::launch()
 }
-

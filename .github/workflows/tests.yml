@@ -35,8 +35,5 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Without the `local` feature, which is the whole suite. What is behind it
-      # reads a real folder of photographs on one person's machine, its source
-      # is not in this repository, and nothing here may depend on it.
       - name: Test
         run: cargo test --workspace

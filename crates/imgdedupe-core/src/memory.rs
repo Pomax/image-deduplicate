@@ -10,7 +10,9 @@ mod imp {
     /// The `MemAvailable:` line of `/proc/meminfo`, which is in kibibytes.
     pub fn available_bytes() -> Option<u64> {
         let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let line = meminfo.lines().find(|line| line.starts_with("MemAvailable:"))?;
+        let line = meminfo
+            .lines()
+            .find(|line| line.starts_with("MemAvailable:"))?;
         let kibibytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
         kibibytes.checked_mul(1024)
     }
@@ -112,14 +114,20 @@ mod imp {
         // Safety: `stats` is a `vm_statistics64` and `count` says how many
         // 32 bit words of it there are, which is what the call is given.
         let ok = unsafe {
-            host_statistics64(host, VM_INFO64, (&mut stats as *mut VmStatistics64).cast(), &mut count)
+            host_statistics64(
+                host,
+                VM_INFO64,
+                (&mut stats as *mut VmStatistics64).cast(),
+                &mut count,
+            )
         };
         if ok != 0 {
             return None;
         }
 
-        let pages =
-            u64::from(stats.free_count) + u64::from(stats.inactive_count) + u64::from(stats.purgeable_count);
+        let pages = u64::from(stats.free_count)
+            + u64::from(stats.inactive_count)
+            + u64::from(stats.purgeable_count);
         pages.checked_mul(page_size as u64)
     }
 }
