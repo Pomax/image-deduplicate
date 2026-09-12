@@ -132,7 +132,7 @@ Smallest first, largest last, one file at a time.
 
 - [x] `crates/imgdedupe-core/src/dirlist.rs`
 - [x] `crates/imgdedupe-core/src/fingerprint.rs`
-- [ ] `crates/imgdedupe/src/thumbs.rs`
+- [x] `crates/imgdedupe/src/thumbs.rs`
 - [ ] `crates/imgdedupe-core/src/preview.rs`
 - [ ] `crates/imgdedupe-core/src/features.rs`
 - [ ] `crates/imgdedupe-core/src/index.rs`
