@@ -133,8 +133,8 @@ Smallest first, largest last, one file at a time.
 - [x] `crates/imgdedupe-core/src/dirlist.rs`
 - [x] `crates/imgdedupe-core/src/fingerprint.rs`
 - [x] `crates/imgdedupe/src/thumbs.rs`
-- [ ] `crates/imgdedupe-core/src/preview.rs`
-- [ ] `crates/imgdedupe-core/src/features.rs`
+- [x] `crates/imgdedupe-core/src/preview.rs`
+- [x] `crates/imgdedupe-core/src/features.rs`
 - [ ] `crates/imgdedupe-core/src/index.rs`
 - [ ] `crates/imgdedupe-core/src/db.rs`
 - [ ] `crates/imgdedupe-core/src/metadata.rs`
@@ -149,6 +149,8 @@ A file whose split leaves anything failing must be fixed before anything else is
 No behaviour changes are allowed during this work, only refactoring is allowed.
 
 You MUST stop after each file and ask permission to process the next file.
+
+After the user agrees that a file's refactor is done, and not before, `git add .` and `git commit -m "<file>"` are explicitly allowed, where `<file>` is the name of the file that was just refactored, for example `git commit -m "preview.rs"`.
 
 ## What says it is done
 
