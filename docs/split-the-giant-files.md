@@ -130,6 +130,18 @@ The suite is run first and its counts written down. Those counts are what the wo
 
 Smallest first, largest last, one file at a time.
 
+- [x] `crates/imgdedupe-core/src/dirlist.rs`
+- [x] `crates/imgdedupe-core/src/fingerprint.rs`
+- [ ] `crates/imgdedupe/src/thumbs.rs`
+- [ ] `crates/imgdedupe-core/src/preview.rs`
+- [ ] `crates/imgdedupe-core/src/features.rs`
+- [ ] `crates/imgdedupe-core/src/index.rs`
+- [ ] `crates/imgdedupe-core/src/db.rs`
+- [ ] `crates/imgdedupe-core/src/metadata.rs`
+- [ ] `crates/imgdedupe-core/src/scan.rs`
+- [ ] `crates/imgdedupe-core/src/matching.rs`
+- [ ] `crates/imgdedupe/src/app.rs`
+
 The whole suite must pass after every single file refactor. Not the tests for that file, not the tests for that crate: the whole suite, every time, and the build (with --log) must succeed before the next file is started.
 
 A file whose split leaves anything failing must be fixed before anything else is touched.

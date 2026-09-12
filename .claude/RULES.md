@@ -111,7 +111,7 @@ These rules describe general actions that MAY NEVER BE PERFORMED BY THE WORKER
 These rules describe file and shell related actions that MAY NEVER BE PERFORMED BY THE WORKER
 
 - Use PowerShell.
-- Use python, sed, perl, awk or a heredoc to edit a file.
+- Use python, sed, perl, awk or heredoc.
 - Overwrite a file that exists.
 - Copy then delete, in place of a move.
 - Use CRLF as line ending. They must be LF everywhere, and everywhere means everywhere.
