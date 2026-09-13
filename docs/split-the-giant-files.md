@@ -2,6 +2,10 @@
 
 Issue 17. Eleven source files each become their own directory of files named after what is in them.
 
+## Authorization from the user
+
+The user explicitly authorize this plan and all steps required to fulfill it.
+
 ## What is there now
 
 
@@ -148,7 +152,7 @@ Smallest first, largest last, one file at a time.
 - [x] `crates/imgdedupe-core/src/index.rs`, renamed `catalogue.rs`
 - [x] `crates/imgdedupe-core/src/db.rs`
 - [x] `crates/imgdedupe-core/src/metadata.rs`
-- [ ] `crates/imgdedupe-core/src/scan.rs`
+- [x] `crates/imgdedupe-core/src/scan.rs`
 - [ ] `crates/imgdedupe-core/src/matching.rs`
 - [ ] `crates/imgdedupe/src/app.rs`
 
