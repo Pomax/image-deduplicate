@@ -263,7 +263,7 @@ fn an_index_from_a_build_without_corners_is_brought_up_to_date() {
 struct Fixture {
     dir: tempfile::TempDir,
     options: Options,
-    index: crate::index::Index,
+    index: crate::catalogue::Catalogue,
 }
 
 fn fixture() -> Fixture {
@@ -276,7 +276,7 @@ fn fixture() -> Fixture {
         recurse: true,
         compare_only: false,
     };
-    let index = crate::index::Index::start();
+    let index = crate::catalogue::Catalogue::start();
     index.open(&options.db_path).expect("hold the index");
     Fixture {
         dir,
@@ -923,7 +923,7 @@ fn the_folder_the_pass_was_pointed_at_is_scanned_whatever_it_is_called() {
         compare_only: false,
     };
 
-    let index = crate::index::Index::start();
+    let index = crate::catalogue::Catalogue::start();
     index.open(&db_path).expect("hold the index");
     let cancel = AtomicBool::new(false);
     let (summary, _) = run(&index, &options, &cancel, &|_| {}).expect("scan");

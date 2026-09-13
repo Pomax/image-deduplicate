@@ -58,7 +58,7 @@ fn the_plan_covers_everything_but_the_keeper() {
 fn cleaning_up_forgets_the_removed_files_and_only_those() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("index.sqlite");
-    let index = imgdedupe_core::index::Index::start();
+    let index = imgdedupe_core::catalogue::Catalogue::start();
     index.open(&db_path).expect("an index");
     for path in ["big.jpg", "small, odd.jpg", "elsewhere.jpg"] {
         index.upsert(vec![row(path)], 1).expect("insert");
@@ -108,7 +108,7 @@ fn row(rel_path: &str) -> imgdedupe_core::db::Record {
 fn a_cleanup_that_removed_nothing_touches_no_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("index.sqlite");
-    let index = imgdedupe_core::index::Index::start();
+    let index = imgdedupe_core::catalogue::Catalogue::start();
     index.open(&db_path).expect("an index");
     assert_eq!(forget(&index, &[]).expect("forget"), 0);
 }

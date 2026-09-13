@@ -234,7 +234,7 @@ always reporting a change.
 
 A new index writes down the version it was made with.
 
-## crates/imgdedupe-core/src/index.rs
+## crates/imgdedupe-core/src/catalogue.rs
 
 The one owner of a folder's index.
 
@@ -321,7 +321,7 @@ each leaves no index open, and each leaves the file byte for byte what it was.
 
 Reads the source of both crates and fails on `Connection::open`,
 `open_in_memory` or `open_with_flags` anywhere but `db.rs`, which holds the one
-opener, and `index.rs`, which is the manager that calls it. This is the only
+opener, and `catalogue.rs`, which is the manager that calls it. This is the only
 thing that keeps the rule true once it is true.
 
 ## crates/imgdedupe-core/src/decode.rs

@@ -636,7 +636,7 @@ fn a_folder_forgotten_leaves_no_index_and_says_how_many_rows_went() {
     );
     assert!(!db_path.exists(), "{} was left behind", db_path.display());
     assert!(
-        app.index.open_index_path().is_none(),
+        app.index.open_catalogue_path().is_none(),
         "the manager still has an index open that is gone"
     );
 }
@@ -5441,14 +5441,14 @@ fn the_window_closes_the_index_on_the_way_out() {
     app.selected = Some(marked);
     app.keep_selected();
     assert!(
-        app.index.open_index_path().is_some(),
+        app.index.open_catalogue_path().is_some(),
         "the folder was not open to begin with"
     );
 
     eframe::App::on_exit(&mut app, None);
 
     assert!(
-        app.index.open_index_path().is_none(),
+        app.index.open_catalogue_path().is_none(),
         "the window ended without closing the index, so whatever was still being written went \
          with it"
     );

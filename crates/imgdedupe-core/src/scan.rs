@@ -542,7 +542,7 @@ impl ReadAhead {
 /// across every core; writing runs on one thread in batched transactions, so the
 /// index is consistent at every commit.
 pub fn run(
-    index: &crate::index::Index,
+    index: &crate::catalogue::Catalogue,
     options: &Options,
     cancel: &AtomicBool,
     report: &(dyn Fn(Event) + Sync),
@@ -713,40 +713,42 @@ pub fn run(
                 report(Event::Reached(Step::StartedIndexingNewFiles));
             }
 
-            let flush =
-                |index: &crate::index::Index, pending: &mut Vec<Box<Record>>| -> Result<()> {
-                    if pending.is_empty() {
-                        return Ok(());
-                    }
-                    #[cfg(feature = "logging")]
-                    let rows = pending.len();
-                    #[cfg(feature = "logging")]
-                    let at = Instant::now();
-                    let batch: Vec<Record> = pending.drain(..).map(|it| *it).collect();
-                    index.upsert(batch, scanned_at)?;
-                    #[cfg(feature = "logging")]
-                    let inserted = at.elapsed().as_secs_f64();
-                    #[cfg(feature = "logging")]
-                    let at = Instant::now();
-                    runlog::log_line!(
-                        "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
-                        at.elapsed().as_secs_f64()
-                    );
-                    pending.clear();
-                    Ok(())
-                };
+            let flush = |index: &crate::catalogue::Catalogue,
+                         pending: &mut Vec<Box<Record>>|
+             -> Result<()> {
+                if pending.is_empty() {
+                    return Ok(());
+                }
+                #[cfg(feature = "logging")]
+                let rows = pending.len();
+                #[cfg(feature = "logging")]
+                let at = Instant::now();
+                let batch: Vec<Record> = pending.drain(..).map(|it| *it).collect();
+                index.upsert(batch, scanned_at)?;
+                #[cfg(feature = "logging")]
+                let inserted = at.elapsed().as_secs_f64();
+                #[cfg(feature = "logging")]
+                let at = Instant::now();
+                runlog::log_line!(
+                    "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
+                    at.elapsed().as_secs_f64()
+                );
+                pending.clear();
+                Ok(())
+            };
 
             // The files that turned out not to be pictures, batched the way the
             // pictures are. Writing them down is what stops the next pass reading
             // them again and the next comparison calling them new.
             let mut looked: Vec<db::Looked> = Vec::new();
-            let note = |index: &crate::index::Index, looked: &mut Vec<db::Looked>| -> Result<()> {
-                if looked.is_empty() {
-                    return Ok(());
-                }
-                let batch: Vec<db::Looked> = looked.drain(..).collect();
-                index.not_pictures(batch, scanned_at)
-            };
+            let note =
+                |index: &crate::catalogue::Catalogue, looked: &mut Vec<db::Looked>| -> Result<()> {
+                    if looked.is_empty() {
+                        return Ok(());
+                    }
+                    let batch: Vec<db::Looked> = looked.drain(..).collect();
+                    index.not_pictures(batch, scanned_at)
+                };
 
             for outcome in recv {
                 match outcome {

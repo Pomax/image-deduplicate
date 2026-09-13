@@ -100,7 +100,7 @@ impl Drop for Run {
 }
 
 pub fn start(
-    index: imgdedupe_core::index::Index,
+    index: imgdedupe_core::catalogue::Catalogue,
     root: &Path,
     db_path: &Path,
     recurse: bool,

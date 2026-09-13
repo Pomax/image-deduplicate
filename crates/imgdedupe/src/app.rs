@@ -1422,7 +1422,7 @@ pub struct App {
     scanned_since_asking: bool,
     /// The one thing that owns the folder's index. Everything that reads or
     /// writes it asks this.
-    index: imgdedupe_core::index::Index,
+    index: imgdedupe_core::catalogue::Catalogue,
     /// Whether this folder's index has already said what it was set to. It says
     /// so once, when the folder is opened; a pass over the folder says it again,
     /// and by then the boxes are whoever pressed Scan's business, not the
@@ -1560,7 +1560,7 @@ impl App {
             mark_on_arrival: false,
             asking: None,
             scanned_since_asking: false,
-            index: imgdedupe_core::index::Index::start(),
+            index: imgdedupe_core::catalogue::Catalogue::start(),
             noted: false,
             // What counts as a duplicate is a decision about the pictures in
             // front of the person making it, so every run starts on the default
@@ -5142,7 +5142,7 @@ impl App {
 /// scan of this one builds it from nothing. Deleting the file is what dropping
 /// the rows and rebuilding around them was for, without the copy.
 #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
-fn discard_index(index: &imgdedupe_core::index::Index) -> usize {
+fn discard_index(index: &imgdedupe_core::catalogue::Catalogue) -> usize {
     #[cfg(feature = "logging")]
     let at = std::time::Instant::now();
     match index.delete() {
@@ -5167,7 +5167,7 @@ fn discard_index(index: &imgdedupe_core::index::Index) -> usize {
 /// This runs on the removal's own thread. It rewrites the index file, which on a
 /// folder of thousands is seconds of work.
 #[cfg_attr(not(feature = "logging"), allow(unused_variables))]
-fn forget_rows(index: &imgdedupe_core::index::Index, removed: &[String]) -> usize {
+fn forget_rows(index: &imgdedupe_core::catalogue::Catalogue, removed: &[String]) -> usize {
     if removed.is_empty() {
         return 0;
     }

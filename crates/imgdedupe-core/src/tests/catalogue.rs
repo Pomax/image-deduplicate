@@ -39,10 +39,10 @@ fn temp() -> (tempfile::TempDir, PathBuf) {
 #[test]
 fn nothing_but_the_manager_holds_the_index() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
 
     assert!(
-        index.open_index_path().is_none(),
+        index.open_catalogue_path().is_none(),
         "a manager that was told nothing holds something"
     );
     let too_soon = index.known().expect_err("a read before a folder was given");
@@ -52,7 +52,7 @@ fn nothing_but_the_manager_holds_the_index() {
     );
 
     index.open(&path).expect("hold");
-    assert_eq!(index.open_index_path().as_deref(), Some(path.as_path()));
+    assert_eq!(index.open_catalogue_path().as_deref(), Some(path.as_path()));
 
     index.upsert(vec![row("a.jpg", 10)], 1).expect("a write");
     let known = index.known().expect("a read");
@@ -64,7 +64,7 @@ fn nothing_but_the_manager_holds_the_index() {
 #[test]
 fn letting_go_of_a_folder_waits_for_the_file_to_catch_up() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("hold");
     index
         .upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1)
@@ -73,7 +73,7 @@ fn letting_go_of_a_folder_waits_for_the_file_to_catch_up() {
 
     index.close().expect("let go");
     assert!(
-        index.open_index_path().is_none(),
+        index.open_catalogue_path().is_none(),
         "the folder was not let go of"
     );
 
@@ -119,7 +119,7 @@ fn a_scan_that_indexed_nothing_still_leaves_the_file_in_step() {
         .expect("an older shape");
     drop(older);
 
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("hold");
     // Nothing at all happens to it: no pass, no row, no setting.
     index.close().expect("let go");
@@ -165,7 +165,7 @@ fn a_scan_that_indexed_nothing_still_leaves_the_file_in_step() {
 #[test]
 fn every_change_reaches_the_file() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("hold");
 
     index
@@ -223,7 +223,7 @@ fn every_change_reaches_the_file() {
 #[test]
 fn a_change_is_in_the_file_once_the_writing_is_waited_for() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
 
     index.set_meta("disposal", "delete").expect("set_meta");
@@ -241,7 +241,7 @@ fn a_change_is_in_the_file_once_the_writing_is_waited_for() {
 #[test]
 fn a_change_does_not_replace_the_file() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
     index.synced().expect("wait for the disk");
     let was = std::fs::metadata(&path)
@@ -266,7 +266,7 @@ fn a_change_does_not_replace_the_file() {
 #[test]
 fn deleting_a_file_takes_its_ignored_pairs_out_of_the_file() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
     index
         .upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1)
@@ -301,7 +301,7 @@ fn deleting_a_file_takes_its_ignored_pairs_out_of_the_file() {
 #[test]
 fn a_review_written_by_one_window_is_in_the_file_for_the_next() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
     index
         .upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1)
@@ -332,7 +332,7 @@ fn a_review_written_by_one_window_is_in_the_file_for_the_next() {
 #[test]
 fn a_review_that_is_over_is_out_of_the_file_too() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
     index
         .upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1)
@@ -365,7 +365,7 @@ fn a_review_that_is_over_is_out_of_the_file_too() {
 /// writer is not left holding trouble to report.
 #[test]
 fn a_review_written_with_no_index_open_is_refused_and_leaves_the_writer_clean() {
-    let index = Index::start();
+    let index = Catalogue::start();
     assert!(
         index.keep_these(&[1]).is_err(),
         "a mark was taken with no index open"
@@ -391,7 +391,7 @@ fn a_review_written_with_no_index_open_is_refused_and_leaves_the_writer_clean() 
 #[test]
 fn tidying_the_index_keeps_everything_written_before_it() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
     index
         .upsert(vec![row("a.jpg", 10), row("b.jpg", 20)], 1)
@@ -442,7 +442,7 @@ fn tidying_the_index_keeps_everything_written_before_it() {
 #[test]
 fn compacting_makes_the_file_smaller() {
     let (_dir, path) = temp();
-    let index = Index::start();
+    let index = Catalogue::start();
     index.open(&path).expect("open");
     let rows: Vec<Record> = (0..400)
         .map(|at| row(&format!("{at}.jpg"), at as i64))
@@ -486,14 +486,14 @@ fn a_broken_index_stops_the_manager_and_writes_nothing() {
         (&ahead, "another schema version"),
     ] {
         let was = std::fs::read(path).expect("read what is there");
-        let index = Index::start();
+        let index = Catalogue::start();
         let refused = index
             .open(path)
             .expect_err("this was not refused")
             .to_string();
         assert!(!refused.is_empty(), "{why} was refused without saying why");
         assert!(
-            index.open_index_path().is_none(),
+            index.open_catalogue_path().is_none(),
             "{why} left an index open"
         );
         assert_eq!(
@@ -507,15 +507,15 @@ fn a_broken_index_stops_the_manager_and_writes_nothing() {
 /// Nothing outside the manager opens a database.
 ///
 /// This is the rule all of this is for, and the only thing that keeps it true
-/// once it is true. `db.rs` holds the one opener and `index.rs` is the
-/// manager that calls it; a connection made anywhere else is a second owner
+/// once it is true. `db.rs` holds the one opener and `catalogue/serve.rs` is
+/// the manager that calls it; a connection made anywhere else is a second owner
 /// of the file.
 #[test]
 fn no_connection_is_made_outside_the_manager() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the crates folder");
-    let allowed = ["db.rs", "index.rs"];
+    let allowed = ["db.rs", "serve.rs"];
     let ways = ["Connection::open", "open_in_memory", "open_with_flags"];
 
     let mut found = Vec::new();

@@ -84,11 +84,21 @@ The two platform modules in `dirlist.rs` are both called `imp`, so each gains a 
 - `db/files.rs`: `Known`, `load_known`, `Record`, `upsert`, `Looked`, `not_a_picture`, `delete_paths`, `begin_review`.
 - `db/review.rs`: `pair`, `ignore`, `unignore`, `ignored`, the keep table and `keep_these`, `unkeep_these`, `clear_keep`, `kept`, the sets table and `store_sets`, `stored_sets`, `clear_sets`.
 
-### `crates/imgdedupe-core/src/index.rs`
+### `crates/imgdedupe-core/src/index.rs`, renamed `catalogue.rs`
 
-- `index.rs`: `Index`, `OpenIndex`, `Job`, `Reporter`, the `Debug`, and the `impl Index` that is the manager's whole outside.
-- `index/serve.rs`: `serve`, `with`, `with_mut`, `open_index`, `close_index`, `compact`, `delete`, `open_the_file`.
-- `index/writer.rs`: `Writer`, `Change`, `Errand`, `impl Writer`.
+"Index" names nothing. What the file holds is the one owner of a folder's catalogue of pictures: every file looked at, its fingerprints, the pairs said not to be copies, the marks and the sets of a review. It becomes `catalogue`, and the names in it follow:
+
+- `index.rs` becomes `catalogue.rs`, and `tests/index.rs` becomes `tests/catalogue.rs`, both with `mv`. `mod index` in `lib.rs` becomes `mod catalogue`, and the `#[path]` on the tests module names the new test file.
+- `Index` becomes `Catalogue`, `OpenIndex` becomes `OpenCatalogue`, `Job::OpenIndexPath` becomes `Job::OpenCataloguePath`, `open_index_path` becomes `open_catalogue_path`, `open_index` becomes `open_catalogue`, `close_index` becomes `close_catalogue`, and `current_open_index` becomes `current_catalogue`.
+- Every place that names any of those follows: `lib.rs`, `scan.rs`, `tests/scan.rs` in the core crate, and `main.rs`, `app.rs`, `headless.rs`, `indexer.rs`, `notes.rs`, `tools.rs`, `tests/app.rs`, `tests/indexer.rs`, `tests/tools.rs` in the app.
+- Doc comments in `catalogue.rs` and its children that mean this manager or what it holds say "catalogue".
+- Nothing a person can read at run time changes, because that is behaviour: error messages, log lines, the `Debug` text, the thread names and the window's wording stay as they are. The file on disk stays `imgdedupe.sqlite`, `INDEX_FILENAME` keeps its name, and `indexer.rs` keeps its name.
+
+The rename and the split are one step, measured once, and committed as `catalogue.rs`.
+
+- `catalogue.rs`: `Catalogue`, `OpenCatalogue`, `Job`, `Reporter`, the `Debug`, and the `impl Catalogue` that is the manager's whole outside.
+- `catalogue/serve.rs`: `serve`, `with`, `with_mut`, `open_catalogue`, `close_catalogue`, `compact`, `delete`, `open_the_file`.
+- `catalogue/writer.rs`: `Writer`, `Change`, `Errand`, `impl Writer`.
 
 ### `crates/imgdedupe-core/src/features.rs`
 
@@ -135,7 +145,7 @@ Smallest first, largest last, one file at a time.
 - [x] `crates/imgdedupe/src/thumbs.rs`
 - [x] `crates/imgdedupe-core/src/preview.rs`
 - [x] `crates/imgdedupe-core/src/features.rs`
-- [ ] `crates/imgdedupe-core/src/index.rs`
+- [x] `crates/imgdedupe-core/src/index.rs`, renamed `catalogue.rs`
 - [ ] `crates/imgdedupe-core/src/db.rs`
 - [ ] `crates/imgdedupe-core/src/metadata.rs`
 - [ ] `crates/imgdedupe-core/src/scan.rs`
@@ -148,17 +158,17 @@ A file whose split leaves anything failing must be fixed before anything else is
 
 No behaviour changes are allowed during this work, only refactoring is allowed.
 
-You MUST stop after each file and ask permission to process the next file.
+You MUST stop after each file and ask permission to process the next file. If granted, check the checkbox for the current pass's file.
 
 After the user agrees that a file's refactor is done, and not before, `git add .` and `git commit -m "<file>"` are explicitly allowed, where `<file>` is the name of the file that was just refactored, for example `git commit -m "preview.rs"`.
 
 ## What says it is done
 
-- Every named test that runs today runs after, under the same name and in the same module path. The test files are not touched.
+- Every named test that runs today runs after, under the same name and in the same module path. The test files are not touched. The one exception is the rename of `index.rs`: its tests run under `catalogue::tests` from `tests/catalogue.rs`, and the test files that name `Index` name `Catalogue` instead.
 - The suite reports the same counts it reported at the start.
 - Every file named in the split exists and holds what this plan says it holds.
 - `scripts\build.bat` and `scripts\build.bat --test` both produce an executable.
 
 ## The documentation
 
-`docs/tests.md` heads each group with the source file its tests are about, and names `scan.rs`, `shot.rs`, `db.rs` and `index.rs` in its prose as well. Every one of those files keeps its name, so the document needs no change. `.claude/CHRONICLE.md` names source files in its record of past work and is not a description of the arrangement as it stands, so it is left alone. Nothing else in the repository names a source file.
+`docs/tests.md` heads each group with the source file its tests are about, and names `scan.rs`, `shot.rs`, `db.rs` and `index.rs` in its prose as well. `index.rs` becomes `catalogue.rs`, so its heading and the sentence that names it are changed to `catalogue.rs` once the suite passes. Every other file keeps its name. `.claude/CHRONICLE.md` names source files in its record of past work and is not a description of the arrangement as it stands, so it is left alone. Nothing else in the repository names a source file.

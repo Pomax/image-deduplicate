@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use imgdedupe_core::catalogue::Catalogue;
 use imgdedupe_core::cleanup::{self, Disposal, Plan};
-use imgdedupe_core::index::Index;
 use imgdedupe_core::matching::{DuplicateSet, Thresholds};
 
 use crate::headless;
@@ -96,7 +96,7 @@ fn report(folder: PathBuf, args: &Args) -> Result<()> {
         .db
         .clone()
         .unwrap_or_else(|| headless::default_db_path(&folder));
-    let index = headless::open_index(&db_path)?;
+    let index = headless::open_catalogue(&db_path)?;
     let sets = sets_of(&index, thresholds(args))?;
     let text = match args.format {
         ReportFormat::Json => report_json(&sets),
@@ -111,7 +111,7 @@ fn clean(folder: PathBuf, args: &Args) -> Result<()> {
         .db
         .clone()
         .unwrap_or_else(|| headless::default_db_path(&folder));
-    let index = headless::open_index(&db_path)?;
+    let index = headless::open_catalogue(&db_path)?;
     let sets = sets_of(&index, thresholds(args))?;
     let plan = plan_from(&sets);
 
@@ -213,7 +213,7 @@ fn describe(plan: &Plan) -> String {
     )
 }
 
-fn apply(root: &Path, plan: &Plan, disposal: &Disposal, index: &Index) -> Result<String> {
+fn apply(root: &Path, plan: &Plan, disposal: &Disposal, index: &Catalogue) -> Result<String> {
     let outcome = cleanup::apply(root, plan, disposal).context("carrying out the plan")?;
     let mut out = format!(
         "removed {} files, freed {:.1} MB\n",
@@ -232,7 +232,7 @@ fn apply(root: &Path, plan: &Plan, disposal: &Disposal, index: &Index) -> Result
 /// Take the removed files out of the index. Whether they went to the recycle bin,
 /// to another folder or nowhere, they are not at those paths any more, and an
 /// index that still lists them offers duplicates of files that are gone.
-fn forget(index: &Index, removed: &[String]) -> Result<usize> {
+fn forget(index: &Catalogue, removed: &[String]) -> Result<usize> {
     if removed.is_empty() {
         return Ok(0);
     }
@@ -248,7 +248,7 @@ fn forget(index: &Index, removed: &[String]) -> Result<usize> {
 }
 
 /// Search whatever the manager is holding.
-fn sets_of(index: &Index, thresholds: Thresholds) -> Result<Vec<DuplicateSet>> {
+fn sets_of(index: &Catalogue, thresholds: Thresholds) -> Result<Vec<DuplicateSet>> {
     let found = index.find_sets(
         thresholds,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

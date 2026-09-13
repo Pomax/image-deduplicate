@@ -1,3 +1,4 @@
+pub mod catalogue;
 #[cfg(feature = "review")]
 pub mod cleanup;
 pub mod db;
@@ -7,7 +8,6 @@ pub mod features;
 pub mod fingerprint;
 pub mod format;
 pub mod frames;
-pub mod index;
 pub mod matching;
 pub mod memory;
 pub mod metadata;

@@ -10,7 +10,7 @@
 //! Read in one place, so the names of the keys are written once. Nothing here
 //! decides anything: the window takes these and applies them.
 
-use imgdedupe_core::index::Index;
+use imgdedupe_core::catalogue::Catalogue;
 
 /// Every choice an index holds, or nothing where the index has never been asked
 /// about one. Nothing is a folder that has not said, which is not the same as a
@@ -66,7 +66,7 @@ pub fn mark(on: bool) -> &'static str {
 }
 
 /// Everything the index has to say, asked of the manager holding it.
-pub fn read(index: &Index) -> Notes {
+pub fn read(index: &Catalogue) -> Notes {
     let value = |key: &str| index.meta(key).ok().flatten();
     let yes_or_no = |key: &str| value(key).map(|held| held == "1");
     let number = |key: &str| value(key).and_then(|held| held.parse::<f64>().ok());
@@ -86,7 +86,7 @@ pub fn read(index: &Index) -> Notes {
 
 /// Write down the settings a search ran under. Called where one has run, and
 /// nowhere else.
-pub fn ran_under(index: &Index, search: &Search) -> anyhow::Result<()> {
+pub fn ran_under(index: &Catalogue, search: &Search) -> anyhow::Result<()> {
     index.set_meta(SENSITIVITY, &search.sensitivity.to_string())?;
     index.set_meta(MATCH_WHOLE_FRAME, mark(search.whole_frame))?;
     index.set_meta(MATCH_CORNERS, mark(search.corners))?;
