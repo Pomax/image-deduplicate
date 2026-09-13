@@ -147,7 +147,7 @@ Smallest first, largest last, one file at a time.
 - [x] `crates/imgdedupe-core/src/features.rs`
 - [x] `crates/imgdedupe-core/src/index.rs`, renamed `catalogue.rs`
 - [x] `crates/imgdedupe-core/src/db.rs`
-- [ ] `crates/imgdedupe-core/src/metadata.rs`
+- [x] `crates/imgdedupe-core/src/metadata.rs`
 - [ ] `crates/imgdedupe-core/src/scan.rs`
 - [ ] `crates/imgdedupe-core/src/matching.rs`
 - [ ] `crates/imgdedupe/src/app.rs`
