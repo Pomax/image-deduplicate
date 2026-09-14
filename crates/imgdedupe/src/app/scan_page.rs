@@ -558,20 +558,20 @@ impl App {
         // back whatever its own index has a record of.
         if elsewhere {
             self.sensitivity = matching::DEFAULT_SENSITIVITY;
-            self.ignore_colour = false;
-            self.recurse = false;
+            self.ignore_colour = MATCH_COLOUR_WITH_GRAYSCALE_DEFAULT;
+            self.recurse = INCLUDE_SUBFOLDERS_DEFAULT;
             // Both ways of matching, until this folder's index says otherwise,
             // and the whole folder at once rather than one folder at a time.
-            self.match_whole_frame = true;
-            self.match_corners = true;
-            self.within_a_folder = false;
+            self.match_whole_frame = MATCH_WHOLE_PICTURES_DEFAULT;
+            self.match_corners = MATCH_PARTIALS_DEFAULT;
+            self.within_a_folder = ONLY_MATCH_WITHIN_FOLDERS_DEFAULT;
             // Whether opening a folder runs a pass is that folder's own answer,
             // and a folder that has not been asked yet has not said yes.
-            self.auto_rescan = false;
+            self.auto_rescan = AUTOMATICALLY_RESCAN_DEFAULT;
             // A folder that has an index arrives with the box already ticked.
             self.keep_index = has_index;
             self.destination = Destination::Trash;
-            self.move_dir = String::new();
+            self.move_dir = MOVE_FOLDER_DEFAULT.to_string();
         }
         self.sets.clear();
         self.keep.clear();

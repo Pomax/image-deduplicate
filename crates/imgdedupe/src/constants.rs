@@ -319,3 +319,27 @@ pub const SCROLLBAR_HANDLE_CORNER_RADIUS: f32 = 2.0;
 /// How far a scrollbar arrow reaches from the middle of its button, as a fraction
 /// of the button's size.
 pub const SCROLLBAR_ARROW_REACH_FRACTION: f32 = 0.26;
+
+/// Whether "Include subfolders" starts ticked.
+pub const INCLUDE_SUBFOLDERS_DEFAULT: bool = false;
+
+/// Whether "Only match within folders" starts ticked.
+pub const ONLY_MATCH_WITHIN_FOLDERS_DEFAULT: bool = false;
+
+/// Whether "Automatically rescan when opening this index" starts ticked.
+pub const AUTOMATICALLY_RESCAN_DEFAULT: bool = false;
+
+/// Whether "Automatically mark to keep" starts ticked.
+pub const AUTOMATICALLY_MARK_TO_KEEP_DEFAULT: bool = false;
+
+/// Whether "Match whole pictures" starts ticked.
+pub const MATCH_WHOLE_PICTURES_DEFAULT: bool = true;
+
+/// Whether "Match partials" starts ticked.
+pub const MATCH_PARTIALS_DEFAULT: bool = true;
+
+/// Whether "Match colour with grayscale" starts ticked.
+pub const MATCH_COLOUR_WITH_GRAYSCALE_DEFAULT: bool = false;
+
+/// The folder files are moved to before one has been chosen.
+pub const MOVE_FOLDER_DEFAULT: &str = "";

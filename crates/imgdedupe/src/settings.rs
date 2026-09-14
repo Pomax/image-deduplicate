@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::constants::{INCLUDE_SUBFOLDERS_DEFAULT, MATCH_COLOUR_WITH_GRAYSCALE_DEFAULT};
+
 const FILE: &str = "settings.conf";
 
 /// Where the operating system keeps an application's configuration: `%APPDATA%`
@@ -57,9 +59,9 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             folder: None,
-            recurse: false,
+            recurse: INCLUDE_SUBFOLDERS_DEFAULT,
             previous: Vec::new(),
-            ignore_colour: false,
+            ignore_colour: MATCH_COLOUR_WITH_GRAYSCALE_DEFAULT,
             window: None,
             preview_width: None,
         }
