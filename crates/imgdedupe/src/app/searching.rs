@@ -245,6 +245,9 @@ impl App {
                 thumbs::THUMB_EDGE,
             );
         }
+        // These are other sets, so the list starts at the first of them rather
+        // than wherever the last review was left scrolled to.
+        self.list_to_top = true;
         self.view = View::Review;
     }
 
