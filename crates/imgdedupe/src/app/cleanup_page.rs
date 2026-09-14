@@ -73,12 +73,12 @@ impl App {
                             plan.files()
                         ))
                         .strong()
-                        .color(egui::Color32::WHITE),
+                        .color(CLEANUP_BUTTON_TEXT_COLOUR),
                     )
                     .fill(if danger {
-                        egui::Color32::from_rgb(150, 50, 50)
+                        PERMANENT_DELETE_BUTTON_FILL_COLOUR
                     } else {
-                        egui::Color32::from_rgb(60, 110, 180)
+                        CLEANUP_BUTTON_FILL_COLOUR
                     })
                     .min_size(egui::vec2(210.0, 28.0));
                     if ui.add_enabled(ready, button).clicked() {
@@ -137,7 +137,7 @@ impl App {
                     ui.add_space(4.0);
                     let note = egui::RichText::new(self.destination.note());
                     if self.destination == Destination::Delete {
-                        ui.label(note.color(egui::Color32::from_rgb(200, 80, 80)));
+                        ui.label(note.color(ERROR_MESSAGE_TEXT_COLOUR));
                     } else {
                         ui.label(note.weak());
                     }
@@ -197,7 +197,7 @@ impl App {
                                     // nowhere else to read it.
                                     ui.label(
                                         egui::RichText::new(format!("{path}  {why}"))
-                                            .color(egui::Color32::from_rgb(200, 80, 80)),
+                                            .color(ERROR_MESSAGE_TEXT_COLOUR),
                                     );
                                 }
                                 None => {

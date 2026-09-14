@@ -71,9 +71,9 @@ impl App {
             let go = egui::Button::new(
                 egui::RichText::new("Clean up")
                     .strong()
-                    .color(egui::Color32::WHITE),
+                    .color(CLEANUP_BUTTON_TEXT_COLOUR),
             )
-            .fill(egui::Color32::from_rgb(60, 110, 180))
+            .fill(CLEANUP_BUTTON_FILL_COLOUR)
             .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, 28.0));
             if right.add_enabled(going > 0, go).clicked() {
                 self.view = View::Cleanup;
@@ -419,7 +419,7 @@ impl App {
                 // Everything behind it is covered, so what is on screen is the
                 // picture and nothing else.
                 ui.painter()
-                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(240));
+                    .rect_filled(screen, 0.0, FULL_WINDOW_PICTURE_BACKDROP_COLOUR);
                 let taken = ui.allocate_rect(screen, egui::Sense::click());
                 match picture {
                     Some(texture) => {
@@ -745,7 +745,7 @@ impl App {
         // is done to the whole of it at once.
         let kept = !ignored && keeps(keeping, member.file_id);
         let showing = !ignored && self.selected == Some(member.file_id);
-        let keep_colour = egui::Color32::from_rgb(90, 180, 110);
+        let keep_colour = KEPT_THUMBNAIL_MARK_COLOUR;
 
         let tall = tile_strip_height(ui);
         ui.allocate_ui(egui::vec2(width, tall), |ui| {

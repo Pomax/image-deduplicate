@@ -220,27 +220,28 @@ impl App {
     /// with the milliseconds since the application started at the end of the
     /// line. The gaps between those numbers are where the wait is.
     fn lamps(&mut self, ui: &mut egui::Ui) {
-        const RED: egui::Color32 = egui::Color32::from_rgb(196, 62, 54);
-        const GREEN: egui::Color32 = egui::Color32::from_rgb(58, 160, 78);
-        const DOT: f32 = 5.0;
-
-        const GREY: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
-
         let dot = |ui: &mut egui::Ui, state: Went| {
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(DOT * 3.0, ui.spacing().interact_size.y),
+                egui::vec2(LAMP_DOT_RADIUS * 3.0, ui.spacing().interact_size.y),
                 egui::Sense::hover(),
             );
             match state {
-                Went::Happened => ui.painter().circle_filled(rect.center(), DOT, GREEN),
-                Went::Waiting => ui.painter().circle_filled(rect.center(), DOT, RED),
+                Went::Happened => {
+                    ui.painter()
+                        .circle_filled(rect.center(), LAMP_DOT_RADIUS, LAMP_DONE_COLOUR)
+                }
+                Went::Waiting => {
+                    ui.painter()
+                        .circle_filled(rect.center(), LAMP_DOT_RADIUS, LAMP_WAITING_COLOUR)
+                }
                 // Nothing to do rather than not done yet: an empty ring, so a
                 // pass that had no new files to read does not read as a pass
                 // that failed to read them.
-                Went::Skipped => {
-                    ui.painter()
-                        .circle_stroke(rect.center(), DOT, egui::Stroke::new(1.5_f32, GREY))
-                }
+                Went::Skipped => ui.painter().circle_stroke(
+                    rect.center(),
+                    LAMP_DOT_RADIUS,
+                    egui::Stroke::new(LAMP_SKIPPED_RING_WIDTH, LAMP_SKIPPED_RING_COLOUR),
+                ),
             }
         };
 

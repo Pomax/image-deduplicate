@@ -413,7 +413,7 @@ impl eframe::App for App {
             egui::TopBottomPanel::bottom("error").show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(200, 80, 80), error);
+                    ui.colored_label(ERROR_MESSAGE_TEXT_COLOUR, error);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("dismiss").clicked() {
                             self.error = None;
