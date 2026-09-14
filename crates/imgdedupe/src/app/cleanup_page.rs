@@ -121,7 +121,7 @@ impl App {
                         });
                 });
 
-                ui.add_space(SECTION_GAP);
+                ui.add_space(SECTION_SPACING_GAP);
                 let busy = self.busy();
                 section(ui, "Where they go", |ui| {
                     for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {

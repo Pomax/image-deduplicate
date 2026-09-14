@@ -167,7 +167,11 @@ impl App {
     pub(super) fn scan_view(&mut self, ui: &mut egui::Ui) {
         // Everything on one row: the groups and the buttons are all short and
         // stacking them full width leaves most of the window empty.
-        let widths = share_row_width(ui.available_width(), &self.scan_content, SECTION_GAP);
+        let widths = share_row_width(
+            ui.available_width(),
+            &self.scan_content,
+            SECTION_SPACING_GAP,
+        );
         let mut measured = self.scan_content.clone();
         // The three boxes end level with each other, at the height of whichever
         // holds the most. Nothing is a fixed height, so taking a control out
@@ -175,9 +179,9 @@ impl App {
         let mut tallest = 0.0_f32;
         ui.horizontal_top(|ui| {
             let folder = self.folder_section(ui, widths[0]);
-            ui.add_space(SECTION_GAP);
+            ui.add_space(SECTION_SPACING_GAP);
             let matching = self.matching_section(ui, widths[1]);
-            ui.add_space(SECTION_GAP);
+            ui.add_space(SECTION_SPACING_GAP);
             let run = self.run_section(ui, widths[2]);
             measured = vec![folder.x, matching.x, run.x];
             tallest = folder.y.max(matching.y).max(run.y);
@@ -199,7 +203,7 @@ impl App {
         // set to and how far the run has got, and the bar beside the lamps
         // reaches from the first lamp to the bottom of the window rather than
         // down the whole page.
-        ui.add_space(SECTION_GAP);
+        ui.add_space(SECTION_SPACING_GAP);
         let step = ui.spacing().interact_size.y * 3.0;
         scrolled(
             ui,
@@ -317,7 +321,7 @@ impl App {
                     let reserved = if self.previous.is_empty() {
                         0.0
                     } else {
-                        PREVIOUS_ROOM
+                        PREVIOUS_BUTTON_WIDTH
                     };
                     match &self.folder {
                         Some(folder) => clipped_line_in(
@@ -782,7 +786,7 @@ impl App {
                 // the box would otherwise size to the digits in it. The row's boxes
                 // are shared out by what their contents measure, so 5.0 and 30.0
                 // would each want a different share and move all three.
-                ui.spacing_mut().interact_size.x = VALUE_WIDTH;
+                ui.spacing_mut().interact_size.x = SENSITIVITY_PERCENTAGE_BOX_WIDTH;
                 let mut changed = ui
                     .add_enabled(
                         !busy,
@@ -794,7 +798,10 @@ impl App {
                     .changed();
                 ui.horizontal(|ui| {
                     ui.label("presets:");
-                    ui.spacing_mut().button_padding = PRESET_PADDING;
+                    ui.spacing_mut().button_padding = egui::vec2(
+                        SMALL_BUTTON_HORIZONTAL_PADDING,
+                        SMALL_BUTTON_VERTICAL_PADDING,
+                    );
                     for (name, percent) in matching::PRESETS {
                         let here = on_preset(self.sensitivity, percent);
                         // The one the slider is on is drawn as pressed, so the row
@@ -909,7 +916,7 @@ impl App {
             return;
         }
 
-        ui.add_space(SECTION_GAP);
+        ui.add_space(SECTION_SPACING_GAP);
         section(ui, "Progress", |ui| {
             // Before the folder has been listed there is no total, so there is no
             // fraction and the bars have nothing to show. The count is what there

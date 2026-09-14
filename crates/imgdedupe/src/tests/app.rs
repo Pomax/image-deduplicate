@@ -922,11 +922,11 @@ fn a_set_of_portraits_is_not_given_the_width_of_a_landscape() {
         "the two shapes fitted to the same width"
     );
     assert!(
-        portrait.y <= TILE.y && landscape.y <= TILE.y,
+        portrait.y <= THUMBNAIL_MAX_HEIGHT && landscape.y <= THUMBNAIL_MAX_HEIGHT,
         "a picture came out too tall"
     );
     assert!(
-        portrait.x <= TILE.x && landscape.x <= TILE.x,
+        portrait.x <= THUMBNAIL_MAX_WIDTH && landscape.x <= THUMBNAIL_MAX_WIDTH,
         "a picture came out too wide"
     );
 
@@ -938,7 +938,7 @@ fn a_set_of_portraits_is_not_given_the_width_of_a_landscape() {
     };
     // The column is the picture plus room for the border and the ring drawn
     // around it, or the neighbouring tile clips them.
-    let around = TILE_BORDER + TILE_RING * 2.0;
+    let around = 2.0 * THUMBNAIL_INNER_MARGIN + THUMBNAIL_CLEARANCE * 2.0;
     assert!(
         around >= 12.0,
         "there is not enough room around a picture for its ring"
@@ -1489,7 +1489,8 @@ fn scroll_strip(rects: &[egui::epaint::RectShape]) -> Vec<&egui::epaint::RectSha
     rects
         .iter()
         .filter(|shape| {
-            (shape.rect.width() - SCROLL_BAR).abs() < 0.5 && shape.rect.height() > SCROLL_BAR
+            (shape.rect.width() - SCROLLBAR_STRIP_WIDTH).abs() < 0.5
+                && shape.rect.height() > SCROLLBAR_STRIP_WIDTH
         })
         .collect()
 }
@@ -1511,7 +1512,7 @@ fn the_review_list_paints_a_twelve_point_bar_beside_it_in_either_theme() {
         let strip = scroll_strip(&rects);
         assert!(
             strip.len() >= 2,
-            "{name}: no {SCROLL_BAR} point track and handle in the review view, \
+            "{name}: no {SCROLLBAR_STRIP_WIDTH} point track and handle in the review view, \
              the tall narrow rects were {:?}",
             rects
                 .iter()
@@ -1791,12 +1792,12 @@ fn a_list_that_scrolls_paints_a_twelve_point_handle_at_its_right_edge() {
         .iter()
         .filter(|shape| {
             (shape.rect.right() - right).abs() < 12.0
-                && (shape.rect.width() - SCROLL_BAR).abs() < 0.5
+                && (shape.rect.width() - SCROLLBAR_STRIP_WIDTH).abs() < 0.5
         })
         .collect();
     assert!(
         strip.len() >= 2,
-        "no {SCROLL_BAR} point track and handle at the right edge, found {:?}",
+        "no {SCROLLBAR_STRIP_WIDTH} point track and handle at the right edge, found {:?}",
         rects.iter().map(|shape| shape.rect).collect::<Vec<_>>()
     );
 
@@ -2104,7 +2105,12 @@ fn a_set_box_is_not_taller_than_the_tiles_in_it() {
     // space to the next row. Nothing else.
     let spare = taken - bottom;
     assert!(
-        spare < SCROLL_BAR + buttons + BOX_PADDING + 2.0 * BOX_EDGE + 8.0,
+        spare
+            < SCROLLBAR_STRIP_WIDTH
+                + buttons
+                + SET_BOX_INNER_PADDING
+                + 2.0 * SET_BOX_BORDER_WIDTH
+                + 8.0,
         "the box is {spare} points taller than the tiles in it"
     );
 }
@@ -2543,12 +2549,12 @@ fn a_set_row_fits_the_room_it_is_given() {
                 // the gap kept before that bar.
                 let whole = ui.available_rect_before_wrap();
                 let room = egui::Rect::from_min_max(
-                    egui::pos2(whole.left() + PAGE_MARGIN, whole.top()),
+                    egui::pos2(whole.left() + CONTENT_MARGIN, whole.top()),
                     whole.max,
                 );
-                let inside = room.with_max_x(room.right() - SCROLL_BAR - PAGE_MARGIN);
+                let inside = room.with_max_x(room.right() - SCROLLBAR_STRIP_WIDTH - CONTENT_MARGIN);
                 list_at = whole.left();
-                bar_at = room.right() - SCROLL_BAR;
+                bar_at = room.right() - SCROLLBAR_STRIP_WIDTH;
                 let wide = inside.width();
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inside), |ui| {
                     app.set_row(ui, 0, &root, wide)
@@ -2569,7 +2575,7 @@ fn a_set_row_fits_the_room_it_is_given() {
     // buttons, and the margin the frame draws with, and nothing else.
     let under = outline.bottom() - last;
     assert!(
-        under < SCROLL_BAR + buttons + 14.0,
+        under < SCROLLBAR_STRIP_WIDTH + buttons + 14.0,
         "the box goes {under} past the last line under the pictures"
     );
     // The left of the box sits a margin in from where the list begins, and
@@ -2637,8 +2643,8 @@ fn two_clicks_on_a_picture_keep_it_the_way_the_space_bar_does() {
             // inside the tile now, so it is close to the tile's own size.
             egui::Shape::Rect(rect)
                 if rect.stroke.color != selection_colour()
-                    && (rect.rect.width() - TILE.x).abs() < 6.0
-                    && (rect.rect.height() - TILE.y).abs() < 6.0 =>
+                    && (rect.rect.width() - THUMBNAIL_MAX_WIDTH).abs() < 6.0
+                    && (rect.rect.height() - THUMBNAIL_MAX_HEIGHT).abs() < 6.0 =>
             {
                 Some(rect.rect)
             }
@@ -3396,7 +3402,8 @@ fn the_review_list_keeps_to_its_own_side_of_the_window() {
         .iter()
         .filter_map(|clipped| match &clipped.shape {
             egui::Shape::Rect(rect)
-                if (rect.rect.width() - SCROLL_BAR).abs() < 1.0 && rect.rect.height() > 100.0 =>
+                if (rect.rect.width() - SCROLLBAR_STRIP_WIDTH).abs() < 1.0
+                    && rect.rect.height() > 100.0 =>
             {
                 Some(rect.rect.top())
             }
@@ -3428,7 +3435,7 @@ fn the_review_list_keeps_to_its_own_side_of_the_window() {
         })
         .fold(f32::MAX, f32::min);
     assert!(
-        first - toolbar >= SECTION_GAP - 1.0,
+        first - toolbar >= SECTION_SPACING_GAP - 1.0,
         "the first set starts {} under the toolbar",
         first - toolbar
     );
@@ -3539,7 +3546,7 @@ fn a_sets_bar_runs_the_width_of_the_box_and_the_band_has_a_line_on_it() {
         .iter()
         .filter_map(|clipped| match &clipped.shape {
             egui::Shape::Rect(rect)
-                if (rect.rect.height() - SCROLL_BAR).abs() < 1.0
+                if (rect.rect.height() - SCROLLBAR_STRIP_WIDTH).abs() < 1.0
                     && rect.rect.width() > 100.0
                     && inside.contains(rect.rect.center()) =>
             {
@@ -3624,7 +3631,7 @@ fn the_scroll_bar_beside_the_list_stays_where_it_is_when_the_list_moves() {
             .iter()
             .filter_map(|clipped| match &clipped.shape {
                 egui::Shape::Rect(rect)
-                    if (rect.rect.width() - SCROLL_BAR).abs() < 1.0
+                    if (rect.rect.width() - SCROLLBAR_STRIP_WIDTH).abs() < 1.0
                         && rect.rect.height() > 100.0 =>
                 {
                     Some(rect.rect)
@@ -3707,7 +3714,7 @@ fn the_review_starts_at_the_top_after_a_search() {
 
 /// Every set is drawn whole: the line round it is inside what the list is
 /// allowed to paint in, top and bottom, so no box is sliced by the edge of
-/// the list. One box stands as far from the next as `BETWEEN_BOXES`, the gap
+/// the list. One box stands as far from the next as `SET_BOX_VERTICAL_GAP`, the gap
 /// from the window's edge to a box's left edge is the gap from its right
 /// edge to the scroll bar, and what is inside a box keeps the same room on
 /// either side.
@@ -3789,7 +3796,7 @@ fn the_set_boxes_are_drawn_whole_and_evenly_spaced() {
     // Spaced, not stacked.
     let gap = boxes[1].0.top() - boxes[0].0.bottom();
     assert!(
-        gap >= BETWEEN_BOXES - 0.01,
+        gap >= SET_BOX_VERTICAL_GAP - 0.01,
         "one set ends at {} and the next starts at {}, {gap} apart",
         boxes[0].0.bottom(),
         boxes[1].0.top()
@@ -3801,7 +3808,8 @@ fn the_set_boxes_are_drawn_whole_and_evenly_spaced() {
         .iter()
         .filter_map(|clipped| match &clipped.shape {
             egui::Shape::Rect(rect)
-                if (rect.rect.width() - SCROLL_BAR).abs() < 1.0 && rect.rect.height() > 100.0 =>
+                if (rect.rect.width() - SCROLLBAR_STRIP_WIDTH).abs() < 1.0
+                    && rect.rect.height() > 100.0 =>
             {
                 Some(rect.rect.left())
             }
@@ -3818,7 +3826,7 @@ fn the_set_boxes_are_drawn_whole_and_evenly_spaced() {
     );
 
     // And inside a box, the pictures keep the same room on either side: what
-    // the strip is clipped to sits `BOX_PADDING` inside the box at both
+    // the strip is clipped to sits `SET_BOX_INNER_PADDING` inside the box at both
     // edges, so the first picture starts as far in as the last one ends.
     let strip = drawn
         .iter()
@@ -4032,7 +4040,7 @@ fn the_ring_round_the_picture_shown_is_not_the_keep_border() {
 }
 
 /// A set nobody calls a set of copies is barely drawn: the pictures and every
-/// line of writing under them at `IGNORED_OPACITY`. The buttons are not,
+/// line of writing under them at `IGNORED_SET_OPACITY`. The buttons are not,
 /// because they are how it stops being ignored.
 #[test]
 fn an_ignored_set_is_drawn_faded_and_its_buttons_are_not() {
@@ -4090,7 +4098,7 @@ fn an_ignored_set_is_drawn_faded_and_its_buttons_are_not() {
     let faded = draw(&mut app);
 
     let now = alpha_of(&faded, "one.png").expect("the file name went when the set was ignored");
-    let wanted = f32::from(strip) * IGNORED_OPACITY;
+    let wanted = f32::from(strip) * IGNORED_SET_OPACITY;
     assert!(
         (f32::from(now) - wanted).abs() <= 2.0,
         "the writing under the pictures went from {strip} to {now}, and not to {wanted}"
@@ -4735,8 +4743,8 @@ fn two_clicks_on_a_second_picture_keep_both() {
             // inside the tile now, so it is close to the tile's own size.
             egui::Shape::Rect(rect)
                 if rect.stroke.color != selection_colour()
-                    && (rect.rect.width() - TILE.x).abs() < 6.0
-                    && (rect.rect.height() - TILE.y).abs() < 6.0 =>
+                    && (rect.rect.width() - THUMBNAIL_MAX_WIDTH).abs() < 6.0
+                    && (rect.rect.height() - THUMBNAIL_MAX_HEIGHT).abs() < 6.0 =>
             {
                 Some(rect.rect)
             }
@@ -6338,15 +6346,19 @@ fn the_app_starts_on_the_default_setting() {
 fn a_row_fills_the_width_it_is_given() {
     let content = [200.0, 320.0, 180.0];
     let available = 1067.0;
-    let widths = share_row_width(available, &content, SECTION_GAP);
-    let used: f32 = widths.iter().map(|w| w + FRAME_EXTRA).sum::<f32>() + SECTION_GAP * 2.0;
+    let widths = share_row_width(available, &content, SECTION_SPACING_GAP);
+    let used: f32 = widths
+        .iter()
+        .map(|w| w + 2.0 * (FRAME_GROUP_BORDER_WIDTH + FRAME_GROUP_INNER_MARGIN))
+        .sum::<f32>()
+        + SECTION_SPACING_GAP * 2.0;
     assert!((used - available).abs() < 0.5, "used {used} of {available}");
 }
 
 #[test]
 fn every_box_gets_the_same_share_of_the_leftover() {
     let content = [200.0, 320.0, 180.0];
-    let widths = share_row_width(1067.0, &content, SECTION_GAP);
+    let widths = share_row_width(1067.0, &content, SECTION_SPACING_GAP);
     let shares: Vec<f32> = widths
         .iter()
         .zip(content.iter())
@@ -6362,7 +6374,7 @@ fn a_wider_box_stays_wider_than_a_narrow_one() {
     // Sharing the leftover equally keeps the differences between the boxes,
     // which is what splitting the row into equal columns threw away.
     let content = [200.0, 320.0, 180.0];
-    let widths = share_row_width(1067.0, &content, SECTION_GAP);
+    let widths = share_row_width(1067.0, &content, SECTION_SPACING_GAP);
     assert!(widths[1] > widths[0]);
     assert!(widths[0] > widths[2]);
 }
@@ -6370,7 +6382,7 @@ fn a_wider_box_stays_wider_than_a_narrow_one() {
 #[test]
 fn a_row_too_narrow_for_its_content_shares_nothing() {
     let content = [200.0, 320.0, 180.0];
-    let widths = share_row_width(300.0, &content, SECTION_GAP);
+    let widths = share_row_width(300.0, &content, SECTION_SPACING_GAP);
     assert_eq!(widths, content.to_vec());
 }
 
