@@ -210,5 +210,5 @@ pub fn unpack(bytes: &[u8]) -> Vec<Keypoint> {
 }
 
 #[cfg(test)]
-#[path = "tests/features.rs"]
+#[path = "../tests/features.rs"]
 mod tests;

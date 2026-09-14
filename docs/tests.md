@@ -4,7 +4,7 @@ Every test in the workspace, and what it is for. Run them with `cargo test
 --release --workspace`, or one at a time by name.
 
 A crate keeps its tests in `src/tests/`, one file per source file and named after
-it: what `scan.rs` is tested by is `src/tests/scan.rs`. A test belongs to the
+it: what `scan/mod.rs` is tested by is `src/tests/scan.rs`. A test belongs to the
 module of the source file it is about, so `scan::tests::a_removed_file_leaves_the_index`
 is where the runner names it and the heading below says which source file that is.
 A check that uses a crate from the outside, the way anything else would, sits in
@@ -78,7 +78,7 @@ Nothing marked means nothing removed, with no error.
 
 The destination a cleanup starts on is the one that can be undone.
 
-## crates/imgdedupe-core/src/db.rs
+## crates/imgdedupe-core/src/db/mod.rs
 
 ### a_pair_is_the_same_pair_either_way_round
 
@@ -234,7 +234,7 @@ always reporting a change.
 
 A new index writes down the version it was made with.
 
-## crates/imgdedupe-core/src/catalogue.rs
+## crates/imgdedupe-core/src/catalogue/mod.rs
 
 The one owner of a folder's index.
 
@@ -320,8 +320,8 @@ each leaves no index open, and each leaves the file byte for byte what it was.
 ### no_connection_is_made_outside_the_manager
 
 Reads the source of both crates and fails on `Connection::open`,
-`open_in_memory` or `open_with_flags` anywhere but `db.rs`, which holds the one
-opener, and `catalogue.rs`, which is the manager that calls it. This is the only
+`open_in_memory` or `open_with_flags` anywhere but `db/mod.rs`, which holds the one
+opener, and `catalogue/serve.rs`, which is the manager that calls it. This is the only
 thing that keeps the rule true once it is true.
 
 ## crates/imgdedupe-core/src/decode.rs
@@ -392,7 +392,7 @@ opening. Both give an error the pass can report and carry on from.
 
 A HEIC header with no picture behind it is an error rather than a crash.
 
-## crates/imgdedupe-core/src/features.rs
+## crates/imgdedupe-core/src/features/mod.rs
 
 ### a_picture_gives_corners_and_the_same_ones_twice
 
@@ -429,7 +429,7 @@ all the same single corner. One pair survives, not forty, and they agree on
 nothing: a heap of matches that all end in the same place is not two pictures
 arranged the same way.
 
-## crates/imgdedupe-core/src/fingerprint.rs
+## crates/imgdedupe-core/src/fingerprint/mod.rs
 
 ### a_rotated_non_square_image_matches_the_original
 
@@ -612,7 +612,7 @@ An animated WebP is left out.
 
 A cut-off file gives an answer rather than crashing the pass.
 
-## crates/imgdedupe-core/src/matching.rs
+## crates/imgdedupe-core/src/matching/mod.rs
 
 ### comparing_is_reported_while_it_is_still_comparing
 
@@ -742,7 +742,7 @@ but different shapes stay separate.
 The band search finds exactly what comparing every pair finds, inside the radius
 the bands guarantee.
 
-## crates/imgdedupe-core/src/metadata.rs
+## crates/imgdedupe-core/src/metadata/mod.rs
 
 ### a_cameras_own_directory_is_read
 
@@ -793,7 +793,7 @@ A file claiming a value four thousand bytes long that is not there, one cut in
 half, and a wire service field claiming more than it has. These files come off
 other people's cameras, so a length is a claim and not a fact.
 
-## crates/imgdedupe-core/src/preview.rs
+## crates/imgdedupe-core/src/preview/mod.rs
 
 ### the_preview_a_directory_points_at_is_found
 
@@ -904,7 +904,7 @@ scanned.
 
 A log line written before logging was turned on is dropped quietly.
 
-## crates/imgdedupe-core/src/scan.rs
+## crates/imgdedupe-core/src/scan/mod.rs
 
 ### indexing_is_reported_while_the_folder_is_still_being_read
 
@@ -1200,7 +1200,7 @@ other.
 Pictures whose hashes are all far apart, so the corner pass is the only thing
 running: four times the folder costs about four times the time, not sixteen.
 
-## crates/imgdedupe/src/app.rs
+## crates/imgdedupe/src/app/mod.rs
 
 ### a_file_stamp_becomes_the_date_and_time_it_stands_for
 
@@ -2206,7 +2206,7 @@ goes near a database.
 The settings file is in the platform's configuration folder, not beside the
 executable.
 
-## crates/imgdedupe/src/thumbs.rs
+## crates/imgdedupe/src/thumbs/mod.rs
 
 ### a_picture_the_file_says_to_turn_arrives_turned
 

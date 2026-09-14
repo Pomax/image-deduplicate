@@ -593,5 +593,5 @@ pub fn run(
 }
 
 #[cfg(test)]
-#[path = "tests/scan.rs"]
+#[path = "../tests/scan.rs"]
 mod tests;

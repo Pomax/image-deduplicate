@@ -56,11 +56,11 @@ pub fn mtime_seconds(metadata: &std::fs::Metadata) -> i64 {
 }
 
 #[cfg(target_os = "macos")]
-#[path = "dirlist/macos.rs"]
+#[path = "macos.rs"]
 mod imp;
 
 #[cfg(not(target_os = "macos"))]
-#[path = "dirlist/elsewhere.rs"]
+#[path = "elsewhere.rs"]
 mod imp;
 
 /// Read a whole file, having first told the system that the whole of it is

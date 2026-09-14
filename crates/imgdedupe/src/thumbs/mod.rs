@@ -343,5 +343,5 @@ impl Default for Thumbnails {
 }
 
 #[cfg(test)]
-#[path = "tests/thumbs.rs"]
+#[path = "../tests/thumbs.rs"]
 mod tests;

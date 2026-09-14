@@ -442,5 +442,5 @@ pub fn sets_from_stored(images: &[Image], stored: &[(i64, Vec<i64>)]) -> Vec<Dup
 }
 
 #[cfg(test)]
-#[path = "tests/matching.rs"]
+#[path = "../tests/matching.rs"]
 mod tests;

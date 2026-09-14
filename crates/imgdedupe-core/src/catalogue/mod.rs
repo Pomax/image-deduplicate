@@ -256,5 +256,5 @@ impl Catalogue {
 }
 
 #[cfg(test)]
-#[path = "tests/catalogue.rs"]
+#[path = "../tests/catalogue.rs"]
 mod tests;

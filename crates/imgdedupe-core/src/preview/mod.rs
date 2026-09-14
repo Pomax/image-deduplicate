@@ -162,5 +162,5 @@ impl Order {
 }
 
 #[cfg(test)]
-#[path = "tests/preview.rs"]
+#[path = "../tests/preview.rs"]
 mod tests;

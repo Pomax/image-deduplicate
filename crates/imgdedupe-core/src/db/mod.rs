@@ -205,5 +205,5 @@ fn into_memory(bytes: Vec<u8>, path: &Path) -> Result<Connection> {
 }
 
 #[cfg(test)]
-#[path = "tests/db.rs"]
+#[path = "../tests/db.rs"]
 mod tests;

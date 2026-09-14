@@ -114,5 +114,5 @@ pub fn bands(hash: &Hash) -> [u16; BANDS] {
 }
 
 #[cfg(test)]
-#[path = "tests/fingerprint.rs"]
+#[path = "../tests/fingerprint.rs"]
 mod tests;

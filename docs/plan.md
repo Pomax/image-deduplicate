@@ -27,7 +27,9 @@ Eleven files become fifty three. Everything else is already under four hundred l
 
 ## The shape
 
-A file `src/foo.rs` keeps its name and gains a directory `src/foo/` beside it. Rust reads a child of `foo` out of `src/foo/`, so `mod parts;` in `src/foo.rs` is `src/foo/parts.rs`. Nothing is renamed to `mod.rs`.
+~A file `src/foo.rs` keeps its name and gains a directory `src/foo/` beside it. Rust reads a child of `foo` out of `src/foo/`, so `mod parts;` in `src/foo.rs` is `src/foo/parts.rs`. Nothing is renamed to `mod.rs`.~
+
+After the work was completed the user decided they wanted `mod.rs` files instead of `role.rs` files with `role` directories.
 
 ## What changes besides position
 

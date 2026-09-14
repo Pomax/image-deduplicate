@@ -507,7 +507,7 @@ fn a_broken_index_stops_the_manager_and_writes_nothing() {
 /// Nothing outside the manager opens a database.
 ///
 /// This is the rule all of this is for, and the only thing that keeps it true
-/// once it is true. `db.rs` holds the one opener and `catalogue/serve.rs` is
+/// once it is true. `db/mod.rs` holds the one opener and `catalogue/serve.rs` is
 /// the manager that calls it; a connection made anywhere else is a second owner
 /// of the file.
 #[test]
@@ -515,17 +515,13 @@ fn no_connection_is_made_outside_the_manager() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the crates folder");
-    let allowed = ["db.rs", "serve.rs"];
+    let allowed = [Path::new("db/mod.rs"), Path::new("catalogue/serve.rs")];
     let ways = ["Connection::open", "open_in_memory", "open_with_flags"];
 
     let mut found = Vec::new();
     let mut looked_at = 0;
     for file in every_source_file(crates) {
-        let name = file
-            .file_name()
-            .and_then(|it| it.to_str())
-            .unwrap_or_default();
-        if allowed.contains(&name) {
+        if allowed.iter().any(|it| file.ends_with(it)) {
             continue;
         }
         // A test may forge a file on disk for the manager to open; nothing the

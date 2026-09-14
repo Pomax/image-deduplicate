@@ -2115,7 +2115,7 @@ fn a_set_box_is_not_taller_than_the_tiles_in_it() {
 fn nothing_in_the_window_shows_a_tooltip() {
     // Split so this test does not find itself.
     let hover = concat!("on_hover", "_text");
-    let window = include_str!("../app.rs");
+    let window = include_str!("../app/mod.rs");
     assert!(
         !window.contains(hover),
         "the window has gone back to explaining itself in tooltips"

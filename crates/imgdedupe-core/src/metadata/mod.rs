@@ -113,5 +113,5 @@ fn jpeg_segments(bytes: &[u8]) -> Vec<(u8, &[u8])> {
 }
 
 #[cfg(test)]
-#[path = "tests/metadata.rs"]
+#[path = "../tests/metadata.rs"]
 mod tests;
