@@ -118,6 +118,9 @@ impl App {
                 list = list.vertical_scroll_offset(offset);
             }
         }
+        if std::mem::take(&mut self.list_to_top) {
+            list = list.vertical_scroll_offset(0.0);
+        }
 
         // The page's margin down the left of the list, kept here rather than by
         // the panel, so the panels above can run the width of the window and

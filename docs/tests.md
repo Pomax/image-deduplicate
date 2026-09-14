@@ -1567,6 +1567,10 @@ Draws the review page, reads where the bar's track was painted, scrolls the list
 to the second set, and reads it again. The track is in the same place: it marks
 the room the list is drawn in, and only the handle inside it moves.
 
+### the_review_starts_at_the_top_after_a_search
+
+Scrolls the review list down to the second set, scans the folder and searches it again, and draws the review that search opens. The list is at the top, not where the last review was left scrolled to.
+
 ### the_set_boxes_are_drawn_whole_and_evenly_spaced
 
 Draws the review page and reads the rectangles the set boxes were painted as,

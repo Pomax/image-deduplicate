@@ -213,6 +213,9 @@ pub struct App {
     /// A row the cursor keys moved to that the list may not be showing, and what
     /// the list was scrolled to and how tall it was on the last frame.
     scroll_to: Option<usize>,
+    /// Set when new sets arrive, so the next frame of the review draws the list
+    /// from its first set.
+    list_to_top: bool,
     /// The picture filling the window, put there by a click on the preview. A
     /// click anywhere or the escape key puts it back.
     filling_the_window: Option<i64>,
@@ -329,6 +332,7 @@ impl App {
             selected: None,
             showing: None,
             scroll_to: None,
+            list_to_top: false,
             filling_the_window: None,
             metadata: crate::metadata::Metadata::default(),
             show_selected: false,

@@ -3656,6 +3656,55 @@ fn the_scroll_bar_beside_the_list_stays_where_it_is_when_the_list_moves() {
     assert_eq!(before, after, "the bar moved with the list it is beside");
 }
 
+/// A search that comes back opens the review on its first set, whatever the
+/// list was scrolled to before it.
+#[test]
+fn the_review_starts_at_the_top_after_a_search() {
+    let found = folder_with_two_sets();
+    let mut app = reviewing(found.path());
+
+    let ctx = window();
+    let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+    let draw = |app: &mut App| {
+        crate::shot::frame(
+            "the_review_starts_at_the_top_after_a_search",
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| app.review_view(ui));
+            },
+        )
+    };
+
+    draw(&mut app);
+    app.scroll_to = Some(1);
+    draw(&mut app);
+    draw(&mut app);
+    assert!(
+        app.list_offset > 0.0,
+        "the list did not move, so this measures nothing"
+    );
+
+    app.start_scan();
+    settle(&mut app);
+    app.load_sets();
+    settle(&mut app);
+    assert_eq!(app.view, View::Review, "the search did not open the review");
+    draw(&mut app);
+    draw(&mut app);
+    assert_eq!(
+        app.list_offset, 0.0,
+        "the review opened where the last one was scrolled to"
+    );
+}
+
 /// Every set is drawn whole: the line round it is inside what the list is
 /// allowed to paint in, top and bottom, so no box is sliced by the edge of
 /// the list. One box stands as far from the next as `BETWEEN_BOXES`, the gap
