@@ -9,11 +9,11 @@ use imgdedupe_core::db;
 /// Only the development build's command line opens an index this way. The window
 /// has a manager of its own for as long as it is running.
 #[cfg(any(debug_assertions, test))]
-pub fn open_index(db_path: &Path) -> Result<imgdedupe_core::index::Index> {
+pub fn open_catalogue(db_path: &Path) -> Result<imgdedupe_core::catalogue::Catalogue> {
     if !db_path.exists() {
         anyhow::bail!("no index at {}. Scan the folder first.", db_path.display());
     }
-    let index = imgdedupe_core::index::Index::start();
+    let index = imgdedupe_core::catalogue::Catalogue::start();
     index.open(db_path)?;
     Ok(index)
 }

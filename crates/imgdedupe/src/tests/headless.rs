@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn opening_a_missing_index_says_to_scan_the_folder() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let err = open_index(&dir.path().join("nothing.sqlite")).expect_err("should fail");
+    let err = open_catalogue(&dir.path().join("nothing.sqlite")).expect_err("should fail");
     assert!(err.to_string().contains("Scan the folder"), "{err}");
 }
 

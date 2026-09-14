@@ -15,7 +15,7 @@ fn write_image(path: &Path, seed: u32) {
 /// holding nothing until the pass gives it the folder.
 fn start_a_pass(root: &Path, db_path: &Path, recurse: bool) -> Result<Run> {
     start(
-        imgdedupe_core::index::Index::start(),
+        imgdedupe_core::catalogue::Catalogue::start(),
         root,
         db_path,
         recurse,

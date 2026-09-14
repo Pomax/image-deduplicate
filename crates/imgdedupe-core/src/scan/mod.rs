@@ -15,6 +15,16 @@ use crate::format::{self, SNIFF_LEN};
 use crate::frames;
 use crate::runlog;
 
+mod diff;
+mod one;
+mod readahead;
+mod walk;
+
+use self::diff::*;
+use self::one::*;
+use self::readahead::*;
+use self::walk::*;
+
 /// Records written per transaction. A killed run loses at most this many.
 const BATCH: usize = 5000;
 /// Files between progress reports, when they are arriving fast enough that a
@@ -132,325 +142,6 @@ pub struct Summary {
     pub cancelled: bool,
 }
 
-/// One file the walk found, before anything has been read from it.
-#[derive(Debug, Clone)]
-struct Candidate {
-    rel_path: String,
-    abs_path: PathBuf,
-    size_bytes: i64,
-    mtime_seconds: i64,
-}
-
-/// Walk the tree and list every file, ignoring the index and its sidecars.
-///
-/// Reports as it goes. On a folder the machine has to ask another machine about,
-/// listing it is one call per file and most of the pass, and it used to say
-/// nothing from the first file to the last.
-/// Whether a folder is one a pass over the subfolders does not go into.
-///
-/// A name beginning with a dot is a folder something else keeps its workings in:
-/// `.git`, `.thumbnails`, `.cache`. One beginning with an at sign is what network
-/// storage puts its own beside a share: `@eaDir`, `@Recycle`. What is in them
-/// belongs to the thing that made them, not to whoever is looking for their own
-/// pictures, and both are full of copies of pictures that are already elsewhere.
-///
-/// The folder the pass was pointed at is not tested: somebody who asks for
-/// `.private` means it.
-fn kept_out(name: &str) -> bool {
-    name.starts_with('.') || name.starts_with('@')
-}
-
-fn walk(
-    options: &Options,
-    cancel: &AtomicBool,
-    report: &(dyn Fn(Event) + Sync),
-) -> Result<Vec<Candidate>> {
-    report(Event::Reached(Step::StartedLookingForTheTotal));
-    // Asked of the folder itself, in one call, so the bar has something to
-    // measure against before a single entry has been listed. Only for one folder:
-    // the size of a tree is as many answers as it has directories, and a total
-    // that grows as they are found is a bar that goes backwards.
-    let of = if options.recurse {
-        None
-    } else {
-        dirlist::entry_count(&options.root)
-    };
-    let mut out = Vec::new();
-    let mut queue = vec![options.root.clone()];
-    let mut first = true;
-
-    while let Some(dir) = queue.pop() {
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(out);
-        }
-        let so_far = out.len() as u64;
-        let listed = match dirlist::list(&dir, &|| cancel.load(Ordering::Relaxed), &|found| {
-            // As the listing arrives, not when it is finished. This is the read
-            // bar's first job: every one of these is a file that has been looked
-            // at, and on a folder that answers slowly it is most of the wait.
-            report(Event::Walking {
-                found: so_far + found,
-                of,
-            });
-        }) {
-            Ok(listed) => listed,
-            // The folder that was asked for has to be readable, or the pass would
-            // see an empty folder and delete every row in the index. One
-            // unreadable subfolder is skipped instead.
-            Err(err) if first => {
-                return Err(err).with_context(|| format!("listing {}", dir.display()))
-            }
-            Err(_) => continue,
-        };
-        first = false;
-
-        for entry in listed {
-            if cancel.load(Ordering::Relaxed) {
-                return Ok(out);
-            }
-            if entry.is_dir {
-                if options.recurse && !kept_out(&entry.name) {
-                    queue.push(dir.join(&entry.name));
-                }
-                continue;
-            }
-            if !entry.is_file {
-                continue;
-            }
-            // What the name claims. A file that claims none of the formats is
-            // not read at all: reading one to find out it is not a picture is
-            // the whole file over the network for an answer its name already
-            // gave. What it turns out to be is still decided by its first bytes,
-            // once there is a reason to have read them.
-            if format::from_extension(&entry.name).is_none() {
-                continue;
-            }
-            let path = dir.join(&entry.name);
-            let Ok(relative) = path.strip_prefix(&options.root) else {
-                continue;
-            };
-            let Some(rel_path) = to_portable_path(relative) else {
-                continue;
-            };
-            out.push(Candidate {
-                rel_path,
-                abs_path: path,
-                size_bytes: entry.size_bytes,
-                mtime_seconds: entry.mtime_seconds,
-            });
-        }
-        report(Event::Walking {
-            found: out.len() as u64,
-            of,
-        });
-    }
-    // The listing is over, so the count it reached is the exact total, whatever
-    // the folder said before it started.
-    report(Event::Walking {
-        found: out.len() as u64,
-        of: Some(out.len() as u64),
-    });
-    Ok(out)
-}
-
-/// Relative paths are stored with forward slashes so an index built on one
-/// platform still matches the same tree on another.
-fn to_portable_path(relative: &Path) -> Option<String> {
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => parts.push(part.to_str()?.to_string()),
-            _ => return None,
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("/"))
-    }
-}
-
-/// Which paths need reading and which can be skipped without touching the disk.
-struct Diff {
-    to_index: Vec<Candidate>,
-    removed: Vec<String>,
-    unchanged: u64,
-}
-
-fn diff(candidates: Vec<Candidate>, known: &std::collections::HashMap<String, db::Known>) -> Diff {
-    let mut to_index = Vec::new();
-    let mut unchanged = 0u64;
-    let mut seen = std::collections::HashSet::with_capacity(candidates.len());
-
-    for candidate in candidates {
-        seen.insert(candidate.rel_path.clone());
-        let entry = known.get(&candidate.rel_path);
-        // The file is where it was, at the size it was. Whether that settles it
-        // depends on what the index has to say about it: a picture is settled by
-        // its fingerprints being current, and a file the pass has already read
-        // and found not to be a picture is settled by having been read.
-        let where_it_was = entry.is_some_and(|entry| {
-            entry.size_bytes == candidate.size_bytes
-                && entry.mtime_seconds == candidate.mtime_seconds
-        });
-        let fresh = where_it_was
-            && entry.is_some_and(|entry| {
-                entry.not_a_picture || entry.fingerprint_version == FINGERPRINT_VERSION
-            });
-        if fresh {
-            unchanged += 1;
-        } else {
-            to_index.push(candidate);
-        }
-    }
-
-    let removed = known
-        .keys()
-        .filter(|path| !seen.contains(*path))
-        .cloned()
-        .collect();
-
-    Diff {
-        to_index,
-        removed,
-        unchanged,
-    }
-}
-
-/// What came back from reading one file.
-///
-/// The two that are not pictures carry what the index records about them, so a
-/// later pass and a later comparison know the file has been looked at and that
-/// looking again would find what this found.
-enum Outcome {
-    Indexed(Box<Record>),
-    /// Not one of the supported formats, or animated. Not an error, and not indexed.
-    NotAnImage(db::Looked),
-    Failed {
-        looked: db::Looked,
-        message: String,
-    },
-}
-
-/// What the index records about a file the pass read and did not index.
-fn looked_at(candidate: &Candidate) -> db::Looked {
-    db::Looked {
-        rel_path: candidate.rel_path.clone(),
-        size_bytes: candidate.size_bytes,
-        mtime_seconds: candidate.mtime_seconds,
-    }
-}
-
-/// Read, sniff, decode and fingerprint one file. Never panics on bad input: a
-/// malformed file comes back as `Failed` and the pass continues.
-/// How much of the folder is in the index, as the pass sees it.
-///
-/// The files that were left alone are already in it, and the ones that turned
-/// out not to be pictures are not part of the folder as far as this is
-/// concerned, so they leave the total rather than sitting in it unindexed.
-fn indexed_so_far(
-    indexed: u64,
-    unchanged: u64,
-    to_index: u64,
-    read: &AtomicU64,
-    ignored: &AtomicU64,
-) -> Event {
-    let ignored = ignored.load(Ordering::Relaxed);
-    Event::Writing {
-        done: unchanged + indexed,
-        total: unchanged + to_index.saturating_sub(ignored),
-        read: unchanged + read.load(Ordering::Relaxed),
-        unchanged,
-        ignored,
-    }
-}
-
-/// Where a pass spends its time inside the files, added up over every thread.
-/// The totals are larger than the wall clock, by roughly the number of threads.
-/// They are only ever read by the run log, so a build without the log carries
-/// the empty version below and none of the timing.
-#[cfg(feature = "logging")]
-#[derive(Default)]
-struct Spent {
-    reading: AtomicU64,
-    decoding: AtomicU64,
-    fingerprinting: AtomicU64,
-}
-
-#[cfg(feature = "logging")]
-impl Spent {
-    fn add(counter: &AtomicU64, at: Instant) {
-        counter.fetch_add(at.elapsed().as_millis() as u64, Ordering::Relaxed);
-    }
-
-    fn seconds(counter: &AtomicU64) -> f64 {
-        counter.load(Ordering::Relaxed) as f64 / 1e3
-    }
-}
-
-#[cfg(not(feature = "logging"))]
-#[derive(Default)]
-struct Spent;
-
-#[cfg_attr(not(feature = "logging"), allow(unused_variables))]
-fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
-    let head = &bytes[..bytes.len().min(SNIFF_LEN)];
-    let Some(format) = format::detect(head) else {
-        return Outcome::NotAnImage(looked_at(candidate));
-    };
-    if frames::is_animated(format, &bytes) {
-        return Outcome::NotAnImage(looked_at(candidate));
-    }
-
-    #[cfg(feature = "logging")]
-    let at = Instant::now();
-    let ready = match decode_for_indexing(format, &bytes) {
-        Ok(ready) => ready,
-        Err(err) => {
-            return Outcome::Failed {
-                looked: looked_at(candidate),
-                message: format!("{err:#}"),
-            }
-        }
-    };
-    let decoded = ready.decoded;
-    #[cfg(feature = "logging")]
-    Spent::add(&spent.decoding, at);
-    crate::log_line!(
-        "decoded {} as {format}, {}x{}, {} bytes on disk",
-        candidate.rel_path,
-        decoded.width,
-        decoded.height,
-        bytes.len()
-    );
-
-    #[cfg(feature = "logging")]
-    let at = Instant::now();
-    let print = fingerprint(&decoded);
-    let corners = crate::features::pack(&crate::features::features(&ready.detail));
-    // The size of the picture, not of the sensor read that produced it: a camera
-    // held on its side writes a wide picture and a number saying to turn it, and
-    // the tile beside the turned picture has to say what is on it.
-    let (width, height) = match crate::preview::the_way_up(&bytes) {
-        5..=8 => (decoded.height, decoded.width),
-        _ => (decoded.width, decoded.height),
-    };
-    #[cfg(feature = "logging")]
-    Spent::add(&spent.fingerprinting, at);
-
-    Outcome::Indexed(Box::new(Record {
-        rel_path: candidate.rel_path.clone(),
-        size_bytes: candidate.size_bytes,
-        mtime_seconds: candidate.mtime_seconds,
-        width,
-        height,
-        format,
-        channels: decoded.channels,
-        fingerprint: print,
-        corners,
-    }))
-}
-
 /// Threads doing nothing but pulling file bytes into memory.
 ///
 /// Far more than there are cores, on purpose. A read from another machine is a
@@ -461,88 +152,11 @@ fn index_one(candidate: &Candidate, bytes: &[u8], spent: &Spent) -> Outcome {
 /// others sat idle with nothing to decode.
 const READERS: usize = 64;
 
-/// How many bytes of already-read files may be waiting to be decoded when the
-/// machine will not say how much memory it has.
-const FALLBACK_READ_AHEAD: u64 = 1 << 30;
-
-/// How long an answer about available memory is used before it is asked for
-/// again, and how long a waiting reader sleeps before looking at the budget on
-/// its own.
-const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// Bytes of read-but-not-yet-decoded files, and the wait for room.
-struct ReadAhead {
-    held: std::sync::Mutex<u64>,
-    room: std::sync::Condvar,
-    /// How much memory the machine has to spare.
-    available: Box<dyn Fn() -> Option<u64> + Send + Sync>,
-    last: std::sync::Mutex<Option<(std::time::Instant, Option<u64>)>>,
-}
-
-impl ReadAhead {
-    fn new() -> Self {
-        Self::asking(Box::new(crate::memory::available_bytes))
-    }
-
-    fn asking(available: Box<dyn Fn() -> Option<u64> + Send + Sync>) -> Self {
-        ReadAhead {
-            held: std::sync::Mutex::new(0),
-            room: std::sync::Condvar::new(),
-            available,
-            last: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// How much may be in hand: nine tenths of what the machine has to spare
-    /// plus what is already held, which the machine does not count as available.
-    fn budget(&self, held: u64) -> u64 {
-        match self.available_now() {
-            Some(spare) => spare.saturating_add(held) / 10 * 9,
-            None => FALLBACK_READ_AHEAD,
-        }
-    }
-
-    /// The last answer, asked again when it is older than `LOOK_AGAIN`.
-    fn available_now(&self) -> Option<u64> {
-        let mut last = self.last.lock().expect("the read-ahead budget");
-        if let Some((asked, answer)) = *last {
-            if asked.elapsed() < LOOK_AGAIN {
-                return answer;
-            }
-        }
-        let answer = (self.available)();
-        *last = Some((std::time::Instant::now(), answer));
-        answer
-    }
-
-    /// Wait until this many bytes fit, then claim them. A single file larger than
-    /// the whole budget is let through on its own rather than waiting for room
-    /// that will never exist. The wait is timed: room also appears when
-    /// something else on the machine gives memory back, which nothing announces.
-    fn claim(&self, bytes: u64, cancel: &AtomicBool) {
-        let mut held = self.held.lock().expect("the read-ahead budget");
-        while *held > 0 && *held + bytes > self.budget(*held) && !cancel.load(Ordering::Relaxed) {
-            let (next, _) = self
-                .room
-                .wait_timeout(held, LOOK_AGAIN)
-                .expect("the read-ahead budget");
-            held = next;
-        }
-        *held += bytes;
-    }
-
-    fn release(&self, bytes: u64) {
-        let mut held = self.held.lock().expect("the read-ahead budget");
-        *held = held.saturating_sub(bytes);
-        self.room.notify_all();
-    }
-}
-
 /// Run one indexing pass. Files are read into memory by a wide pool and decoded
 /// across every core; writing runs on one thread in batched transactions, so the
 /// index is consistent at every commit.
 pub fn run(
-    index: &crate::index::Index,
+    index: &crate::catalogue::Catalogue,
     options: &Options,
     cancel: &AtomicBool,
     report: &(dyn Fn(Event) + Sync),
@@ -713,40 +327,42 @@ pub fn run(
                 report(Event::Reached(Step::StartedIndexingNewFiles));
             }
 
-            let flush =
-                |index: &crate::index::Index, pending: &mut Vec<Box<Record>>| -> Result<()> {
-                    if pending.is_empty() {
-                        return Ok(());
-                    }
-                    #[cfg(feature = "logging")]
-                    let rows = pending.len();
-                    #[cfg(feature = "logging")]
-                    let at = Instant::now();
-                    let batch: Vec<Record> = pending.drain(..).map(|it| *it).collect();
-                    index.upsert(batch, scanned_at)?;
-                    #[cfg(feature = "logging")]
-                    let inserted = at.elapsed().as_secs_f64();
-                    #[cfg(feature = "logging")]
-                    let at = Instant::now();
-                    runlog::log_line!(
-                        "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
-                        at.elapsed().as_secs_f64()
-                    );
-                    pending.clear();
-                    Ok(())
-                };
+            let flush = |index: &crate::catalogue::Catalogue,
+                         pending: &mut Vec<Box<Record>>|
+             -> Result<()> {
+                if pending.is_empty() {
+                    return Ok(());
+                }
+                #[cfg(feature = "logging")]
+                let rows = pending.len();
+                #[cfg(feature = "logging")]
+                let at = Instant::now();
+                let batch: Vec<Record> = pending.drain(..).map(|it| *it).collect();
+                index.upsert(batch, scanned_at)?;
+                #[cfg(feature = "logging")]
+                let inserted = at.elapsed().as_secs_f64();
+                #[cfg(feature = "logging")]
+                let at = Instant::now();
+                runlog::log_line!(
+                    "commit: {rows} rows, {inserted:.2}s inserting and {:.2}s committing",
+                    at.elapsed().as_secs_f64()
+                );
+                pending.clear();
+                Ok(())
+            };
 
             // The files that turned out not to be pictures, batched the way the
             // pictures are. Writing them down is what stops the next pass reading
             // them again and the next comparison calling them new.
             let mut looked: Vec<db::Looked> = Vec::new();
-            let note = |index: &crate::index::Index, looked: &mut Vec<db::Looked>| -> Result<()> {
-                if looked.is_empty() {
-                    return Ok(());
-                }
-                let batch: Vec<db::Looked> = looked.drain(..).collect();
-                index.not_pictures(batch, scanned_at)
-            };
+            let note =
+                |index: &crate::catalogue::Catalogue, looked: &mut Vec<db::Looked>| -> Result<()> {
+                    if looked.is_empty() {
+                        return Ok(());
+                    }
+                    let batch: Vec<db::Looked> = looked.drain(..).collect();
+                    index.not_pictures(batch, scanned_at)
+                };
 
             for outcome in recv {
                 match outcome {
@@ -976,13 +592,6 @@ pub fn run(
     Ok((summary, images))
 }
 
-fn now_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|delta| delta.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
-#[path = "tests/scan.rs"]
+#[path = "../tests/scan.rs"]
 mod tests;
