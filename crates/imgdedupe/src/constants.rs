@@ -1,5 +1,24 @@
 use eframe::egui;
 
+/// The one text size. There is no second size: headings, small print and button
+/// labels are all this.
+pub const FONT_SIZE: f32 = 16.0;
+
+/// Room either side of a button's words.
+pub const BUTTON_HORIZONTAL_PADDING: f32 = 12.0;
+
+/// Room above and below a button's words.
+pub const BUTTON_VERTICAL_PADDING: f32 = 7.0;
+
+/// Space between widgets laid out side by side.
+pub const WIDGET_HORIZONTAL_SPACING: f32 = 9.0;
+
+/// Space between widgets laid out one above the other.
+pub const WIDGET_VERTICAL_SPACING: f32 = 7.0;
+
+/// The least height of anything that can be clicked or typed in.
+pub const CONTROL_MIN_HEIGHT: f32 = 26.0;
+
 /// Width of the strip a scrollbar sits in, and of the handle that fills it.
 pub const SCROLLBAR_STRIP_WIDTH: f32 = 12.0;
 
