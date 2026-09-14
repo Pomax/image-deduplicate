@@ -35,7 +35,7 @@ fn arrow(
     ink: egui::Color32,
 ) {
     let middle = button.center();
-    let reach = button.width().min(button.height()) * 0.26;
+    let reach = button.width().min(button.height()) * SCROLLBAR_ARROW_REACH_FRACTION;
     let along = |amount: f32| {
         if down {
             egui::vec2(0.0, amount)
@@ -226,7 +226,10 @@ pub(super) fn paint_scroll_bar(
     painter.rect_stroke(
         strip.shrink(0.5),
         0.0,
-        egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::Stroke::new(
+            SCROLLBAR_OUTLINE_WIDTH,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ),
     );
     arrow(painter, first, -1.0, down, ink);
     arrow(painter, last, 1.0, down, ink);
@@ -248,7 +251,7 @@ pub(super) fn paint_scroll_bar(
             egui::vec2(handle_length, thickness),
         )
     };
-    painter.rect_filled(handle, 2.0, ink);
+    painter.rect_filled(handle, SCROLLBAR_HANDLE_CORNER_RADIUS, ink);
 
     let base = ui
         .id()
@@ -504,7 +507,7 @@ pub(super) fn sized_section(
     let mut content = egui::Vec2::ZERO;
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(title).strong());
-        ui.add_space(4.0);
+        ui.add_space(SECTION_TITLE_GAP);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(size.x);
             ui.set_min_height(size.y);

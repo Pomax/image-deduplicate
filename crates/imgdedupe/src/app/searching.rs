@@ -125,7 +125,7 @@ impl App {
         let Some(receive) = &self.searching else {
             return;
         };
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(WORK_PROGRESS_REPAINT_INTERVAL);
         let waiting: Vec<Found> = receive.try_iter().collect();
         let mut done = false;
         for found in waiting {
@@ -457,9 +457,9 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
                 ui.label(question.wording());
-                ui.add_space(10.0);
+                ui.add_space(PREVIOUS_SESSION_BUTTONS_GAP);
                 ui.horizontal(|ui| {
                     if ui.button("Finish previous session").clicked() {
                         answered = Some(true);
@@ -468,7 +468,7 @@ impl App {
                         answered = Some(false);
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
             });
         match answered {
             Some(true) => {

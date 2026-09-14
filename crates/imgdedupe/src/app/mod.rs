@@ -51,8 +51,8 @@ fn start_window() -> Result<()> {
         // is what sets the height, and a window that cannot show all of it hides
         // exactly the part someone is watching when they want to know what is
         // taking so long.
-        .with_inner_size([1100.0, 860.0])
-        .with_min_inner_size([700.0, 780.0])
+        .with_inner_size([WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT])
+        .with_min_inner_size([WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT])
         .with_title(format!("imgdedupe {}", env!("CARGO_PKG_VERSION")))
         .with_icon(crate::icon::window_icon());
     if let Some(window) = saved.window {
@@ -385,7 +385,7 @@ impl eframe::App for App {
         self.thumbs.collect(ctx);
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
             ui.horizontal(|ui| {
                 let ready = self.have_sets();
                 // A review holding nothing but sets somebody has said are not
@@ -406,12 +406,12 @@ impl eframe::App for App {
                     }
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
         });
 
         if let Some(error) = self.error.clone() {
             egui::TopBottomPanel::bottom("error").show(ctx, |ui| {
-                ui.add_space(6.0);
+                ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
                 ui.horizontal(|ui| {
                     ui.colored_label(ERROR_MESSAGE_TEXT_COLOUR, error);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -420,7 +420,7 @@ impl eframe::App for App {
                         }
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
             });
         }
 
@@ -434,7 +434,7 @@ impl eframe::App for App {
             // that stops short of the one above it. The page keeps no margin
             // here and the parts of the review keep their own.
             View::Cleanup | View::Review => egui::Margin::ZERO,
-            _ => egui::Margin::symmetric(16.0, 12.0),
+            _ => egui::Margin::symmetric(CONTENT_MARGIN, CONTENT_VERTICAL_MARGIN),
         };
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(margin))
@@ -448,7 +448,7 @@ impl eframe::App for App {
         self.ask_about_the_saved_review(ctx);
 
         if self.running.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(WORK_PROGRESS_REPAINT_INTERVAL);
         }
     }
 

@@ -204,7 +204,7 @@ impl App {
         // reaches from the first lamp to the bottom of the window rather than
         // down the whole page.
         ui.add_space(SECTION_SPACING_GAP);
-        let step = ui.spacing().interact_size.y * 3.0;
+        let step = ui.spacing().interact_size.y * LAMP_LIST_SCROLL_STEP_CONTROL_HEIGHTS;
         scrolled(
             ui,
             egui::Id::new("scan lamps"),
@@ -222,7 +222,7 @@ impl App {
     fn lamps(&mut self, ui: &mut egui::Ui) {
         let dot = |ui: &mut egui::Ui, state: Went| {
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(LAMP_DOT_RADIUS * 3.0, ui.spacing().interact_size.y),
+                egui::vec2(LAMP_SLOT_WIDTH, ui.spacing().interact_size.y),
                 egui::Sense::hover(),
             );
             match state {
@@ -350,7 +350,7 @@ impl App {
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
             self.previous_folders(&mut against_the_edge, busy);
-            ui.add_space(6.0);
+            ui.add_space(SECTION_ROW_GAP);
             let subfolders = ui.add_enabled(
                 !busy,
                 egui::Checkbox::new(&mut self.recurse, "Include subfolders"),
@@ -730,7 +730,7 @@ impl App {
             // until the mouse happens to move over it, with the index sitting in
             // the channel: measured at one second on one run and two on the next,
             // for a folder whose index was ready in a fifth of a second.
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(INDEX_ARRIVAL_REPAINT_INTERVAL);
             return;
         }
         for said in arrived {
@@ -782,7 +782,7 @@ impl App {
             "What counts as a duplicate",
             egui::vec2(width, row),
             |ui| {
-                ui.spacing_mut().slider_width = 300.0;
+                ui.spacing_mut().slider_width = SENSITIVITY_SLIDER_WIDTH;
                 // The number beside the slider is drawn in a box of this width, and
                 // the box would otherwise size to the digits in it. The row's boxes
                 // are shared out by what their contents measure, so 5.0 and 30.0
@@ -814,7 +814,7 @@ impl App {
                         }
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(SECTION_ROW_GAP);
                 // The two ways of matching, either of which can be left out. The
                 // first is nearly free and finds resizes, recompressions and
                 // rotations; the second is most of what a search costs and is what
@@ -869,7 +869,7 @@ impl App {
                 let start = ui.add_enabled(
                     !busy && have_folder,
                     egui::Button::new(egui::RichText::new("Scan").strong())
-                        .min_size(egui::vec2(90.0, 30.0)),
+                        .min_size(egui::vec2(SCAN_BUTTON_WIDTH, RUN_BUTTON_HEIGHT)),
                 );
                 if start.clicked() {
                     self.start_scan();
@@ -877,7 +877,8 @@ impl App {
                 if ui
                     .add_enabled(
                         stoppable,
-                        egui::Button::new("Cancel").min_size(egui::vec2(80.0, 30.0)),
+                        egui::Button::new("Cancel")
+                            .min_size(egui::vec2(CANCEL_BUTTON_WIDTH, RUN_BUTTON_HEIGHT)),
                     )
                     .clicked()
                 {
@@ -887,7 +888,7 @@ impl App {
             // A button's label sits where the layout puts it, and a row's layout
             // starts at the left, so the width `min_size` adds all lands on the
             // right of the text.
-            let wide = egui::vec2(178.0, 30.0);
+            let wide = egui::vec2(FIND_DUPLICATES_BUTTON_WIDTH, RUN_BUTTON_HEIGHT);
             let found = ui
                 .allocate_ui_with_layout(wide, egui::Layout::top_down(egui::Align::Center), |ui| {
                     ui.add_enabled(
@@ -928,7 +929,7 @@ impl App {
                     "listing the folder: {}",
                     counted(found, "file", "files")
                 ));
-                ui.add_space(6.0);
+                ui.add_space(SECTION_ROW_GAP);
             }
             let width = ui.available_width();
             // A bar is a fraction only while the stage it measures is the one
@@ -952,7 +953,7 @@ impl App {
                 self.scan.done,
                 self.scan.total,
             );
-            ui.add_space(4.0);
+            ui.add_space(PROGRESS_BAR_GAP);
             bar(
                 ui,
                 "Indexing files",
@@ -960,7 +961,7 @@ impl App {
                 self.scan.indexed,
                 self.scan.to_index,
             );
-            ui.add_space(4.0);
+            ui.add_space(PROGRESS_BAR_GAP);
             // The search's own bar, under the pass's two and driven by nothing
             // they touch. It is two stages of very different lengths, so it runs
             // over both: reading the index fills the first part of it, comparing
@@ -972,7 +973,7 @@ impl App {
                 (false, false) => Stage::Waiting,
             };
             bar(ui, "Finding duplicates", searching, duplicates, of);
-            ui.add_space(6.0);
+            ui.add_space(SECTION_ROW_GAP);
             // How many files the folder holds. The listing is what produces that
             // number, so before it is over the count it has reached so far is
             // what there is.
@@ -983,7 +984,7 @@ impl App {
             };
             egui::Grid::new("scan counts")
                 .num_columns(6)
-                .spacing([24.0, 4.0])
+                .spacing([SCAN_COUNTS_COLUMN_GAP, SCAN_COUNTS_ROW_GAP])
                 .show(ui, |ui| {
                     counter(ui, "found", in_folder);
                     // Files this pass has read, which are the ones the index did
@@ -997,25 +998,25 @@ impl App {
                     ui.end_row();
                 });
             if let Some(finished) = &self.scan.finished {
-                ui.add_space(6.0);
+                ui.add_space(SECTION_ROW_GAP);
                 ui.label(egui::RichText::new(finished).strong());
             }
             if !self.scan.failures.is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(SECTION_ROW_GAP);
                 egui::CollapsingHeader::new(format!(
                     "{} files could not be read",
                     self.scan.failures.len()
                 ))
                 .show(ui, |ui| {
                     let line = ui.text_style_height(&egui::TextStyle::Body);
-                    ui.set_max_height(160.0);
+                    ui.set_max_height(FAILED_FILES_LIST_MAX_HEIGHT);
                     scrolled(
                         ui,
                         egui::Id::new("scan failures"),
                         true,
                         line,
                         None,
-                        egui::ScrollArea::vertical().max_height(160.0),
+                        egui::ScrollArea::vertical().max_height(FAILED_FILES_LIST_MAX_HEIGHT),
                         |area, ui| {
                             area.show(ui, |ui| {
                                 for (path, message) in &self.scan.failures {

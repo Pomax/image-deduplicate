@@ -28,7 +28,7 @@ impl App {
         // The action sits top right, where the one that starts a scan and the one
         // that goes from the review to here both are.
         egui::TopBottomPanel::top("cleanup actions").show_inside(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
             ui.horizontal(|ui| {
                 if let Some(result) = &self.cleanup_result {
                     ui.label(egui::RichText::new(result).strong());
@@ -39,8 +39,8 @@ impl App {
                     if self.removing.is_some() {
                         let done = self.removed_so_far;
                         let total = self.to_remove.max(1);
-                        let mut bar =
-                            egui::ProgressBar::new(done as f32 / total as f32).desired_width(210.0);
+                        let mut bar = egui::ProgressBar::new(done as f32 / total as f32)
+                            .desired_width(CLEANUP_PAGE_BUTTON_WIDTH);
                         if !self.tidying {
                             bar = bar.text(format!(
                                 "{} {done} of {total}",
@@ -80,25 +80,28 @@ impl App {
                     } else {
                         CLEANUP_BUTTON_FILL_COLOUR
                     })
-                    .min_size(egui::vec2(210.0, 28.0));
+                    .min_size(egui::vec2(
+                        CLEANUP_PAGE_BUTTON_WIDTH,
+                        CLEANUP_PAGE_BUTTON_HEIGHT,
+                    ));
                     if ui.add_enabled(ready, button).clicked() {
                         runlog::log_line!("the remove button was pressed");
                         self.run_cleanup(&plan);
                     }
                 });
             });
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
         });
 
         egui::SidePanel::left("cleanup settings")
             .resizable(false)
-            .exact_width(320.0)
+            .exact_width(CLEANUP_SETTINGS_PANEL_WIDTH)
             .show_inside(ui, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
                 section(ui, "What will happen", |ui| {
                     egui::Grid::new("cleanup summary")
                         .num_columns(2)
-                        .spacing([16.0, 4.0])
+                        .spacing([CLEANUP_SUMMARY_COLUMN_GAP, CLEANUP_SUMMARY_ROW_GAP])
                         .show(ui, |ui| {
                             ui.label("Sets");
                             ui.label(egui::RichText::new(sets_in_play.to_string()).strong());
@@ -134,7 +137,7 @@ impl App {
                             self.remember_disposal();
                         }
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(DESTINATION_NOTE_GAP);
                     let note = egui::RichText::new(self.destination.note());
                     if self.destination == Destination::Delete {
                         ui.label(note.color(ERROR_MESSAGE_TEXT_COLOUR));
@@ -143,13 +146,13 @@ impl App {
                     }
 
                     if self.destination == Destination::MoveTo {
-                        ui.add_space(6.0);
+                        ui.add_space(SECTION_ROW_GAP);
                         ui.horizontal(|ui| {
                             ui.add_enabled(
                                 !busy,
                                 egui::TextEdit::singleline(&mut self.move_dir)
                                     .hint_text("folder")
-                                    .desired_width(190.0),
+                                    .desired_width(MOVE_FOLDER_FIELD_WIDTH),
                             );
                             if ui.add_enabled(!busy, egui::Button::new("choose")).clicked() {
                                 if let Some(folder) = crate::folder_picker::pick(None) {
@@ -163,7 +166,7 @@ impl App {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
             ui.label(
                 egui::RichText::new(match self.destination {
                     Destination::MoveTo => "Files that will be moved",
@@ -171,7 +174,7 @@ impl App {
                 })
                 .strong(),
             );
-            ui.add_space(4.0);
+            ui.add_space(FILE_LIST_HEADING_GAP);
             // What a cleanup could not remove is still in this list, because the
             // files are still there. Red, with what the system said on hover.
             let failed: std::collections::HashMap<&str, &str> = self
@@ -315,7 +318,7 @@ impl App {
         let Some(receive) = &self.removing else {
             return;
         };
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(WORK_PROGRESS_REPAINT_INTERVAL);
         let waiting: Vec<Removal> = receive.try_iter().collect();
         let mut over = false;
         for step in waiting {

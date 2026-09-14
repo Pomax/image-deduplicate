@@ -150,3 +150,172 @@ pub const SET_BOX_BORDER_WIDTH: f32 = 1.0;
 /// What a box keeps between its edge and the thumbnails in it. The band of
 /// buttons keeps none: it is the bottom of the box.
 pub const SET_BOX_INNER_PADDING: f32 = 6.0;
+
+/// Width of the window the first time it opens, before it has a size of its own to
+/// remember.
+pub const WINDOW_DEFAULT_WIDTH: f32 = 1100.0;
+
+/// Height of the window the first time it opens. Tall enough for the scan page's
+/// own content without scrolling: the three boxes, the progress box, and one line
+/// per step of a pass.
+pub const WINDOW_DEFAULT_HEIGHT: f32 = 860.0;
+
+/// The narrowest the window can be made.
+pub const WINDOW_MIN_WIDTH: f32 = 700.0;
+
+/// The shortest the window can be made.
+pub const WINDOW_MIN_HEIGHT: f32 = 780.0;
+
+/// Space above and below the tabs along the top of the window, and above and below
+/// an error along the bottom of it.
+pub const WINDOW_BAR_VERTICAL_PADDING: f32 = 6.0;
+
+/// Space between a page's content and the top and bottom of the window. The sides
+/// keep `CONTENT_MARGIN`.
+pub const CONTENT_VERTICAL_MARGIN: f32 = 12.0;
+
+/// How often the window redraws while indexing, a search or a cleanup is running,
+/// so its progress shows without the mouse having to move.
+pub const WORK_PROGRESS_REPAINT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+/// How often the window redraws while waiting for a folder's index to arrive.
+pub const INDEX_ARRIVAL_REPAINT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
+/// Space above and below the content of a panel inside a page, and inside the
+/// previous session question.
+pub const PANEL_VERTICAL_PADDING: f32 = 4.0;
+
+/// Space between a section's title and its box.
+pub const SECTION_TITLE_GAP: f32 = 4.0;
+
+/// Space between the groups of controls inside a section.
+pub const SECTION_ROW_GAP: f32 = 6.0;
+
+/// Width kept for a scan page lamp, which is wider than the lamp so the text beside
+/// it does not touch it.
+pub const LAMP_SLOT_WIDTH: f32 = LAMP_DOT_RADIUS * 3.0;
+
+/// How far one step of the scan page's lamp list scrolls, in control heights.
+pub const LAMP_LIST_SCROLL_STEP_CONTROL_HEIGHTS: f32 = 3.0;
+
+/// Width of the sensitivity slider.
+pub const SENSITIVITY_SLIDER_WIDTH: f32 = 300.0;
+
+/// Least width of the "Scan" button.
+pub const SCAN_BUTTON_WIDTH: f32 = 90.0;
+
+/// Least width of the "Cancel" button.
+pub const CANCEL_BUTTON_WIDTH: f32 = 80.0;
+
+/// Width of the "Find duplicates" button.
+pub const FIND_DUPLICATES_BUTTON_WIDTH: f32 = 178.0;
+
+/// Least height of the buttons in the scan page's "Run" box.
+pub const RUN_BUTTON_HEIGHT: f32 = 30.0;
+
+/// Space between one progress bar and the next.
+pub const PROGRESS_BAR_GAP: f32 = 4.0;
+
+/// Space between the columns of counts under the progress bars.
+pub const SCAN_COUNTS_COLUMN_GAP: f32 = 24.0;
+
+/// Space between the rows of counts under the progress bars.
+pub const SCAN_COUNTS_ROW_GAP: f32 = 4.0;
+
+/// The tallest the list of files that could not be read grows before it scrolls.
+pub const FAILED_FILES_LIST_MAX_HEIGHT: f32 = 160.0;
+
+/// Width of the cleanup page's button, and of the progress bar that takes its place
+/// while the cleanup runs.
+pub const CLEANUP_PAGE_BUTTON_WIDTH: f32 = 210.0;
+
+/// Least height of the cleanup page's button.
+pub const CLEANUP_PAGE_BUTTON_HEIGHT: f32 = 28.0;
+
+/// Width of the panel down the left of the cleanup page.
+pub const CLEANUP_SETTINGS_PANEL_WIDTH: f32 = 320.0;
+
+/// Space between the columns of the cleanup page's summary.
+pub const CLEANUP_SUMMARY_COLUMN_GAP: f32 = 16.0;
+
+/// Space between the rows of the cleanup page's summary.
+pub const CLEANUP_SUMMARY_ROW_GAP: f32 = 4.0;
+
+/// Space between the choice of where files go and the note under it.
+pub const DESTINATION_NOTE_GAP: f32 = 4.0;
+
+/// Width of the field holding the folder files are moved to.
+pub const MOVE_FOLDER_FIELD_WIDTH: f32 = 190.0;
+
+/// Space between the heading over the cleanup page's list of files and the list.
+pub const FILE_LIST_HEADING_GAP: f32 = 4.0;
+
+/// Width of the review page's preview pane before anybody has resized it, as a
+/// fraction of the page.
+pub const PREVIEW_PANE_DEFAULT_WIDTH_FRACTION: f32 = 0.42;
+
+/// The narrowest the preview pane can be made.
+pub const PREVIEW_PANE_MIN_WIDTH: f32 = 260.0;
+
+/// Space between the file's name and its picture in the preview pane.
+pub const PREVIEW_PICTURE_TOP_GAP: f32 = 4.0;
+
+/// How much of the preview pane's height the picture takes, as a fraction.
+pub const PREVIEW_PICTURE_HEIGHT_FRACTION: f32 = 0.62;
+
+/// Space between the picture in the preview pane and what the file says about
+/// itself.
+pub const PREVIEW_METADATA_TOP_GAP: f32 = 6.0;
+
+/// How much of the preview pane's width the names in the metadata list take, as a
+/// fraction.
+pub const METADATA_NAME_COLUMN_WIDTH_FRACTION: f32 = 0.38;
+
+/// The shortest the metadata list is made, in lines.
+pub const METADATA_LIST_MIN_HEIGHT_LINES: f32 = 3.0;
+
+/// How far one step of the metadata list scrolls, in lines.
+pub const METADATA_LIST_SCROLL_STEP_LINES: f32 = 3.0;
+
+/// Corner radius of the band behind a heading in the metadata list.
+pub const METADATA_HEADING_CORNER_RADIUS: f32 = 2.0;
+
+/// Distance from the left of that band to the heading's text.
+pub const METADATA_HEADING_LEFT_INSET: f32 = 6.0;
+
+/// How much of the window a picture opened to fill it may take, as a fraction.
+pub const FULL_WINDOW_PICTURE_SIZE_FRACTION: f32 = 0.98;
+
+/// Width of the line along the top of the band of buttons at the bottom of a set.
+pub const SET_BUTTON_BAND_TOP_LINE_WIDTH: f32 = 1.0;
+
+/// Width of the border round a thumbnail that is being kept.
+pub const KEPT_THUMBNAIL_BORDER_WIDTH: f32 = 3.0;
+
+/// Width of the border round a thumbnail that is not being kept.
+pub const THUMBNAIL_BORDER_WIDTH: f32 = 1.0;
+
+/// How far inside a thumbnail's border the ring for the one the preview is showing
+/// is drawn.
+pub const SHOWN_THUMBNAIL_RING_INSET: f32 = 3.0;
+
+/// Corner radius of that ring.
+pub const SHOWN_THUMBNAIL_RING_CORNER_RADIUS: f32 = 2.0;
+
+/// Width of that ring's line.
+pub const SHOWN_THUMBNAIL_RING_WIDTH: f32 = 3.0;
+
+/// Space between the previous session question and its buttons.
+pub const PREVIOUS_SESSION_BUTTONS_GAP: f32 = 10.0;
+
+/// Width of the line round a scrollbar's strip.
+pub const SCROLLBAR_OUTLINE_WIDTH: f32 = 1.0;
+
+/// Corner radius of a scrollbar's handle.
+pub const SCROLLBAR_HANDLE_CORNER_RADIUS: f32 = 2.0;
+
+/// How far a scrollbar arrow reaches from the middle of its button, as a fraction
+/// of the button's size.
+pub const SCROLLBAR_ARROW_REACH_FRACTION: f32 = 0.26;

@@ -12,7 +12,7 @@ impl App {
         let (going, reclaimable) = self.selected_for_removal();
 
         egui::TopBottomPanel::top("review toolbar").show_inside(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
             // Three lots that share one row: the checkbox against the left edge,
             // the counts in the middle of the window, and the button against the
             // right edge. They are laid out over the same rectangle, each with
@@ -74,11 +74,11 @@ impl App {
                     .color(CLEANUP_BUTTON_TEXT_COLOUR),
             )
             .fill(CLEANUP_BUTTON_FILL_COLOUR)
-            .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, 28.0));
+            .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, TOOLBAR_ROW_HEIGHT));
             if right.add_enabled(going > 0, go).clicked() {
                 self.view = View::Cleanup;
             }
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
         });
 
         for (key, direction) in [
@@ -179,11 +179,13 @@ impl App {
         let chosen = self.selected.and_then(find);
         let held = self.showing.and_then(find);
 
-        let width = self.preview_width.unwrap_or(ui.available_width() * 0.42);
+        let width = self
+            .preview_width
+            .unwrap_or(ui.available_width() * PREVIEW_PANE_DEFAULT_WIDTH_FRACTION);
         let pane = egui::SidePanel::right("preview")
             .resizable(true)
             .default_width(width)
-            .min_width(260.0)
+            .min_width(PREVIEW_PANE_MIN_WIDTH)
             .show_inside(ui, |ui| {
                 let Some((set_id, member)) = chosen else {
                     ui.centered_and_justified(|ui| {
@@ -192,7 +194,7 @@ impl App {
                     return;
                 };
 
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
                 ui.horizontal(|ui| {
                     let keeping = keeps(self.keep.get(&set_id), member.file_id);
                     if ui
@@ -223,12 +225,15 @@ impl App {
                     );
                 });
                 ui.add(unwrapped(egui::RichText::new(&member.rel_path).weak()));
-                ui.add_space(4.0);
+                ui.add_space(PREVIEW_PICTURE_TOP_GAP);
 
                 // The picture takes the top of the pane and what the file says
                 // about itself takes the rest, so there is always a picture and
                 // always somewhere for the words to go.
-                let room = egui::vec2(ui.available_width(), ui.available_height() * 0.62);
+                let room = egui::vec2(
+                    ui.available_width(),
+                    ui.available_height() * PREVIEW_PICTURE_HEIGHT_FRACTION,
+                );
                 let wanted =
                     self.thumbs
                         .get(member.file_id, thumbs::LARGE_EDGE, root, &member.rel_path);
@@ -266,7 +271,7 @@ impl App {
                         }
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(PREVIEW_METADATA_TOP_GAP);
                 self.written_beside_it(ui, &member, root);
             });
         self.preview_width = Some(pane.response.rect.width());
@@ -313,12 +318,12 @@ impl App {
             .collect();
 
         let line = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
-        let names = ui.available_width() * 0.38;
+        let names = ui.available_width() * METADATA_NAME_COLUMN_WIDTH_FRACTION;
         // What is left of the pane, and no more. Without a height of its own the
         // list takes whatever it asks for, runs off the bottom of the window, and
         // the part of it below the edge cannot be reached by anything.
-        let room =
-            (ui.max_rect().bottom() - ui.cursor().top() - SCROLLBAR_STRIP_WIDTH).max(line * 3.0);
+        let room = (ui.max_rect().bottom() - ui.cursor().top() - SCROLLBAR_STRIP_WIDTH)
+            .max(line * METADATA_LIST_MIN_HEIGHT_LINES);
         let bar = egui::Id::new(("what it says", member.file_id));
         // The whole pane, not only the part the list covers: a scroll wheel
         // turned over the picture is a scroll wheel turned over this pane, and
@@ -328,7 +333,7 @@ impl App {
             ui,
             bar,
             true,
-            line * 3.0,
+            line * METADATA_LIST_SCROLL_STEP_LINES,
             Some(where_it_is),
             egui::ScrollArea::vertical()
                 .id_salt(("metadata", member.file_id))
@@ -348,7 +353,7 @@ impl App {
                                 );
                                 ui.painter().rect_filled(
                                     rect,
-                                    2.0,
+                                    METADATA_HEADING_CORNER_RADIUS,
                                     ui.visuals().widgets.inactive.weak_bg_fill,
                                 );
                                 let ink = ui.visuals().strong_text_color();
@@ -359,7 +364,7 @@ impl App {
                                 );
                                 let down = (rect.height() - words.size().y) / 2.0;
                                 ui.painter().galley(
-                                    rect.left_top() + egui::vec2(6.0, down),
+                                    rect.left_top() + egui::vec2(METADATA_HEADING_LEFT_INSET, down),
                                     words,
                                     ink,
                                 );
@@ -424,7 +429,7 @@ impl App {
                 match picture {
                     Some(texture) => {
                         let size = texture.size_vec2();
-                        let room = screen.size() * 0.98;
+                        let room = screen.size() * FULL_WINDOW_PICTURE_SIZE_FRACTION;
                         let scale = (room.x / size.x).min(room.y / size.y).min(1.0);
                         let shown = egui::Rect::from_center_size(screen.center(), size * scale);
                         egui::Image::new(&texture).paint_at(ui, shown);
@@ -602,7 +607,7 @@ impl App {
                             band.x_range(),
                             band.top(),
                             egui::Stroke::new(
-                                1.0_f32,
+                                SET_BUTTON_BAND_TOP_LINE_WIDTH,
                                 ui.visuals().widgets.noninteractive.bg_stroke.color,
                             ),
                         );
@@ -762,10 +767,10 @@ impl App {
                 // picture that is both shows both.
                 let frame = egui::Frame::none()
                     .stroke(if kept {
-                        egui::Stroke::new(3.0_f32, keep_colour)
+                        egui::Stroke::new(KEPT_THUMBNAIL_BORDER_WIDTH, keep_colour)
                     } else {
                         egui::Stroke::new(
-                            1.0_f32,
+                            THUMBNAIL_BORDER_WIDTH,
                             ui.style().visuals.widgets.noninteractive.bg_stroke.color,
                         )
                     })
@@ -818,9 +823,12 @@ impl App {
                     // person needs to see about the picture in front of them is
                     // hidden by the fact that they are looking at it.
                     ui.painter().rect_stroke(
-                        bordered.shrink(3.0),
-                        2.0,
-                        egui::Stroke::new(3.0_f32, ui.style().visuals.selection.bg_fill),
+                        bordered.shrink(SHOWN_THUMBNAIL_RING_INSET),
+                        SHOWN_THUMBNAIL_RING_CORNER_RADIUS,
+                        egui::Stroke::new(
+                            SHOWN_THUMBNAIL_RING_WIDTH,
+                            ui.style().visuals.selection.bg_fill,
+                        ),
                     );
                 }
                 let picked = framed.inner;
