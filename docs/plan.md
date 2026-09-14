@@ -154,7 +154,7 @@ Smallest first, largest last, one file at a time.
 - [x] `crates/imgdedupe-core/src/metadata.rs`
 - [x] `crates/imgdedupe-core/src/scan.rs`
 - [x] `crates/imgdedupe-core/src/matching.rs`
-- [ ] `crates/imgdedupe/src/app.rs`
+- [x] `crates/imgdedupe/src/app.rs`
 
 The whole suite must pass after every single file refactor. Not the tests for that file, not the tests for that crate: the whole suite, every time, and the build (with --log) must succeed before the next file is started.
 
