@@ -9,6 +9,7 @@ use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
 use imgdedupe_core::runlog;
 use imgdedupe_core::scan;
 
+use crate::color_theme::*;
 use crate::constants::*;
 use crate::headless;
 use crate::indexer::{self, Run, Update};

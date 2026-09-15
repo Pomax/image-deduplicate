@@ -1,5 +1,3 @@
-use eframe::egui;
-
 /// The one text size. There is no second size: headings, small print and button
 /// labels are all this.
 pub const FONT_SIZE: f32 = 16.0;
@@ -19,35 +17,7 @@ pub const WIDGET_VERTICAL_SPACING: f32 = 7.0;
 /// The least height of anything that can be clicked or typed in.
 pub const CONTROL_MIN_HEIGHT: f32 = 26.0;
 
-/// The colour an error is written in.
-pub const ERROR_MESSAGE_TEXT_COLOUR: egui::Color32 = egui::Color32::from_rgb(200, 80, 80);
-
-/// The fill of the "Clean up" button, and of the cleanup page's button when what
-/// it does can be undone.
-pub const CLEANUP_BUTTON_FILL_COLOUR: egui::Color32 = egui::Color32::from_rgb(60, 110, 180);
-
-/// The fill of the cleanup page's button when what it does is permanent.
-pub const PERMANENT_DELETE_BUTTON_FILL_COLOUR: egui::Color32 = egui::Color32::from_rgb(150, 50, 50);
-
-/// The words on those buttons.
-pub const CLEANUP_BUTTON_TEXT_COLOUR: egui::Color32 = egui::Color32::WHITE;
-
-/// The border round a thumbnail that is being kept, and the "KEEP" over it.
-pub const KEPT_THUMBNAIL_MARK_COLOUR: egui::Color32 = egui::Color32::from_rgb(90, 180, 110);
-
-/// What covers the window behind a picture opened to fill it.
-pub const FULL_WINDOW_PICTURE_BACKDROP_COLOUR: egui::Color32 = egui::Color32::from_black_alpha(240);
-
-/// A scan page lamp for a step that has not happened yet.
-pub const LAMP_WAITING_COLOUR: egui::Color32 = egui::Color32::from_rgb(196, 62, 54);
-
-/// A scan page lamp for a step that has happened.
-pub const LAMP_DONE_COLOUR: egui::Color32 = egui::Color32::from_rgb(58, 160, 78);
-
-/// The ring for a step there was nothing to do for.
-pub const LAMP_SKIPPED_RING_COLOUR: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
-
-/// The width of that ring's line.
+/// The width of the ring drawn for a step there was nothing to do for.
 pub const LAMP_SKIPPED_RING_WIDTH: f32 = 1.5;
 
 /// The radius of a scan page lamp.
@@ -89,10 +59,6 @@ pub const SET_BUTTON_BAND_VERTICAL_PADDING: f32 = 2.0;
 
 /// How far in from the left edge of the box the row of buttons starts.
 pub const SET_BUTTON_BAND_LEFT_INSET: f32 = 5.0;
-
-/// The band those buttons sit on.
-pub const SET_BUTTON_BAND_BACKGROUND_COLOUR: egui::Color32 =
-    egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
 
 /// What the page keeps at its edges, and what a list keeps between what is in it
 /// and the scrollbar down its right: the same, so a box in a list stops as far
