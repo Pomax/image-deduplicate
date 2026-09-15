@@ -73,12 +73,12 @@ impl App {
                             &[("verb", &self.destination.verb()), ("count", &plan.files())],
                         ))
                         .strong()
-                        .color(CLEANUP_BUTTON_TEXT_COLOUR),
+                        .color(cleanup_button_text_colour(ui.visuals())),
                     )
                     .fill(if danger {
-                        PERMANENT_DELETE_BUTTON_FILL_COLOUR
+                        permanent_delete_button_fill_colour(ui.visuals())
                     } else {
-                        CLEANUP_BUTTON_FILL_COLOUR
+                        cleanup_button_fill_colour(ui.visuals())
                     })
                     .min_size(egui::vec2(
                         CLEANUP_PAGE_BUTTON_WIDTH,
@@ -143,7 +143,7 @@ impl App {
                     ui.add_space(DESTINATION_NOTE_GAP);
                     let note = egui::RichText::new(self.destination.note());
                     if self.destination == Destination::Delete {
-                        ui.label(note.color(ERROR_MESSAGE_TEXT_COLOUR));
+                        ui.label(note.color(error_message_text_colour(ui.visuals())));
                     } else {
                         ui.label(note.weak());
                     }
@@ -212,7 +212,7 @@ impl App {
                                             CLEANUP_FAILED_FILE_LINE_TEMPLATE,
                                             &[("path", &path), ("reason", &why)],
                                         ))
-                                        .color(ERROR_MESSAGE_TEXT_COLOUR),
+                                        .color(error_message_text_colour(ui.visuals())),
                                     );
                                 }
                                 None => {
