@@ -2008,6 +2008,14 @@ The destination on screen becomes the disposal the cleanup runs.
 
 Each choice has a name and a line saying what it does.
 
+### every_template_is_filled_completely
+
+Every template in `template_strings.rs` is filled by `fill` with the placeholder names its call site uses, and nothing is left in braces afterwards. A placeholder renamed in `template_strings.rs` but not at the call site shows up as text still in braces.
+
+### a_filled_in_value_is_not_read_as_a_placeholder
+
+A value that holds braces of its own goes in as it is: a file called `{message}.jpg` is not read as a placeholder.
+
 ## crates/imgdedupe/src/metadata.rs
 
 ### asking_gives_nothing_back_at_once_and_something_back_later
