@@ -9,6 +9,7 @@ use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
 use imgdedupe_core::runlog;
 use imgdedupe_core::scan;
 
+use crate::color_theme::*;
 use crate::constants::*;
 use crate::headless;
 use crate::indexer::{self, Run, Update};
@@ -417,7 +418,7 @@ impl eframe::App for App {
             egui::TopBottomPanel::bottom("error").show(ctx, |ui| {
                 ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
                 ui.horizontal(|ui| {
-                    ui.colored_label(ERROR_MESSAGE_TEXT_COLOUR, error);
+                    ui.colored_label(error_message_text_colour(ui.visuals()), error);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(DISMISS_ERROR_BUTTON_LABEL).clicked() {
                             self.error = None;

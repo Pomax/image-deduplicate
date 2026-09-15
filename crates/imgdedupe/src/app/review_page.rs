@@ -71,9 +71,9 @@ impl App {
             let go = egui::Button::new(
                 egui::RichText::new(CLEAN_UP_BUTTON_LABEL)
                     .strong()
-                    .color(CLEANUP_BUTTON_TEXT_COLOUR),
+                    .color(cleanup_button_text_colour(ui.visuals())),
             )
-            .fill(CLEANUP_BUTTON_FILL_COLOUR)
+            .fill(cleanup_button_fill_colour(ui.visuals()))
             .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, TOOLBAR_ROW_HEIGHT));
             if right.add_enabled(going > 0, go).clicked() {
                 self.view = View::Cleanup;
@@ -604,8 +604,11 @@ impl App {
                             egui::pos2(inside.left(), inside.bottom() - button_row_height(ui)),
                             inside.max,
                         );
-                        ui.painter()
-                            .rect_filled(band, 0.0, SET_BUTTON_BAND_BACKGROUND_COLOUR);
+                        ui.painter().rect_filled(
+                            band,
+                            0.0,
+                            set_button_band_background_colour(ui.visuals()),
+                        );
                         // A line of its own along the top of the band, in the grey the
                         // scroll bar is drawn round, which the bar above it now sits on.
                         ui.painter().hline(
@@ -767,7 +770,7 @@ impl App {
         // is done to the whole of it at once.
         let kept = !ignored && keeps(keeping, member.file_id);
         let showing = !ignored && self.selected == Some(member.file_id);
-        let keep_colour = KEPT_THUMBNAIL_MARK_COLOUR;
+        let keep_colour = kept_thumbnail_mark_colour(ui.visuals());
 
         let tall = tile_strip_height(ui);
         ui.allocate_ui(egui::vec2(width, tall), |ui| {

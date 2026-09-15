@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use imgdedupe_core::matching::Thresholds;
 
 mod app;
+mod color_theme;
 mod constants;
 mod folder_picker;
 mod fonts;
