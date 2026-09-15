@@ -129,9 +129,15 @@ impl App {
                         self.scan.reading = Stage::Over;
                         self.scan.writing = Stage::Over;
                     }
-                    self.scan.finished = Some(format!(
-                        "indexed {indexed}, removed {removed}, failed {failed}, in {:.1}s",
-                        elapsed_ms as f64 / 1000.0
+                    let seconds = format!("{:.1}", elapsed_ms as f64 / 1000.0);
+                    self.scan.finished = Some(fill(
+                        SCAN_FINISHED_TEMPLATE,
+                        &[
+                            ("indexed", &indexed),
+                            ("removed", &removed),
+                            ("failed", &failed),
+                            ("seconds", &seconds),
+                        ],
                     ));
                 }
                 Update::Finished { cancelled, error } => {
@@ -262,7 +268,10 @@ impl App {
             match &self.folder {
                 Some(folder) => clipped_line(
                     ui,
-                    egui::RichText::new(format!("Loaded {}", folder.display())),
+                    egui::RichText::new(fill(
+                        LOADED_FOLDER_TEMPLATE,
+                        &[("folder", &folder.display())],
+                    )),
                 ),
                 None => {
                     ui.label(egui::RichText::new(NO_FOLDER_OPEN_TEXT).weak());
@@ -275,7 +284,10 @@ impl App {
             ui.horizontal(|ui| {
                 dot(ui, self.how_it_went(lamp));
                 match at {
-                    Some(at) => ui.label(format!("{label}  {at} ms")),
+                    Some(at) => ui.label(fill(
+                        LAMP_LINE_TEMPLATE,
+                        &[("label", &label), ("milliseconds", &at)],
+                    )),
                     None => ui.label(egui::RichText::new(label).weak()),
                 };
             });
@@ -935,9 +947,9 @@ impl App {
             // is, and it is the difference between a window that is working and a
             // window that looks stopped.
             if let Some(found) = self.scan.listing {
-                ui.label(format!(
-                    "listing the folder: {}",
-                    counted(found, FILE_WORD, FILES_WORD)
+                ui.label(fill(
+                    LISTING_FOLDER_TEMPLATE,
+                    &[("count", &counted(found, FILE_WORD, FILES_WORD))],
                 ));
                 ui.add_space(SECTION_ROW_GAP);
             }
@@ -1023,9 +1035,9 @@ impl App {
             }
             if !self.scan.failures.is_empty() {
                 ui.add_space(SECTION_ROW_GAP);
-                egui::CollapsingHeader::new(format!(
-                    "{} files could not be read",
-                    self.scan.failures.len()
+                egui::CollapsingHeader::new(fill(
+                    FILES_COULD_NOT_BE_READ_TEMPLATE,
+                    &[("count", &self.scan.failures.len())],
                 ))
                 .show(ui, |ui| {
                     let line = ui.text_style_height(&egui::TextStyle::Body);
@@ -1040,7 +1052,10 @@ impl App {
                         |area, ui| {
                             area.show(ui, |ui| {
                                 for (path, message) in &self.scan.failures {
-                                    ui.label(format!("{path}: {message}"));
+                                    ui.label(fill(
+                                        FAILED_FILE_LINE_TEMPLATE,
+                                        &[("path", &path), ("message", &message)],
+                                    ));
                                 }
                             })
                         },

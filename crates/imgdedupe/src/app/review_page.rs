@@ -214,12 +214,17 @@ impl App {
                         self.marked(&[member.file_id]);
                     }
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{}x{}  {}  {:.1} MB",
-                            member.width,
-                            member.height,
-                            member.format,
-                            member.size_bytes as f64 / 1_000_000.0
+                        egui::RichText::new(fill(
+                            PREVIEW_DETAILS_TEMPLATE,
+                            &[
+                                ("width", &member.width),
+                                ("height", &member.height),
+                                ("format", &member.format),
+                                (
+                                    "megabytes",
+                                    &format!("{:.1}", member.size_bytes as f64 / 1_000_000.0),
+                                ),
+                            ],
                         ))
                         .weak(),
                     );
@@ -883,15 +888,23 @@ impl App {
                 // make that tile taller than every other one in the strip.
                 clipped_line_in(
                     ui,
-                    egui::RichText::new(format!("{}x{}", member.width, member.height)),
+                    egui::RichText::new(fill(
+                        THUMBNAIL_DIMENSIONS_TEMPLATE,
+                        &[("width", &member.width), ("height", &member.height)],
+                    )),
                     width,
                 );
                 clipped_line_in(
                     ui,
-                    egui::RichText::new(format!(
-                        "{}  {:.1} MB",
-                        member.format,
-                        member.size_bytes as f64 / 1_000_000.0
+                    egui::RichText::new(fill(
+                        THUMBNAIL_FORMAT_AND_SIZE_TEMPLATE,
+                        &[
+                            ("format", &member.format),
+                            (
+                                "megabytes",
+                                &format!("{:.1}", member.size_bytes as f64 / 1_000_000.0),
+                            ),
+                        ],
                     ))
                     .weak(),
                     width,

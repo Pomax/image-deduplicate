@@ -42,12 +42,13 @@ impl App {
                         let mut bar = egui::ProgressBar::new(done as f32 / total as f32)
                             .desired_width(CLEANUP_PAGE_BUTTON_WIDTH);
                         if !self.tidying {
-                            bar = bar.text(format!(
-                                "{} {done} of {total}",
-                                match self.destination {
-                                    Destination::MoveTo => MOVING_WORD,
-                                    _ => REMOVING_WORD,
-                                }
+                            let doing = match self.destination {
+                                Destination::MoveTo => MOVING_WORD,
+                                _ => REMOVING_WORD,
+                            };
+                            bar = bar.text(fill(
+                                CLEANUP_PROGRESS_TEMPLATE,
+                                &[("doing", &doing), ("done", &done), ("total", &total)],
                             ));
                         }
                         let painted = ui.add(bar);
@@ -67,10 +68,9 @@ impl App {
                     let ready = plan.files() > 0 && self.folder.is_some() && !self.busy();
                     let danger = self.destination == Destination::Delete;
                     let button = egui::Button::new(
-                        egui::RichText::new(format!(
-                            "{} {} files",
-                            self.destination.verb(),
-                            plan.files()
+                        egui::RichText::new(fill(
+                            CLEANUP_BUTTON_TEMPLATE,
+                            &[("verb", &self.destination.verb()), ("count", &plan.files())],
                         ))
                         .strong()
                         .color(CLEANUP_BUTTON_TEXT_COLOUR),
@@ -114,9 +114,12 @@ impl App {
                             ui.end_row();
                             ui.label(SPACE_FREED_SUMMARY_LABEL);
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "{:.1} MB",
-                                    plan.bytes() as f64 / 1_000_000.0
+                                egui::RichText::new(fill(
+                                    MEGABYTES_TEMPLATE,
+                                    &[(
+                                        "megabytes",
+                                        &format!("{:.1}", plan.bytes() as f64 / 1_000_000.0),
+                                    )],
                                 ))
                                 .strong(),
                             );
@@ -205,8 +208,11 @@ impl App {
                                     // The reason goes on the line. There is
                                     // nowhere else to read it.
                                     ui.label(
-                                        egui::RichText::new(format!("{path}  {why}"))
-                                            .color(ERROR_MESSAGE_TEXT_COLOUR),
+                                        egui::RichText::new(fill(
+                                            CLEANUP_FAILED_FILE_LINE_TEMPLATE,
+                                            &[("path", &path), ("reason", &why)],
+                                        ))
+                                        .color(ERROR_MESSAGE_TEXT_COLOUR),
                                     );
                                 }
                                 None => {
@@ -355,7 +361,7 @@ impl App {
             runlog::log_line!("  could not remove {path}: {message}");
         }
         let index = if self.keep_index {
-            format!("{forgotten} dropped from the index")
+            fill(DROPPED_FROM_INDEX_TEMPLATE, &[("count", &forgotten)])
         } else {
             String::from(INDEX_DELETED_TEXT)
         };
@@ -365,11 +371,15 @@ impl App {
             outcome.failed.len(),
             outcome.bytes_freed as f64 / 1_000_000.0
         );
-        self.cleanup_result = Some(format!(
-            "removed {} files, freed {:.1} MB, {} failed, {index}",
-            outcome.removed.len(),
-            outcome.bytes_freed as f64 / 1_000_000.0,
-            outcome.failed.len()
+        let megabytes = format!("{:.1}", outcome.bytes_freed as f64 / 1_000_000.0);
+        self.cleanup_result = Some(fill(
+            CLEANUP_RESULT_TEMPLATE,
+            &[
+                ("removed", &outcome.removed.len()),
+                ("megabytes", &megabytes),
+                ("failed", &outcome.failed.len()),
+                ("index", &index),
+            ],
         ));
         self.cleanup_failures = outcome.failed.clone();
 

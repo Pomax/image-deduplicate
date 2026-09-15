@@ -6433,3 +6433,67 @@ fn every_destination_has_a_label_and_a_note() {
         "the permanent option does not say so"
     );
 }
+
+/// Every template is given the names its call site gives it, and nothing is left
+/// in braces afterwards. A placeholder renamed in `template_strings.rs` and not
+/// at the call site shows up here as text still in braces.
+#[test]
+fn every_template_is_filled_completely() {
+    let templates: [(&str, &[&str]); 21] = [
+        (WINDOW_TITLE_TEMPLATE, &["version"]),
+        (
+            SCAN_FINISHED_TEMPLATE,
+            &["indexed", "removed", "failed", "seconds"],
+        ),
+        (LOADED_FOLDER_TEMPLATE, &["folder"]),
+        (LAMP_LINE_TEMPLATE, &["label", "milliseconds"]),
+        (LISTING_FOLDER_TEMPLATE, &["count"]),
+        (FILES_COULD_NOT_BE_READ_TEMPLATE, &["count"]),
+        (FAILED_FILE_LINE_TEMPLATE, &["path", "message"]),
+        (CLEANUP_PROGRESS_TEMPLATE, &["doing", "done", "total"]),
+        (CLEANUP_BUTTON_TEMPLATE, &["verb", "count"]),
+        (MEGABYTES_TEMPLATE, &["megabytes"]),
+        (CLEANUP_FAILED_FILE_LINE_TEMPLATE, &["path", "reason"]),
+        (DROPPED_FROM_INDEX_TEMPLATE, &["count"]),
+        (
+            CLEANUP_RESULT_TEMPLATE,
+            &["removed", "megabytes", "failed", "index"],
+        ),
+        (
+            PREVIEW_DETAILS_TEMPLATE,
+            &["width", "height", "format", "megabytes"],
+        ),
+        (THUMBNAIL_DIMENSIONS_TEMPLATE, &["width", "height"]),
+        (THUMBNAIL_FORMAT_AND_SIZE_TEMPLATE, &["format", "megabytes"]),
+        (TO_REMOVE_TEMPLATE, &["count"]),
+        (TO_RECLAIM_TEMPLATE, &["megabytes"]),
+        (PROGRESS_BAR_TEMPLATE, &["label", "percent"]),
+        (COUNTED_TEMPLATE, &["count", "noun"]),
+        (
+            FILE_DATE_TEMPLATE,
+            &["year", "month", "day", "hour", "minute"],
+        ),
+    ];
+    for (template, names) in templates {
+        let values: Vec<(&str, &dyn std::fmt::Display)> = names
+            .iter()
+            .map(|name| (*name, &"x" as &dyn std::fmt::Display))
+            .collect();
+        let filled = fill(template, &values);
+        assert!(
+            !filled.contains('{') && !filled.contains('}'),
+            "{template:?} came out as {filled:?}"
+        );
+    }
+}
+
+/// A value that holds braces of its own goes in as it is: a file called
+/// `{count}.jpg` is not read as a placeholder.
+#[test]
+fn a_filled_in_value_is_not_read_as_a_placeholder() {
+    let filled = fill(
+        FAILED_FILE_LINE_TEMPLATE,
+        &[("path", &"{message}.jpg"), ("message", &"unreadable")],
+    );
+    assert_eq!(filled, "{message}.jpg: unreadable");
+}

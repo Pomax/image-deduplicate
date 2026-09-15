@@ -12,6 +12,7 @@ use imgdedupe_core::scan;
 use crate::constants::*;
 use crate::headless;
 use crate::indexer::{self, Run, Update};
+use crate::template_strings::*;
 use crate::thumbs::{self, Thumbnails};
 
 mod cleanup_page;
@@ -53,7 +54,10 @@ fn start_window() -> Result<()> {
         // taking so long.
         .with_inner_size([WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT])
         .with_min_inner_size([WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT])
-        .with_title(format!("imgdedupe {}", env!("CARGO_PKG_VERSION")))
+        .with_title(fill(
+            WINDOW_TITLE_TEMPLATE,
+            &[("version", &env!("CARGO_PKG_VERSION"))],
+        ))
         .with_icon(crate::icon::window_icon());
     if let Some(window) = saved.window {
         viewport = viewport

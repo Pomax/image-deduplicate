@@ -384,9 +384,10 @@ pub(super) fn count_line(
         gap,
         strong.clone(),
     );
-    line.append(&format!("{going} to remove"), gap, strong);
+    line.append(&fill(TO_REMOVE_TEMPLATE, &[("count", &going)]), gap, strong);
+    let megabytes = format!("{:.1}", reclaimable as f64 / 1e6);
     line.append(
-        &format!("{:.1} MB to reclaim", reclaimable as f64 / 1e6),
+        &fill(TO_RECLAIM_TEMPLATE, &[("megabytes", &megabytes)]),
         gap,
         weak,
     );
@@ -562,7 +563,12 @@ pub(super) fn progress_bar(
             egui::Stroke::NONE,
         );
     }
-    let galley = egui::WidgetText::from(format!("{label} {:.0}%", fraction * 100.0)).into_galley(
+    let percent = format!("{:.0}", fraction * 100.0);
+    let text = fill(
+        PROGRESS_BAR_TEMPLATE,
+        &[("label", &label), ("percent", &percent)],
+    );
+    let galley = egui::WidgetText::from(text).into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
@@ -580,7 +586,39 @@ pub(super) fn progress_bar(
 /// A number and the word for it, which is not the same word when there is one of
 /// them.
 pub(super) fn counted(how_many: u64, one: &str, more: &str) -> String {
-    format!("{how_many} {}", if how_many == 1 { one } else { more })
+    fill(
+        COUNTED_TEMPLATE,
+        &[
+            ("count", &how_many),
+            ("noun", &if how_many == 1 { one } else { more }),
+        ],
+    )
+}
+
+/// A template from `template_strings.rs` with its placeholders filled in.
+///
+/// The template is read once, left to right, so a value that itself holds
+/// something in braces, such as a file name, is put in as it is and not read as
+/// a placeholder. A placeholder with no value given is left in the text.
+pub(crate) fn fill(template: &str, values: &[(&str, &dyn std::fmt::Display)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let name = &after[..close];
+        match values.iter().find(|(key, _)| *key == name) {
+            Some((_, value)) => out.push_str(&value.to_string()),
+            None => out.push_str(&rest[open..open + close + 2]),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A line of text cut to the room it is given.
