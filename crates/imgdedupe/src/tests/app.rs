@@ -4984,7 +4984,7 @@ fn the_setting_for_what_counts_as_a_duplicate_is_not_kept_across_a_restart() {
     let mut app = App::from_settings(crate::settings::Settings::default());
     app.open_folder(folder.path().to_path_buf());
     app.keep_index = true;
-    app.sensitivity = matching::MAX_SENSITIVITY;
+    app.sensitivity = matching::SENSITIVITY_SLIDER_MAX_PERCENT;
     app.ignore_colour = true;
     app.start_scan();
     settle(&mut app);
@@ -4995,7 +4995,7 @@ fn the_setting_for_what_counts_as_a_duplicate_is_not_kept_across_a_restart() {
     let next = App::from_settings(app.settings());
     assert_eq!(
         next.sensitivity,
-        matching::DEFAULT_SENSITIVITY,
+        matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT,
         "the last run's sensitivity came back"
     );
     assert_eq!(next.folder, app.folder, "the folder was not remembered");
@@ -6248,7 +6248,7 @@ fn a_different_folder_starts_on_the_default_setting() {
     let found = folder_with_a_duplicate();
     let mut app = App::from_settings(crate::settings::Settings::default());
     app.open_folder(found.path().to_path_buf());
-    app.sensitivity = matching::MAX_SENSITIVITY;
+    app.sensitivity = matching::SENSITIVITY_SLIDER_MAX_PERCENT;
     app.ignore_colour = true;
     app.destination = Destination::Delete;
     app.start_scan();
@@ -6261,7 +6261,7 @@ fn a_different_folder_starts_on_the_default_setting() {
     app.open_folder(dir.path().to_path_buf());
     assert_eq!(
         app.sensitivity,
-        matching::DEFAULT_SENSITIVITY,
+        matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT,
         "the last folder's sensitivity was carried over"
     );
     assert!(
@@ -6278,11 +6278,11 @@ fn a_different_folder_starts_on_the_default_setting() {
         "the last folder's move folder was carried over"
     );
 
-    app.sensitivity = matching::MAX_SENSITIVITY;
+    app.sensitivity = matching::SENSITIVITY_SLIDER_MAX_PERCENT;
     app.open_folder(dir.path().to_path_buf());
     assert_eq!(
         app.sensitivity,
-        matching::MAX_SENSITIVITY,
+        matching::SENSITIVITY_SLIDER_MAX_PERCENT,
         "opening the same folder again threw away the setting chosen for it"
     );
 }
@@ -6302,8 +6302,8 @@ fn no_saved_settings_leaves_the_window_empty() {
 /// between two of them lights up neither.
 #[test]
 fn the_preset_row_marks_the_one_the_slider_is_on() {
-    for (name, percent) in matching::PRESETS {
-        let lit: Vec<&str> = matching::PRESETS
+    for (name, percent) in matching::SENSITIVITY_SLIDER_PRESETS {
+        let lit: Vec<&str> = matching::SENSITIVITY_SLIDER_PRESETS
             .iter()
             .filter(|(_, other)| on_preset(percent, *other))
             .map(|(other, _)| *other)
@@ -6313,15 +6313,15 @@ fn the_preset_row_marks_the_one_the_slider_is_on() {
 
     let between = 20.0;
     assert!(
-        !matching::PRESETS
+        !matching::SENSITIVITY_SLIDER_PRESETS
             .iter()
             .any(|(_, percent)| on_preset(between, *percent)),
         "a setting between the presets was drawn as one of them"
     );
     assert!(
-        matching::PRESETS
+        matching::SENSITIVITY_SLIDER_PRESETS
             .iter()
-            .all(|(_, percent)| *percent <= matching::MAX_SENSITIVITY),
+            .all(|(_, percent)| *percent <= matching::SENSITIVITY_SLIDER_MAX_PERCENT),
         "a preset sits past the end of the slider"
     );
 }
@@ -6338,8 +6338,13 @@ fn the_app_starts_on_the_default_setting() {
     // Not `App::default`, which reads whatever this machine was last left
     // set to and would pass or fail depending on it.
     let app = App::from_settings(crate::settings::Settings::default());
-    assert_eq!(app.sensitivity, matching::DEFAULT_SENSITIVITY);
-    assert!(matching::DEFAULT_SENSITIVITY <= matching::MAX_SENSITIVITY);
+    assert_eq!(
+        app.sensitivity,
+        matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT
+    );
+    assert!(
+        matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT <= matching::SENSITIVITY_SLIDER_MAX_PERCENT
+    );
 }
 
 #[test]

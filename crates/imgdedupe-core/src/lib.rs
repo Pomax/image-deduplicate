@@ -1,6 +1,7 @@
 pub mod catalogue;
 #[cfg(feature = "review")]
 pub mod cleanup;
+pub mod constants;
 pub mod db;
 pub mod decode;
 pub mod dirlist;

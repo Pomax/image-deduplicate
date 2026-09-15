@@ -314,7 +314,7 @@ impl App {
             // What counts as a duplicate is a decision about the pictures in
             // front of the person making it, so every run starts on the default
             // rather than on whatever the last one was left at.
-            sensitivity: matching::DEFAULT_SENSITIVITY,
+            sensitivity: matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT,
             running: None,
             scan: ScanState::default(),
             searching: None,

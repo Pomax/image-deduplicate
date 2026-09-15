@@ -61,37 +61,21 @@ fn share(percent: f64) -> u32 {
     (fingerprint::HASH_BITS as f64 * percent / 100.0) as u32
 }
 
-/// The widest setting offered. Unrelated pictures were measured above 25 percent
-/// apart, so the top of this range reports them as duplicates. That is the
-/// point of it: what is a duplicate is the person's to decide, and the review
-/// step is where they decide it.
-pub const MAX_SENSITIVITY: f64 = 50.0;
-
-/// What the window starts on, and what it goes back to for a folder it has not
-/// been set for.
-pub const DEFAULT_SENSITIVITY: f64 = 15.0;
-
-/// The named points on the scale. Everything between them is reachable too: a
-/// preset is a place on the slider, not a separate setting.
-pub const PRESETS: [(&str, f64); 4] = [
-    // Re-encodes and resizes of the same picture.
-    ("close", 5.0),
-    // Heavier edits, crops and rotations.
-    ("balanced", DEFAULT_SENSITIVITY),
-    // Pictures of the same thing, and some that are not.
-    ("wide", 30.0),
-    // Everything, including pictures with nothing to do with each other.
-    ("yolo", MAX_SENSITIVITY),
-];
+use crate::constants::{
+    CORNERS_DEFAULT, IGNORE_COLOUR_DEFAULT, WHOLE_FRAME_DEFAULT, WITHIN_A_FOLDER_DEFAULT,
+};
+pub use crate::constants::{
+    SENSITIVITY_SLIDER_DEFAULT_PERCENT, SENSITIVITY_SLIDER_MAX_PERCENT, SENSITIVITY_SLIDER_PRESETS,
+};
 
 impl Thresholds {
     /// The threshold a preset stands for, or the closest one if the name is not
     /// a preset.
     pub fn preset(name: &str) -> Self {
-        let percent = PRESETS
+        let percent = SENSITIVITY_SLIDER_PRESETS
             .iter()
             .find(|(preset, _)| *preset == name)
-            .map_or(DEFAULT_SENSITIVITY, |(_, percent)| *percent);
+            .map_or(SENSITIVITY_SLIDER_DEFAULT_PERCENT, |(_, percent)| *percent);
         Thresholds::at(percent)
     }
 
@@ -103,14 +87,14 @@ impl Thresholds {
     /// picture that has drifted far enough for the hash to notice has usually
     /// drifted in colour too.
     pub fn at(percent: f64) -> Self {
-        let percent = percent.clamp(0.0, MAX_SENSITIVITY);
+        let percent = percent.clamp(0.0, SENSITIVITY_SLIDER_MAX_PERCENT);
         Thresholds {
             max_bits: share(percent),
             max_ring: (0.005 * percent).max(0.005) as f32,
-            ignore_colour: false,
-            whole_frame: true,
-            corners: true,
-            within_a_folder: false,
+            ignore_colour: IGNORE_COLOUR_DEFAULT,
+            whole_frame: WHOLE_FRAME_DEFAULT,
+            corners: CORNERS_DEFAULT,
+            within_a_folder: WITHIN_A_FOLDER_DEFAULT,
         }
     }
 

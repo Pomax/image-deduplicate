@@ -560,7 +560,7 @@ impl App {
         // folder starts where a first look at a folder starts, and then takes
         // back whatever its own index has a record of.
         if elsewhere {
-            self.sensitivity = matching::DEFAULT_SENSITIVITY;
+            self.sensitivity = matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT;
             self.ignore_colour = MATCH_COLOUR_WITH_GRAYSCALE_DEFAULT;
             self.recurse = INCLUDE_SUBFOLDERS_DEFAULT;
             // Both ways of matching, until this folder's index says otherwise,
@@ -790,10 +790,13 @@ impl App {
             let mut changed = ui
                 .add_enabled(
                     !busy,
-                    egui::Slider::new(&mut self.sensitivity, 0.5..=matching::MAX_SENSITIVITY)
-                        .suffix(SENSITIVITY_SLIDER_SUFFIX)
-                        .fixed_decimals(1)
-                        .text(SENSITIVITY_SLIDER_LABEL),
+                    egui::Slider::new(
+                        &mut self.sensitivity,
+                        0.5..=matching::SENSITIVITY_SLIDER_MAX_PERCENT,
+                    )
+                    .suffix(SENSITIVITY_SLIDER_SUFFIX)
+                    .fixed_decimals(1)
+                    .text(SENSITIVITY_SLIDER_LABEL),
                 )
                 .changed();
             ui.horizontal(|ui| {
@@ -802,7 +805,7 @@ impl App {
                     SMALL_BUTTON_HORIZONTAL_PADDING,
                     SMALL_BUTTON_VERTICAL_PADDING,
                 );
-                for (name, percent) in matching::PRESETS {
+                for (name, percent) in matching::SENSITIVITY_SLIDER_PRESETS {
                     let here = on_preset(self.sensitivity, percent);
                     // The one the slider is on is drawn as pressed, so the row
                     // says where the setting is as well as where it can go.
