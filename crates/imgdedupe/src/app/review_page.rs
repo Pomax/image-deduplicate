@@ -3,7 +3,7 @@ use super::*;
 impl App {
     pub(super) fn review_view(&mut self, ui: &mut egui::Ui) {
         let Some(root) = self.folder.clone() else {
-            ui.label("no folder chosen");
+            ui.label(REVIEW_NO_FOLDER_TEXT);
             return;
         };
 
@@ -29,15 +29,15 @@ impl App {
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            if left.button("unmark all").clicked() {
+            if left.button(UNMARK_ALL_BUTTON_LABEL).clicked() {
                 self.unmark_everything();
             }
             left.add_space(TOOLBAR_BUTTON_GAP);
-            if left.button("mark all").clicked() {
+            if left.button(MARK_ALL_BUTTON_LABEL).clicked() {
                 self.keep_everything();
             }
             left.add_space(TOOLBAR_BUTTON_GAP);
-            if left.button("auto-mark to keep").clicked() {
+            if left.button(AUTO_MARK_BUTTON_LABEL).clicked() {
                 self.auto_mark_to_keep();
             }
 
@@ -69,7 +69,7 @@ impl App {
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
             let go = egui::Button::new(
-                egui::RichText::new("Clean up")
+                egui::RichText::new(CLEAN_UP_BUTTON_LABEL)
                     .strong()
                     .color(CLEANUP_BUTTON_TEXT_COLOUR),
             )
@@ -189,7 +189,7 @@ impl App {
             .show_inside(ui, |ui| {
                 let Some((set_id, member)) = chosen else {
                     ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new("click a picture to see it here").weak());
+                        ui.label(egui::RichText::new(PREVIEW_EMPTY_TEXT).weak());
                     });
                     return;
                 };
@@ -198,7 +198,7 @@ impl App {
                 ui.horizontal(|ui| {
                     let keeping = keeps(self.keep.get(&set_id), member.file_id);
                     if ui
-                        .add_enabled(!keeping, egui::Button::new("Keep this one"))
+                        .add_enabled(!keeping, egui::Button::new(KEEP_THIS_ONE_BUTTON_LABEL))
                         .clicked()
                     {
                         let came_off: Vec<i64> = self
@@ -267,7 +267,7 @@ impl App {
                             }
                         }
                         None => {
-                            ui.label(egui::RichText::new("reading...").weak());
+                            ui.label(egui::RichText::new(READING_TEXT).weak());
                         }
                     });
                 });
@@ -296,9 +296,9 @@ impl App {
             let waiting = self.metadata.reading();
             ui.label(
                 egui::RichText::new(if waiting {
-                    "reading..."
+                    READING_TEXT
                 } else {
-                    "this file says nothing about itself"
+                    NO_METADATA_TEXT
                 })
                 .weak(),
             );
@@ -438,7 +438,7 @@ impl App {
                         ui.painter().text(
                             screen.center(),
                             egui::Align2::CENTER_CENTER,
-                            "reading...",
+                            READING_TEXT,
                             egui::TextStyle::Body.resolve(ui.style()),
                             ui.visuals().weak_text_color(),
                         );
@@ -629,18 +629,30 @@ impl App {
                                     SMALL_BUTTON_VERTICAL_PADDING,
                                 );
                                 for (label, what, says) in [
-                                    ("keep all", SetAction::KeepAll, ["keep all"; 2]),
-                                    ("keep none", SetAction::KeepNone, ["keep none"; 2]),
+                                    (
+                                        KEEP_ALL_BUTTON_LABEL,
+                                        SetAction::KeepAll,
+                                        [KEEP_ALL_BUTTON_LABEL; 2],
+                                    ),
+                                    (
+                                        KEEP_NONE_BUTTON_LABEL,
+                                        SetAction::KeepNone,
+                                        [KEEP_NONE_BUTTON_LABEL; 2],
+                                    ),
                                     // The third one undoes itself: a set that has been
                                     // ignored is one press away from being a set again.
                                     (
-                                        if ignored { "ignored" } else { "ignore" },
+                                        if ignored {
+                                            IGNORED_BUTTON_LABEL
+                                        } else {
+                                            IGNORE_BUTTON_LABEL
+                                        },
                                         if ignored {
                                             SetAction::Unignore
                                         } else {
                                             SetAction::Ignore
                                         },
-                                        ["ignore", "ignored"],
+                                        [IGNORE_BUTTON_LABEL, IGNORED_BUTTON_LABEL],
                                     ),
                                 ] {
                                     // An ignored set keeps nothing, so the two about
@@ -805,7 +817,7 @@ impl App {
                         // when it arrives.
                         None => ui.add_sized(
                             fitted(member.width, member.height),
-                            egui::Label::new(egui::RichText::new("...").weak())
+                            egui::Label::new(egui::RichText::new(THUMBNAIL_LOADING_TEXT).weak())
                                 .sense(egui::Sense::click()),
                         ),
                     }
@@ -858,7 +870,11 @@ impl App {
                     |ui| {
                         ui.set_min_size(over_the_picture);
                         if kept {
-                            ui.label(egui::RichText::new("KEEP").strong().color(keep_colour));
+                            ui.label(
+                                egui::RichText::new(KEEP_MARK_TEXT)
+                                    .strong()
+                                    .color(keep_colour),
+                            );
                         }
                     },
                 );

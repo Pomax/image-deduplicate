@@ -393,9 +393,9 @@ impl eframe::App for App {
                 // for that tab to go.
                 let anything_to_clean = self.sets.iter().any(|set| !self.is_ignored(set));
                 let tabs = [
-                    (View::Scan, "1  Scan", true),
-                    (View::Review, "2  Review", ready),
-                    (View::Cleanup, "3  Clean up", ready && anything_to_clean),
+                    (View::Scan, SCAN_TAB_LABEL, true),
+                    (View::Review, REVIEW_TAB_LABEL, ready),
+                    (View::Cleanup, CLEANUP_TAB_LABEL, ready && anything_to_clean),
                 ];
                 for (view, label, enabled) in tabs {
                     let selected = self.view == view;
@@ -415,7 +415,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.colored_label(ERROR_MESSAGE_TEXT_COLOUR, error);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("dismiss").clicked() {
+                        if ui.button(DISMISS_ERROR_BUTTON_LABEL).clicked() {
                             self.error = None;
                         }
                     });

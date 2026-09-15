@@ -374,9 +374,13 @@ pub(super) fn count_line(
     let gap = ui.spacing().item_spacing.x;
 
     let mut line = egui::text::LayoutJob::default();
-    line.append(&counted(sets as u64, "set", "sets"), 0.0, strong.clone());
     line.append(
-        &counted(duplicates as u64, "duplicate", "duplicates"),
+        &counted(sets as u64, SET_WORD, SETS_WORD),
+        0.0,
+        strong.clone(),
+    );
+    line.append(
+        &counted(duplicates as u64, DUPLICATE_WORD, DUPLICATES_WORD),
         gap,
         strong.clone(),
     );

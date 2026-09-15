@@ -45,8 +45,8 @@ impl App {
                             bar = bar.text(format!(
                                 "{} {done} of {total}",
                                 match self.destination {
-                                    Destination::MoveTo => "moving",
-                                    _ => "removing",
+                                    Destination::MoveTo => MOVING_WORD,
+                                    _ => REMOVING_WORD,
                                 }
                             ));
                         }
@@ -57,7 +57,7 @@ impl App {
                             ui.painter().text(
                                 painted.rect.center(),
                                 egui::Align2::CENTER_CENTER,
-                                "tidying the index",
+                                TIDYING_INDEX_TEXT,
                                 egui::TextStyle::Button.resolve(ui.style()),
                                 ui.visuals().strong_text_color(),
                             );
@@ -98,21 +98,21 @@ impl App {
             .exact_width(CLEANUP_SETTINGS_PANEL_WIDTH)
             .show_inside(ui, |ui| {
                 ui.add_space(PANEL_VERTICAL_PADDING);
-                section(ui, "What will happen", |ui| {
+                section(ui, WHAT_WILL_HAPPEN_SECTION_TITLE, |ui| {
                     egui::Grid::new("cleanup summary")
                         .num_columns(2)
                         .spacing([CLEANUP_SUMMARY_COLUMN_GAP, CLEANUP_SUMMARY_ROW_GAP])
                         .show(ui, |ui| {
-                            ui.label("Sets");
+                            ui.label(SETS_SUMMARY_LABEL);
                             ui.label(egui::RichText::new(sets_in_play.to_string()).strong());
                             ui.end_row();
                             ui.label(match self.destination {
-                                Destination::MoveTo => "Files moved",
-                                _ => "Files removed",
+                                Destination::MoveTo => FILES_MOVED_SUMMARY_LABEL,
+                                _ => FILES_REMOVED_SUMMARY_LABEL,
                             });
                             ui.label(egui::RichText::new(plan.files().to_string()).strong());
                             ui.end_row();
-                            ui.label("Space freed");
+                            ui.label(SPACE_FREED_SUMMARY_LABEL);
                             ui.label(
                                 egui::RichText::new(format!(
                                     "{:.1} MB",
@@ -126,7 +126,7 @@ impl App {
 
                 ui.add_space(SECTION_SPACING_GAP);
                 let busy = self.busy();
-                section(ui, "Where they go", |ui| {
+                section(ui, WHERE_THEY_GO_SECTION_TITLE, |ui| {
                     for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {
                         let picked = self.destination == choice;
                         if ui
@@ -151,10 +151,16 @@ impl App {
                             ui.add_enabled(
                                 !busy,
                                 egui::TextEdit::singleline(&mut self.move_dir)
-                                    .hint_text("folder")
+                                    .hint_text(MOVE_FOLDER_FIELD_HINT)
                                     .desired_width(MOVE_FOLDER_FIELD_WIDTH),
                             );
-                            if ui.add_enabled(!busy, egui::Button::new("choose")).clicked() {
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new(CHOOSE_MOVE_FOLDER_BUTTON_LABEL),
+                                )
+                                .clicked()
+                            {
                                 if let Some(folder) = crate::folder_picker::pick(None) {
                                     self.move_dir = folder.display().to_string();
                                     self.remember_disposal();
@@ -169,8 +175,8 @@ impl App {
             ui.add_space(PANEL_VERTICAL_PADDING);
             ui.label(
                 egui::RichText::new(match self.destination {
-                    Destination::MoveTo => "Files that will be moved",
-                    _ => "Files that will be removed",
+                    Destination::MoveTo => FILES_TO_MOVE_HEADING,
+                    _ => FILES_TO_REMOVE_HEADING,
                 })
                 .strong(),
             );
@@ -351,7 +357,7 @@ impl App {
         let index = if self.keep_index {
             format!("{forgotten} dropped from the index")
         } else {
-            String::from("the index was deleted")
+            String::from(INDEX_DELETED_TEXT)
         };
         runlog::log_line!(
             "cleanup finished: {} removed, {} failed, {:.1} MB, {index}",
@@ -419,7 +425,7 @@ impl App {
                 self.thumbs.forget();
                 self.scan = ScanState::default();
             }
-            self.scan.finished = Some(String::from("cleanup done."));
+            self.scan.finished = Some(String::from(CLEANUP_DONE_TEXT));
         }
     }
 
