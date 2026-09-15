@@ -125,7 +125,7 @@ impl App {
         let Some(receive) = &self.searching else {
             return;
         };
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(WORK_PROGRESS_REPAINT_INTERVAL);
         let waiting: Vec<Found> = receive.try_iter().collect();
         let mut done = false;
         for found in waiting {
@@ -158,7 +158,7 @@ impl App {
                 }
                 Found::Cancelled => {
                     runlog::log_line!("the search was cancelled");
-                    self.scan.finished = Some(String::from("cancelled"));
+                    self.scan.finished = Some(String::from(CANCELLED_TEXT));
                     done = true;
                 }
                 Found::Failed(message) => {
@@ -200,9 +200,9 @@ impl App {
             // folder with no pictures in it was never searched, and saying no
             // duplicates were found in it claims otherwise.
             self.scan.finished = Some(String::from(if self.scan.total == 0 {
-                "No files in this folder"
+                NO_FILES_IN_FOLDER_TEXT
             } else {
-                "No duplicates found for current settings"
+                NO_DUPLICATES_FOUND_TEXT
             }));
             self.replan();
             return;
@@ -245,6 +245,9 @@ impl App {
                 thumbs::THUMB_EDGE,
             );
         }
+        // These are other sets, so the list starts at the first of them rather
+        // than wherever the last review was left scrolled to.
+        self.list_to_top = true;
         self.view = View::Review;
     }
 
@@ -449,23 +452,23 @@ impl App {
             return;
         };
         let mut answered = None;
-        egui::Window::new("Previous session")
+        egui::Window::new(PREVIOUS_SESSION_TITLE)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
                 ui.label(question.wording());
-                ui.add_space(10.0);
+                ui.add_space(PREVIOUS_SESSION_BUTTONS_GAP);
                 ui.horizontal(|ui| {
-                    if ui.button("Finish previous session").clicked() {
+                    if ui.button(FINISH_PREVIOUS_SESSION_BUTTON_LABEL).clicked() {
                         answered = Some(true);
                     }
-                    if ui.button("Rescan").clicked() {
+                    if ui.button(RESCAN_BUTTON_LABEL).clicked() {
                         answered = Some(false);
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
             });
         match answered {
             Some(true) => {

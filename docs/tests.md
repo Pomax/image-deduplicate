@@ -1567,11 +1567,15 @@ Draws the review page, reads where the bar's track was painted, scrolls the list
 to the second set, and reads it again. The track is in the same place: it marks
 the room the list is drawn in, and only the handle inside it moves.
 
+### the_review_starts_at_the_top_after_a_search
+
+Scrolls the review list down to the second set, scans the folder and searches it again, and draws the review that search opens. The list is at the top, not where the last review was left scrolled to.
+
 ### the_set_boxes_are_drawn_whole_and_evenly_spaced
 
 Draws the review page and reads the rectangles the set boxes were painted as,
 with the rectangle each was clipped to. No box has its top cut off by the edge of
-the list, one box stands `BETWEEN_BOXES` clear of the next, the gap from the
+the list, one box stands `SET_BOX_VERTICAL_GAP` clear of the next, the gap from the
 window's edge to a box's left edge is the gap from its right edge to the scroll
 bar, and the pictures in a box start as far inside it as they end.
 
@@ -2003,6 +2007,14 @@ The destination on screen becomes the disposal the cleanup runs.
 ### every_destination_has_a_label_and_a_note
 
 Each choice has a name and a line saying what it does.
+
+### every_template_is_filled_completely
+
+Every template in `template_strings.rs` is filled by `fill` with the placeholder names its call site uses, and nothing is left in braces afterwards. A placeholder renamed in `template_strings.rs` but not at the call site shows up as text still in braces.
+
+### a_filled_in_value_is_not_read_as_a_placeholder
+
+A value that holds braces of its own goes in as it is: a file called `{message}.jpg` is not read as a placeholder.
 
 ## crates/imgdedupe/src/metadata.rs
 

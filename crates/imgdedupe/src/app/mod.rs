@@ -9,8 +9,10 @@ use imgdedupe_core::matching::{self, DuplicateSet, Thresholds};
 use imgdedupe_core::runlog;
 use imgdedupe_core::scan;
 
+use crate::constants::*;
 use crate::headless;
 use crate::indexer::{self, Run, Update};
+use crate::template_strings::*;
 use crate::thumbs::{self, Thumbnails};
 
 mod cleanup_page;
@@ -50,9 +52,12 @@ fn start_window() -> Result<()> {
         // is what sets the height, and a window that cannot show all of it hides
         // exactly the part someone is watching when they want to know what is
         // taking so long.
-        .with_inner_size([1100.0, 860.0])
-        .with_min_inner_size([700.0, 780.0])
-        .with_title(format!("imgdedupe {}", env!("CARGO_PKG_VERSION")))
+        .with_inner_size([WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT])
+        .with_min_inner_size([WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT])
+        .with_title(fill(
+            WINDOW_TITLE_TEMPLATE,
+            &[("version", &env!("CARGO_PKG_VERSION"))],
+        ))
         .with_icon(crate::icon::window_icon());
     if let Some(window) = saved.window {
         viewport = viewport
@@ -213,6 +218,9 @@ pub struct App {
     /// A row the cursor keys moved to that the list may not be showing, and what
     /// the list was scrolled to and how tall it was on the last frame.
     scroll_to: Option<usize>,
+    /// Set when new sets arrive, so the next frame of the review draws the list
+    /// from its first set.
+    list_to_top: bool,
     /// The picture filling the window, put there by a click on the preview. A
     /// click anywhere or the escape key puts it back.
     filling_the_window: Option<i64>,
@@ -289,9 +297,9 @@ impl App {
             previous: crate::settings::sorted(&saved.previous),
             recurse: saved.recurse,
             ignore_colour: saved.ignore_colour,
-            match_whole_frame: true,
-            match_corners: true,
-            within_a_folder: false,
+            match_whole_frame: MATCH_WHOLE_PICTURES_DEFAULT,
+            match_corners: MATCH_PARTIALS_DEFAULT,
+            within_a_folder: ONLY_MATCH_WITHIN_FOLDERS_DEFAULT,
             ignored: std::collections::HashSet::new(),
             plan: cleanup::Plan::default(),
             opened_with_an_index: false,
@@ -300,8 +308,8 @@ impl App {
             question: None,
             sets_before: Vec::new(),
             kept_before: std::collections::HashSet::new(),
-            auto_rescan: false,
-            auto_mark: false,
+            auto_rescan: AUTOMATICALLY_RESCAN_DEFAULT,
+            auto_mark: AUTOMATICALLY_MARK_TO_KEEP_DEFAULT,
             mark_on_arrival: false,
             asking: None,
             scanned_since_asking: false,
@@ -310,7 +318,7 @@ impl App {
             // What counts as a duplicate is a decision about the pictures in
             // front of the person making it, so every run starts on the default
             // rather than on whatever the last one was left at.
-            sensitivity: matching::DEFAULT_SENSITIVITY,
+            sensitivity: matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT,
             running: None,
             scan: ScanState::default(),
             searching: None,
@@ -318,7 +326,7 @@ impl App {
             sets: Vec::new(),
             keep: HashMap::new(),
             destination: Destination::Trash,
-            move_dir: String::new(),
+            move_dir: MOVE_FOLDER_DEFAULT.to_string(),
             removing: None,
             removed_so_far: 0,
             to_remove: 0,
@@ -329,6 +337,7 @@ impl App {
             selected: None,
             showing: None,
             scroll_to: None,
+            list_to_top: false,
             filling_the_window: None,
             metadata: crate::metadata::Metadata::default(),
             show_selected: false,
@@ -380,7 +389,7 @@ impl eframe::App for App {
         self.thumbs.collect(ctx);
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
             ui.horizontal(|ui| {
                 let ready = self.have_sets();
                 // A review holding nothing but sets somebody has said are not
@@ -388,9 +397,9 @@ impl eframe::App for App {
                 // for that tab to go.
                 let anything_to_clean = self.sets.iter().any(|set| !self.is_ignored(set));
                 let tabs = [
-                    (View::Scan, "1  Scan", true),
-                    (View::Review, "2  Review", ready),
-                    (View::Cleanup, "3  Clean up", ready && anything_to_clean),
+                    (View::Scan, SCAN_TAB_LABEL, true),
+                    (View::Review, REVIEW_TAB_LABEL, ready),
+                    (View::Cleanup, CLEANUP_TAB_LABEL, ready && anything_to_clean),
                 ];
                 for (view, label, enabled) in tabs {
                     let selected = self.view == view;
@@ -401,21 +410,21 @@ impl eframe::App for App {
                     }
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
         });
 
         if let Some(error) = self.error.clone() {
             egui::TopBottomPanel::bottom("error").show(ctx, |ui| {
-                ui.add_space(6.0);
+                ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::from_rgb(200, 80, 80), error);
+                    ui.colored_label(ERROR_MESSAGE_TEXT_COLOUR, error);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("dismiss").clicked() {
+                        if ui.button(DISMISS_ERROR_BUTTON_LABEL).clicked() {
                             self.error = None;
                         }
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(WINDOW_BAR_VERTICAL_PADDING);
             });
         }
 
@@ -429,7 +438,7 @@ impl eframe::App for App {
             // that stops short of the one above it. The page keeps no margin
             // here and the parts of the review keep their own.
             View::Cleanup | View::Review => egui::Margin::ZERO,
-            _ => egui::Margin::symmetric(16.0, 12.0),
+            _ => egui::Margin::symmetric(CONTENT_MARGIN, CONTENT_VERTICAL_MARGIN),
         };
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(margin))
@@ -443,7 +452,7 @@ impl eframe::App for App {
         self.ask_about_the_saved_review(ctx);
 
         if self.running.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(WORK_PROGRESS_REPAINT_INTERVAL);
         }
     }
 

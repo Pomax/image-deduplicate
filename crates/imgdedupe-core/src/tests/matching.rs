@@ -293,7 +293,7 @@ fn the_balanced_threshold_covers_what_the_same_picture_actually_moves() {
 /// are not.
 #[test]
 fn the_presets_widen_in_order() {
-    let bits: Vec<u32> = PRESETS
+    let bits: Vec<u32> = SENSITIVITY_SLIDER_PRESETS
         .iter()
         .map(|(_, percent)| Thresholds::at(*percent).max_bits)
         .collect();
@@ -317,14 +317,14 @@ fn the_presets_widen_in_order() {
 /// is the balanced preset and not a value of its own.
 #[test]
 fn the_default_is_the_balanced_preset() {
-    let balanced = PRESETS
+    let balanced = SENSITIVITY_SLIDER_PRESETS
         .iter()
         .find(|(name, _)| *name == "balanced")
         .expect("a balanced preset");
-    assert_eq!(balanced.1, DEFAULT_SENSITIVITY);
+    assert_eq!(balanced.1, SENSITIVITY_SLIDER_DEFAULT_PERCENT);
     assert_eq!(
         Thresholds::preset("balanced").max_bits,
-        Thresholds::at(DEFAULT_SENSITIVITY).max_bits
+        Thresholds::at(SENSITIVITY_SLIDER_DEFAULT_PERCENT).max_bits
     );
 }
 
@@ -332,7 +332,7 @@ fn the_default_is_the_balanced_preset() {
 fn a_preset_that_is_not_one_lands_on_the_default() {
     assert_eq!(
         Thresholds::preset("something else").max_bits,
-        Thresholds::at(DEFAULT_SENSITIVITY).max_bits
+        Thresholds::at(SENSITIVITY_SLIDER_DEFAULT_PERCENT).max_bits
     );
 }
 
@@ -350,7 +350,7 @@ fn a_threshold_can_be_set_anywhere_on_the_scale() {
 /// what the search will use.
 #[test]
 fn the_presets_are_points_on_the_same_scale() {
-    for (name, percent) in PRESETS {
+    for (name, percent) in SENSITIVITY_SLIDER_PRESETS {
         assert_eq!(
             Thresholds::preset(name).max_bits,
             Thresholds::at(percent).max_bits
@@ -373,13 +373,16 @@ fn a_threshold_reports_where_it_sits() {
     }
 }
 
-/// The scale stops at `MAX_SENSITIVITY` however far the control is dragged,
+/// The scale stops at `SENSITIVITY_SLIDER_MAX_PERCENT` however far the control is dragged,
 /// and at nothing at the other end. The top of it is past the 25 percent
 /// unrelated pictures were measured at, so it reaches them on purpose.
 #[test]
 fn a_threshold_stops_at_the_ends_of_its_scale() {
     let widest = Thresholds::at(1000.0);
-    assert_eq!(widest.max_bits, Thresholds::at(MAX_SENSITIVITY).max_bits);
+    assert_eq!(
+        widest.max_bits,
+        Thresholds::at(SENSITIVITY_SLIDER_MAX_PERCENT).max_bits
+    );
     assert!(
         widest.max_bits < fingerprint::HASH_BITS as u32,
         "the whole hash may differ"

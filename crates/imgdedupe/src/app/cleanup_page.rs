@@ -28,7 +28,7 @@ impl App {
         // The action sits top right, where the one that starts a scan and the one
         // that goes from the review to here both are.
         egui::TopBottomPanel::top("cleanup actions").show_inside(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
             ui.horizontal(|ui| {
                 if let Some(result) = &self.cleanup_result {
                     ui.label(egui::RichText::new(result).strong());
@@ -39,15 +39,16 @@ impl App {
                     if self.removing.is_some() {
                         let done = self.removed_so_far;
                         let total = self.to_remove.max(1);
-                        let mut bar =
-                            egui::ProgressBar::new(done as f32 / total as f32).desired_width(210.0);
+                        let mut bar = egui::ProgressBar::new(done as f32 / total as f32)
+                            .desired_width(CLEANUP_PAGE_BUTTON_WIDTH);
                         if !self.tidying {
-                            bar = bar.text(format!(
-                                "{} {done} of {total}",
-                                match self.destination {
-                                    Destination::MoveTo => "moving",
-                                    _ => "removing",
-                                }
+                            let doing = match self.destination {
+                                Destination::MoveTo => MOVING_WORD,
+                                _ => REMOVING_WORD,
+                            };
+                            bar = bar.text(fill(
+                                CLEANUP_PROGRESS_TEMPLATE,
+                                &[("doing", &doing), ("done", &done), ("total", &total)],
                             ));
                         }
                         let painted = ui.add(bar);
@@ -57,7 +58,7 @@ impl App {
                             ui.painter().text(
                                 painted.rect.center(),
                                 egui::Align2::CENTER_CENTER,
-                                "tidying the index",
+                                TIDYING_INDEX_TEXT,
                                 egui::TextStyle::Button.resolve(ui.style()),
                                 ui.visuals().strong_text_color(),
                             );
@@ -67,53 +68,58 @@ impl App {
                     let ready = plan.files() > 0 && self.folder.is_some() && !self.busy();
                     let danger = self.destination == Destination::Delete;
                     let button = egui::Button::new(
-                        egui::RichText::new(format!(
-                            "{} {} files",
-                            self.destination.verb(),
-                            plan.files()
+                        egui::RichText::new(fill(
+                            CLEANUP_BUTTON_TEMPLATE,
+                            &[("verb", &self.destination.verb()), ("count", &plan.files())],
                         ))
                         .strong()
-                        .color(egui::Color32::WHITE),
+                        .color(CLEANUP_BUTTON_TEXT_COLOUR),
                     )
                     .fill(if danger {
-                        egui::Color32::from_rgb(150, 50, 50)
+                        PERMANENT_DELETE_BUTTON_FILL_COLOUR
                     } else {
-                        egui::Color32::from_rgb(60, 110, 180)
+                        CLEANUP_BUTTON_FILL_COLOUR
                     })
-                    .min_size(egui::vec2(210.0, 28.0));
+                    .min_size(egui::vec2(
+                        CLEANUP_PAGE_BUTTON_WIDTH,
+                        CLEANUP_PAGE_BUTTON_HEIGHT,
+                    ));
                     if ui.add_enabled(ready, button).clicked() {
                         runlog::log_line!("the remove button was pressed");
                         self.run_cleanup(&plan);
                     }
                 });
             });
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
         });
 
         egui::SidePanel::left("cleanup settings")
             .resizable(false)
-            .exact_width(320.0)
+            .exact_width(CLEANUP_SETTINGS_PANEL_WIDTH)
             .show_inside(ui, |ui| {
-                ui.add_space(4.0);
-                section(ui, "What will happen", |ui| {
+                ui.add_space(PANEL_VERTICAL_PADDING);
+                section(ui, WHAT_WILL_HAPPEN_SECTION_TITLE, |ui| {
                     egui::Grid::new("cleanup summary")
                         .num_columns(2)
-                        .spacing([16.0, 4.0])
+                        .spacing([CLEANUP_SUMMARY_COLUMN_GAP, CLEANUP_SUMMARY_ROW_GAP])
                         .show(ui, |ui| {
-                            ui.label("Sets");
+                            ui.label(SETS_SUMMARY_LABEL);
                             ui.label(egui::RichText::new(sets_in_play.to_string()).strong());
                             ui.end_row();
                             ui.label(match self.destination {
-                                Destination::MoveTo => "Files moved",
-                                _ => "Files removed",
+                                Destination::MoveTo => FILES_MOVED_SUMMARY_LABEL,
+                                _ => FILES_REMOVED_SUMMARY_LABEL,
                             });
                             ui.label(egui::RichText::new(plan.files().to_string()).strong());
                             ui.end_row();
-                            ui.label("Space freed");
+                            ui.label(SPACE_FREED_SUMMARY_LABEL);
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "{:.1} MB",
-                                    plan.bytes() as f64 / 1_000_000.0
+                                egui::RichText::new(fill(
+                                    MEGABYTES_TEMPLATE,
+                                    &[(
+                                        "megabytes",
+                                        &format!("{:.1}", plan.bytes() as f64 / 1_000_000.0),
+                                    )],
                                 ))
                                 .strong(),
                             );
@@ -121,9 +127,9 @@ impl App {
                         });
                 });
 
-                ui.add_space(SECTION_GAP);
+                ui.add_space(SECTION_SPACING_GAP);
                 let busy = self.busy();
-                section(ui, "Where they go", |ui| {
+                section(ui, WHERE_THEY_GO_SECTION_TITLE, |ui| {
                     for choice in [Destination::Trash, Destination::MoveTo, Destination::Delete] {
                         let picked = self.destination == choice;
                         if ui
@@ -134,24 +140,30 @@ impl App {
                             self.remember_disposal();
                         }
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(DESTINATION_NOTE_GAP);
                     let note = egui::RichText::new(self.destination.note());
                     if self.destination == Destination::Delete {
-                        ui.label(note.color(egui::Color32::from_rgb(200, 80, 80)));
+                        ui.label(note.color(ERROR_MESSAGE_TEXT_COLOUR));
                     } else {
                         ui.label(note.weak());
                     }
 
                     if self.destination == Destination::MoveTo {
-                        ui.add_space(6.0);
+                        ui.add_space(SECTION_ROW_GAP);
                         ui.horizontal(|ui| {
                             ui.add_enabled(
                                 !busy,
                                 egui::TextEdit::singleline(&mut self.move_dir)
-                                    .hint_text("folder")
-                                    .desired_width(190.0),
+                                    .hint_text(MOVE_FOLDER_FIELD_HINT)
+                                    .desired_width(MOVE_FOLDER_FIELD_WIDTH),
                             );
-                            if ui.add_enabled(!busy, egui::Button::new("choose")).clicked() {
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new(CHOOSE_MOVE_FOLDER_BUTTON_LABEL),
+                                )
+                                .clicked()
+                            {
                                 if let Some(folder) = crate::folder_picker::pick(None) {
                                     self.move_dir = folder.display().to_string();
                                     self.remember_disposal();
@@ -163,15 +175,15 @@ impl App {
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
             ui.label(
                 egui::RichText::new(match self.destination {
-                    Destination::MoveTo => "Files that will be moved",
-                    _ => "Files that will be removed",
+                    Destination::MoveTo => FILES_TO_MOVE_HEADING,
+                    _ => FILES_TO_REMOVE_HEADING,
                 })
                 .strong(),
             );
-            ui.add_space(4.0);
+            ui.add_space(FILE_LIST_HEADING_GAP);
             // What a cleanup could not remove is still in this list, because the
             // files are still there. Red, with what the system said on hover.
             let failed: std::collections::HashMap<&str, &str> = self
@@ -196,8 +208,11 @@ impl App {
                                     // The reason goes on the line. There is
                                     // nowhere else to read it.
                                     ui.label(
-                                        egui::RichText::new(format!("{path}  {why}"))
-                                            .color(egui::Color32::from_rgb(200, 80, 80)),
+                                        egui::RichText::new(fill(
+                                            CLEANUP_FAILED_FILE_LINE_TEMPLATE,
+                                            &[("path", &path), ("reason", &why)],
+                                        ))
+                                        .color(ERROR_MESSAGE_TEXT_COLOUR),
                                     );
                                 }
                                 None => {
@@ -315,7 +330,7 @@ impl App {
         let Some(receive) = &self.removing else {
             return;
         };
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(WORK_PROGRESS_REPAINT_INTERVAL);
         let waiting: Vec<Removal> = receive.try_iter().collect();
         let mut over = false;
         for step in waiting {
@@ -346,9 +361,9 @@ impl App {
             runlog::log_line!("  could not remove {path}: {message}");
         }
         let index = if self.keep_index {
-            format!("{forgotten} dropped from the index")
+            fill(DROPPED_FROM_INDEX_TEMPLATE, &[("count", &forgotten)])
         } else {
-            String::from("the index was deleted")
+            String::from(INDEX_DELETED_TEXT)
         };
         runlog::log_line!(
             "cleanup finished: {} removed, {} failed, {:.1} MB, {index}",
@@ -356,11 +371,15 @@ impl App {
             outcome.failed.len(),
             outcome.bytes_freed as f64 / 1_000_000.0
         );
-        self.cleanup_result = Some(format!(
-            "removed {} files, freed {:.1} MB, {} failed, {index}",
-            outcome.removed.len(),
-            outcome.bytes_freed as f64 / 1_000_000.0,
-            outcome.failed.len()
+        let megabytes = format!("{:.1}", outcome.bytes_freed as f64 / 1_000_000.0);
+        self.cleanup_result = Some(fill(
+            CLEANUP_RESULT_TEMPLATE,
+            &[
+                ("removed", &outcome.removed.len()),
+                ("megabytes", &megabytes),
+                ("failed", &outcome.failed.len()),
+                ("index", &index),
+            ],
         ));
         self.cleanup_failures = outcome.failed.clone();
 
@@ -416,7 +435,7 @@ impl App {
                 self.thumbs.forget();
                 self.scan = ScanState::default();
             }
-            self.scan.finished = Some(String::from("cleanup done."));
+            self.scan.finished = Some(String::from(CLEANUP_DONE_TEXT));
         }
     }
 

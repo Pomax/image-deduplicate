@@ -3,6 +3,11 @@ use std::sync::{Mutex, OnceLock};
 use eframe::egui;
 use imgdedupe_core::runlog;
 
+use crate::constants::{
+    BUTTON_HORIZONTAL_PADDING, BUTTON_VERTICAL_PADDING, CONTROL_MIN_HEIGHT, FONT_SIZE,
+    WIDGET_HORIZONTAL_SPACING, WIDGET_VERTICAL_SPACING,
+};
+
 /// The interface face, carried in the binary: Open Sans, cut down to the letters
 /// the window itself writes and the Latin alphabets a path is usually made of.
 /// The licence and the permission to embed are inside the file.
@@ -198,13 +203,9 @@ fn sans_serif_with(database: &fontdb::Database, wanted: &[char]) -> Option<Vec<u
     None
 }
 
-/// The one text size. There is no second size: headings, small print and button
-/// labels are all this.
-pub const SIZE: f32 = 16.0;
-
 fn set_sizes(style: &mut egui::Style) {
     use egui::{FontFamily, FontId, TextStyle};
-    let proportional = FontId::new(SIZE, FontFamily::Proportional);
+    let proportional = FontId::new(FONT_SIZE, FontFamily::Proportional);
     style.text_styles = [
         (TextStyle::Heading, proportional.clone()),
         (TextStyle::Body, proportional.clone()),
@@ -212,14 +213,14 @@ fn set_sizes(style: &mut egui::Style) {
         (TextStyle::Small, proportional),
         (
             TextStyle::Monospace,
-            FontId::new(SIZE, FontFamily::Monospace),
+            FontId::new(FONT_SIZE, FontFamily::Monospace),
         ),
     ]
     .into();
 
-    style.spacing.button_padding = egui::vec2(12.0, 7.0);
-    style.spacing.item_spacing = egui::vec2(9.0, 7.0);
-    style.spacing.interact_size.y = 26.0;
+    style.spacing.button_padding = egui::vec2(BUTTON_HORIZONTAL_PADDING, BUTTON_VERTICAL_PADDING);
+    style.spacing.item_spacing = egui::vec2(WIDGET_HORIZONTAL_SPACING, WIDGET_VERTICAL_SPACING);
+    style.spacing.interact_size.y = CONTROL_MIN_HEIGHT;
 }
 
 #[cfg(test)]

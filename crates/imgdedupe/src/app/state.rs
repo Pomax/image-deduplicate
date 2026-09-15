@@ -77,10 +77,7 @@ pub(super) enum Question {
 impl Question {
     pub(super) fn wording(self) -> &'static str {
         match self {
-            Question::TheFolderChanged => {
-                "Previous session found but folder content has changed. Load previous session \
-                 or rescan?"
-            }
+            Question::TheFolderChanged => PREVIOUS_SESSION_QUESTION,
         }
     }
 }
@@ -224,17 +221,17 @@ pub(super) enum Destination {
 impl Destination {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Destination::Trash => "Recycle bin",
-            Destination::MoveTo => "Move to a folder",
-            Destination::Delete => "Delete permanently",
+            Destination::Trash => RECYCLE_BIN_LABEL,
+            Destination::MoveTo => MOVE_TO_FOLDER_LABEL,
+            Destination::Delete => DELETE_PERMANENTLY_LABEL,
         }
     }
 
     pub(super) fn note(self) -> &'static str {
         match self {
-            Destination::Trash => "Recoverable from the recycle bin.",
-            Destination::MoveTo => "Keeps the folder structure, so the files can be put back.",
-            Destination::Delete => "This cannot be undone.",
+            Destination::Trash => RECYCLE_BIN_NOTE,
+            Destination::MoveTo => MOVE_TO_FOLDER_NOTE,
+            Destination::Delete => DELETE_PERMANENTLY_NOTE,
         }
     }
 
@@ -250,8 +247,8 @@ impl Destination {
     /// file to another folder is not removing it.
     pub(super) fn verb(self) -> &'static str {
         match self {
-            Destination::Trash | Destination::Delete => "Remove",
-            Destination::MoveTo => "Move",
+            Destination::Trash | Destination::Delete => REMOVE_VERB,
+            Destination::MoveTo => MOVE_VERB,
         }
     }
 

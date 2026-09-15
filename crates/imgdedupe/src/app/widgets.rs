@@ -26,9 +26,6 @@ pub(super) fn scroll_to_show(
     ((wanted - offset).abs() > 0.5).then_some(wanted)
 }
 
-/// Width of the strip a scroll bar sits in, and of the handle that fills it.
-pub(super) const SCROLL_BAR: f32 = 12.0;
-
 /// The triangle on a scroll bar's end button, pointing at the end it scrolls to.
 fn arrow(
     painter: &egui::Painter,
@@ -38,7 +35,7 @@ fn arrow(
     ink: egui::Color32,
 ) {
     let middle = button.center();
-    let reach = button.width().min(button.height()) * 0.26;
+    let reach = button.width().min(button.height()) * SCROLLBAR_ARROW_REACH_FRACTION;
     let along = |amount: f32| {
         if down {
             egui::vec2(0.0, amount)
@@ -87,14 +84,17 @@ pub(super) fn scrolled<R>(
             // A gap before the bar as well as the bar itself, so what is in the
             // list stops as far from it as the list stops from the window's edge
             // rather than running up against it.
-            room.with_max_x(room.right() - SCROLL_BAR - PAGE_MARGIN),
-            egui::Rect::from_min_max(egui::pos2(room.right() - SCROLL_BAR, room.top()), room.max),
+            room.with_max_x(room.right() - SCROLLBAR_STRIP_WIDTH - CONTENT_MARGIN),
+            egui::Rect::from_min_max(
+                egui::pos2(room.right() - SCROLLBAR_STRIP_WIDTH, room.top()),
+                room.max,
+            ),
         )
     } else {
         (
-            room.with_max_y(room.bottom() - SCROLL_BAR),
+            room.with_max_y(room.bottom() - SCROLLBAR_STRIP_WIDTH),
             egui::Rect::from_min_max(
-                egui::pos2(room.left(), room.bottom() - SCROLL_BAR),
+                egui::pos2(room.left(), room.bottom() - SCROLLBAR_STRIP_WIDTH),
                 room.max,
             ),
         )
@@ -226,7 +226,10 @@ pub(super) fn paint_scroll_bar(
     painter.rect_stroke(
         strip.shrink(0.5),
         0.0,
-        egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::Stroke::new(
+            SCROLLBAR_OUTLINE_WIDTH,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        ),
     );
     arrow(painter, first, -1.0, down, ink);
     arrow(painter, last, 1.0, down, ink);
@@ -248,7 +251,7 @@ pub(super) fn paint_scroll_bar(
             egui::vec2(handle_length, thickness),
         )
     };
-    painter.rect_filled(handle, 2.0, ink);
+    painter.rect_filled(handle, SCROLLBAR_HANDLE_CORNER_RADIUS, ink);
 
     let base = ui
         .id()
@@ -308,7 +311,7 @@ pub(super) fn paint_scroll_bar(
 
 /// How the window looks and what it lets the pointer do.
 ///
-/// Scrolling gets a strip of `SCROLL_BAR` points at the edge of anything that
+/// Scrolling gets a strip of `SCROLLBAR_STRIP_WIDTH` points at the edge of anything that
 /// scrolls, with the handle filling it when there is something to scroll.
 /// `solid` is the preset that takes that space rather than floating over the
 /// content. Its handle is drawn in the widget background colour, which is pale
@@ -320,7 +323,7 @@ pub(super) fn install_style(ctx: &egui::Context) {
     // other one as egui ships it.
     ctx.all_styles_mut(|style| {
         style.spacing.scroll = egui::style::ScrollStyle::solid();
-        style.spacing.scroll.bar_width = SCROLL_BAR;
+        style.spacing.scroll.bar_width = SCROLLBAR_STRIP_WIDTH;
         style.spacing.scroll.bar_inner_margin = 0.0;
         style.spacing.scroll.bar_outer_margin = 0.0;
         style.spacing.scroll.foreground_color = true;
@@ -330,30 +333,11 @@ pub(super) fn install_style(ctx: &egui::Context) {
     });
 }
 
-/// Spacing used between the sections of a view, so they are consistent.
-pub(super) const SECTION_GAP: f32 = 14.0;
-
-/// Border and inner margin `Frame::group` adds around its contents, so the
-/// arithmetic below is about outer widths.
-pub(super) const FRAME_EXTRA: f32 = 14.0;
-
-/// The largest a picture in a set may be drawn. What the strip of them is tall
-/// is worked out from this and the font, in `tile_strip_height`.
-pub(super) const TILE: egui::Vec2 = egui::vec2(156.0, 118.0);
-
-/// Space kept clear around a picture for what is drawn around it: the keeper's
-/// border, and the ring outside that for the one the preview is showing. The ring
-/// sits 3 out from the border and is 3 wide, so it reaches 4.5 past it. Without
-/// this the ring is drawn outside the tile and the neighbour clips it.
-pub(super) const TILE_RING: f32 = 6.0;
-
-/// The picture's border and the margin inside it, on both sides.
-pub(super) const TILE_BORDER: f32 = 4.0;
-
-/// What a picture of these proportions comes out as inside `TILE`.
+/// What a picture of these proportions comes out as inside `THUMBNAIL_MAX_WIDTH`
+/// by `THUMBNAIL_MAX_HEIGHT`.
 pub(super) fn fitted(width: u32, height: u32) -> egui::Vec2 {
     let (width, height) = (width.max(1) as f32, height.max(1) as f32);
-    let scale = (TILE.x / width).min(TILE.y / height);
+    let scale = (THUMBNAIL_MAX_WIDTH / width).min(THUMBNAIL_MAX_HEIGHT / height);
     egui::vec2(width * scale, height * scale)
 }
 
@@ -361,33 +345,10 @@ pub(super) fn fitted(width: u32, height: u32) -> egui::Vec2 {
 /// A portrait beside a landscape is a portrait's width, so a strip has no gaps in
 /// it where a narrow picture was given a wide picture's column.
 pub(super) fn tile_width(member: &imgdedupe_core::matching::Member) -> f32 {
-    fitted(member.width, member.height).x.max(1.0) + TILE_BORDER + TILE_RING * 2.0
+    fitted(member.width, member.height).x.max(1.0)
+        + 2.0 * THUMBNAIL_INNER_MARGIN
+        + THUMBNAIL_CLEARANCE * 2.0
 }
-
-/// Room above and below the buttons inside the band along the bottom of a set,
-/// so the line along the top of the band stands clear of the buttons instead of
-/// being drawn along their top edge. The space between the buttons is the space
-/// the row lays them out with.
-pub(super) const BUTTON_ROW_GAP: f32 = 2.0;
-
-/// How far in from the left edge of the box the row of buttons starts.
-pub(super) const BUTTON_ROW_INSET: f32 = 5.0;
-
-/// The band those buttons sit on.
-pub(super) const BUTTON_ROW_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(0xe8, 0xe8, 0xe8);
-
-/// What the page keeps at its edges, and what a list keeps between what is in it
-/// and the scroll bar down its right: the same, so a box in a list stops as far
-/// from the bar as the list stops from the edge of the window.
-///
-/// The review keeps this itself rather than through the panel it is drawn in, so
-/// the panels in it can run the width of the window and draw their lines across
-/// all of it.
-pub(super) const PAGE_MARGIN: f32 = 16.0;
-
-/// Kept clear at the right of the folder row for the button that lists the
-/// folders scanned before, so a long path stops short of it.
-pub(super) const PREVIOUS_ROOM: f32 = 84.0;
 
 /// What the review has found and what a cleanup would do about it, as one line:
 /// how many sets, how many pictures in them are not being kept, and what those
@@ -413,40 +374,25 @@ pub(super) fn count_line(
     let gap = ui.spacing().item_spacing.x;
 
     let mut line = egui::text::LayoutJob::default();
-    line.append(&counted(sets as u64, "set", "sets"), 0.0, strong.clone());
     line.append(
-        &counted(duplicates as u64, "duplicate", "duplicates"),
+        &counted(sets as u64, SET_WORD, SETS_WORD),
+        0.0,
+        strong.clone(),
+    );
+    line.append(
+        &counted(duplicates as u64, DUPLICATE_WORD, DUPLICATES_WORD),
         gap,
         strong.clone(),
     );
-    line.append(&format!("{going} to remove"), gap, strong);
+    line.append(&fill(TO_REMOVE_TEMPLATE, &[("count", &going)]), gap, strong);
+    let megabytes = format!("{:.1}", reclaimable as f64 / 1e6);
     line.append(
-        &format!("{:.1} MB to reclaim", reclaimable as f64 / 1e6),
+        &fill(TO_RECLAIM_TEMPLATE, &[("megabytes", &megabytes)]),
         gap,
         weak,
     );
     line
 }
-
-/// The review toolbar's one row. The checkbox, the counts and the button are
-/// laid out over the same rectangle, which has to be as tall as the tallest of
-/// them: the button.
-pub(super) const TOOLBAR_HEIGHT: f32 = 28.0;
-
-/// Between the buttons at the left of the review toolbar.
-pub(super) const TOOLBAR_BUTTON_GAP: f32 = 14.0;
-
-/// The cleanup button at the right of it, which is a fixed width so the counts
-/// know how much of the row is left for them.
-pub(super) const CLEANUP_BUTTON_WIDTH: f32 = 120.0;
-
-/// Room around a preset's name. Four of these sit under the slider and are read
-/// at a glance, so they are no bigger than the words in them.
-pub(super) const PRESET_PADDING: egui::Vec2 = egui::vec2(6.0, 2.0);
-
-/// The box holding the percentage beside the slider. Wide enough for the widest
-/// value the scale reaches, so the number never changes the width of anything.
-pub(super) const VALUE_WIDTH: f32 = 56.0;
 
 /// Whether the slider is sitting on a preset, which is what draws that one as
 /// pressed. The slider carries one decimal place, so anything closer than half
@@ -470,34 +416,14 @@ pub(super) fn set_row_height(ui: &egui::Ui) -> f32 {
     // row of buttons under that, the line drawn round the lot, and the space to
     // the next box. The list places the rows it is not drawing by this number,
     // so the space between boxes has to be part of it.
-    BOX_PADDING
+    SET_BOX_INNER_PADDING
         + tile_strip_height(ui)
-        + SCROLL_BAR
-        + STRIP_TO_BAR
+        + SCROLLBAR_STRIP_WIDTH
+        + SET_TEXT_TO_SCROLLBAR_GAP
         + button_row_height(ui)
-        + 2.0 * BOX_EDGE
-        + BETWEEN_BOXES
+        + 2.0 * SET_BOX_BORDER_WIDTH
+        + SET_BOX_VERTICAL_GAP
 }
-
-/// Kept between the writing under the pictures and the strip's own scroll bar,
-/// which sits on the band of buttons below it. Enough to be seen: the bar reads
-/// as another line of the writing when the two touch.
-pub(super) const STRIP_TO_BAR: f32 = 6.0;
-
-/// Kept between one set and the next.
-pub(super) const BETWEEN_BOXES: f32 = 12.0;
-
-/// How much of a set nobody calls a set of copies is drawn: the pictures and
-/// every line of writing under them, but not the row of buttons, which is how it
-/// stops being ignored.
-pub(super) const IGNORED_OPACITY: f32 = 0.25;
-
-/// The line the box is drawn with, on each side.
-pub(super) const BOX_EDGE: f32 = 1.0;
-
-/// What a box keeps between its edge and the pictures in it. The band of
-/// buttons keeps none: it is the bottom of the box.
-pub(super) const BOX_PADDING: f32 = 6.0;
 
 /// What a button has to be to hold any of the words it can say, with the padding
 /// around them.
@@ -514,7 +440,7 @@ pub(super) fn button_width(ui: &egui::Ui, says: &[&str]) -> f32 {
             })
         })
         .fold(0.0_f32, f32::max);
-    widest + 2.0 * PRESET_PADDING.x
+    widest + 2.0 * SMALL_BUTTON_HORIZONTAL_PADDING
 }
 
 /// The row of buttons along the bottom of a set, with the space above it.
@@ -522,7 +448,9 @@ pub(super) fn button_row_height(ui: &egui::Ui) -> f32 {
     // What the buttons themselves come out as, with the same small space above
     // and below them. They are drawn with the presets' padding, not the style's
     // own, and a band built to the style's is half as tall again as it needs.
-    2.0 * BUTTON_ROW_GAP + ui.text_style_height(&egui::TextStyle::Button) + 2.0 * PRESET_PADDING.y
+    2.0 * SET_BUTTON_BAND_VERTICAL_PADDING
+        + ui.text_style_height(&egui::TextStyle::Button)
+        + 2.0 * SMALL_BUTTON_VERTICAL_PADDING
 }
 
 /// What one tile in a set takes from top to bottom, which is what the strip of
@@ -536,7 +464,7 @@ pub(super) fn tile_strip_height(ui: &egui::Ui) -> f32 {
     let gap = ui.spacing().item_spacing.y;
     // Room kept clear for the ring, then the picture at its largest inside the
     // border drawn round it.
-    let picture = TILE_RING + TILE.y + TILE_BORDER;
+    let picture = THUMBNAIL_CLEARANCE + THUMBNAIL_MAX_HEIGHT + 2.0 * THUMBNAIL_INNER_MARGIN;
     // Under it, five rows with a gap above each: the one that says KEEP, which
     // is kept clear whether or not it says it, and the four lines of text.
     let under = 5.0 * gap
@@ -550,7 +478,8 @@ pub(super) fn tile_strip_height(ui: &egui::Ui) -> f32 {
 /// than any other.
 pub(super) fn share_row_width(available: f32, content: &[f32], gap: f32) -> Vec<f32> {
     let boxes = content.len() as f32;
-    let used: f32 = content.iter().map(|width| width + FRAME_EXTRA).sum();
+    let frame = 2.0 * (FRAME_GROUP_BORDER_WIDTH + FRAME_GROUP_INNER_MARGIN);
+    let used: f32 = content.iter().map(|width| width + frame).sum();
     let spare = ((available - used - gap * (boxes - 1.0)) / boxes).max(0.0);
     content.iter().map(|width| width + spare).collect()
 }
@@ -558,7 +487,7 @@ pub(super) fn share_row_width(available: f32, content: &[f32], gap: f32) -> Vec<
 /// A titled box. Every group of related controls goes in one, so the window reads
 /// as parts rather than as one column of widgets.
 pub(super) fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
-    let width = ui.available_width() - FRAME_EXTRA;
+    let width = ui.available_width() - 2.0 * (FRAME_GROUP_BORDER_WIDTH + FRAME_GROUP_INNER_MARGIN);
     sized_section(ui, title, egui::vec2(width, 0.0), contents);
 }
 
@@ -583,7 +512,7 @@ pub(super) fn sized_section(
     let mut content = egui::Vec2::ZERO;
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(title).strong());
-        ui.add_space(4.0);
+        ui.add_space(SECTION_TITLE_GAP);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(size.x);
             ui.set_min_height(size.y);
@@ -634,7 +563,12 @@ pub(super) fn progress_bar(
             egui::Stroke::NONE,
         );
     }
-    let galley = egui::WidgetText::from(format!("{label} {:.0}%", fraction * 100.0)).into_galley(
+    let percent = format!("{:.0}", fraction * 100.0);
+    let text = fill(
+        PROGRESS_BAR_TEMPLATE,
+        &[("label", &label), ("percent", &percent)],
+    );
+    let galley = egui::WidgetText::from(text).into_galley(
         ui,
         Some(egui::TextWrapMode::Extend),
         f32::INFINITY,
@@ -652,7 +586,39 @@ pub(super) fn progress_bar(
 /// A number and the word for it, which is not the same word when there is one of
 /// them.
 pub(super) fn counted(how_many: u64, one: &str, more: &str) -> String {
-    format!("{how_many} {}", if how_many == 1 { one } else { more })
+    fill(
+        COUNTED_TEMPLATE,
+        &[
+            ("count", &how_many),
+            ("noun", &if how_many == 1 { one } else { more }),
+        ],
+    )
+}
+
+/// A template from `template_strings.rs` with its placeholders filled in.
+///
+/// The template is read once, left to right, so a value that itself holds
+/// something in braces, such as a file name, is put in as it is and not read as
+/// a placeholder. A placeholder with no value given is left in the text.
+pub(crate) fn fill(template: &str, values: &[(&str, &dyn std::fmt::Display)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let name = &after[..close];
+        match values.iter().find(|(key, _)| *key == name) {
+            Some((_, value)) => out.push_str(&value.to_string()),
+            None => out.push_str(&rest[open..open + close + 2]),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A line of text cut to the room it is given.

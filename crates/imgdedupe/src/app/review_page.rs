@@ -3,7 +3,7 @@ use super::*;
 impl App {
     pub(super) fn review_view(&mut self, ui: &mut egui::Ui) {
         let Some(root) = self.folder.clone() else {
-            ui.label("no folder chosen");
+            ui.label(REVIEW_NO_FOLDER_TEXT);
             return;
         };
 
@@ -12,7 +12,7 @@ impl App {
         let (going, reclaimable) = self.selected_for_removal();
 
         egui::TopBottomPanel::top("review toolbar").show_inside(ui, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
             // Three lots that share one row: the checkbox against the left edge,
             // the counts in the middle of the window, and the button against the
             // right edge. They are laid out over the same rectangle, each with
@@ -20,24 +20,24 @@ impl App {
             // centre of the row rather than in the centre of what is left of it.
             // The panel runs the width of the window, so its own line does too.
             // What is in it keeps the page's margin.
-            let row = egui::vec2(ui.available_width(), TOOLBAR_HEIGHT);
+            let row = egui::vec2(ui.available_width(), TOOLBAR_ROW_HEIGHT);
             let (rect, _) = ui.allocate_exact_size(row, egui::Sense::hover());
-            let rect = rect.shrink2(egui::vec2(PAGE_MARGIN, 0.0));
+            let rect = rect.shrink2(egui::vec2(CONTENT_MARGIN, 0.0));
 
             let mut left = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            if left.button("unmark all").clicked() {
+            if left.button(UNMARK_ALL_BUTTON_LABEL).clicked() {
                 self.unmark_everything();
             }
             left.add_space(TOOLBAR_BUTTON_GAP);
-            if left.button("mark all").clicked() {
+            if left.button(MARK_ALL_BUTTON_LABEL).clicked() {
                 self.keep_everything();
             }
             left.add_space(TOOLBAR_BUTTON_GAP);
-            if left.button("auto-mark to keep").clicked() {
+            if left.button(AUTO_MARK_BUTTON_LABEL).clicked() {
                 self.auto_mark_to_keep();
             }
 
@@ -69,16 +69,16 @@ impl App {
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
             );
             let go = egui::Button::new(
-                egui::RichText::new("Clean up")
+                egui::RichText::new(CLEAN_UP_BUTTON_LABEL)
                     .strong()
-                    .color(egui::Color32::WHITE),
+                    .color(CLEANUP_BUTTON_TEXT_COLOUR),
             )
-            .fill(egui::Color32::from_rgb(60, 110, 180))
-            .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, 28.0));
+            .fill(CLEANUP_BUTTON_FILL_COLOUR)
+            .min_size(egui::vec2(CLEANUP_BUTTON_WIDTH, TOOLBAR_ROW_HEIGHT));
             if right.add_enabled(going > 0, go).clicked() {
                 self.view = View::Cleanup;
             }
-            ui.add_space(4.0);
+            ui.add_space(PANEL_VERTICAL_PADDING);
         });
 
         for (key, direction) in [
@@ -118,6 +118,9 @@ impl App {
                 list = list.vertical_scroll_offset(offset);
             }
         }
+        if std::mem::take(&mut self.list_to_top) {
+            list = list.vertical_scroll_offset(0.0);
+        }
 
         // The page's margin down the left of the list, kept here rather than by
         // the panel, so the panels above can run the width of the window and
@@ -125,11 +128,13 @@ impl App {
         // toolbar: the bar down the side of the list starts there, against the
         // line, and the gap above the first set is put inside the list instead.
         let room = ui.available_rect_before_wrap();
-        let room =
-            egui::Rect::from_min_max(egui::pos2(room.left() + PAGE_MARGIN, room.top()), room.max);
+        let room = egui::Rect::from_min_max(
+            egui::pos2(room.left() + CONTENT_MARGIN, room.top()),
+            room.max,
+        );
         // What a row comes out as, worked out here where the list's own room is
         // known: inside a scroll area nothing is told where the area ends.
-        let row_width = (room.width() - SCROLL_BAR - PAGE_MARGIN).max(0.0);
+        let row_width = (room.width() - SCROLLBAR_STRIP_WIDTH - CONTENT_MARGIN).max(0.0);
 
         let (_, offset, viewport, _) = ui
             .allocate_new_ui(egui::UiBuilder::new().max_rect(room), |ui| {
@@ -146,7 +151,7 @@ impl App {
                         // from the rectangle the list was given: the bar down
                         // the side of the list comes from that rectangle and has
                         // to start at the line above it, not at the first box.
-                        ui.add_space(SECTION_GAP);
+                        ui.add_space(SECTION_SPACING_GAP);
                         list.show_rows(ui, row_height, visible.len(), |ui, range| {
                             for position in range {
                                 let index = visible[position];
@@ -174,24 +179,26 @@ impl App {
         let chosen = self.selected.and_then(find);
         let held = self.showing.and_then(find);
 
-        let width = self.preview_width.unwrap_or(ui.available_width() * 0.42);
+        let width = self
+            .preview_width
+            .unwrap_or(ui.available_width() * PREVIEW_PANE_DEFAULT_WIDTH_FRACTION);
         let pane = egui::SidePanel::right("preview")
             .resizable(true)
             .default_width(width)
-            .min_width(260.0)
+            .min_width(PREVIEW_PANE_MIN_WIDTH)
             .show_inside(ui, |ui| {
                 let Some((set_id, member)) = chosen else {
                     ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new("click a picture to see it here").weak());
+                        ui.label(egui::RichText::new(PREVIEW_EMPTY_TEXT).weak());
                     });
                     return;
                 };
 
-                ui.add_space(4.0);
+                ui.add_space(PANEL_VERTICAL_PADDING);
                 ui.horizontal(|ui| {
                     let keeping = keeps(self.keep.get(&set_id), member.file_id);
                     if ui
-                        .add_enabled(!keeping, egui::Button::new("Keep this one"))
+                        .add_enabled(!keeping, egui::Button::new(KEEP_THIS_ONE_BUTTON_LABEL))
                         .clicked()
                     {
                         let came_off: Vec<i64> = self
@@ -207,23 +214,31 @@ impl App {
                         self.marked(&[member.file_id]);
                     }
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{}x{}  {}  {:.1} MB",
-                            member.width,
-                            member.height,
-                            member.format,
-                            member.size_bytes as f64 / 1_000_000.0
+                        egui::RichText::new(fill(
+                            PREVIEW_DETAILS_TEMPLATE,
+                            &[
+                                ("width", &member.width),
+                                ("height", &member.height),
+                                ("format", &member.format),
+                                (
+                                    "megabytes",
+                                    &format!("{:.1}", member.size_bytes as f64 / 1_000_000.0),
+                                ),
+                            ],
                         ))
                         .weak(),
                     );
                 });
                 ui.add(unwrapped(egui::RichText::new(&member.rel_path).weak()));
-                ui.add_space(4.0);
+                ui.add_space(PREVIEW_PICTURE_TOP_GAP);
 
                 // The picture takes the top of the pane and what the file says
                 // about itself takes the rest, so there is always a picture and
                 // always somewhere for the words to go.
-                let room = egui::vec2(ui.available_width(), ui.available_height() * 0.62);
+                let room = egui::vec2(
+                    ui.available_width(),
+                    ui.available_height() * PREVIEW_PICTURE_HEIGHT_FRACTION,
+                );
                 let wanted =
                     self.thumbs
                         .get(member.file_id, thumbs::LARGE_EDGE, root, &member.rel_path);
@@ -257,11 +272,11 @@ impl App {
                             }
                         }
                         None => {
-                            ui.label(egui::RichText::new("reading...").weak());
+                            ui.label(egui::RichText::new(READING_TEXT).weak());
                         }
                     });
                 });
-                ui.add_space(6.0);
+                ui.add_space(PREVIEW_METADATA_TOP_GAP);
                 self.written_beside_it(ui, &member, root);
             });
         self.preview_width = Some(pane.response.rect.width());
@@ -286,9 +301,9 @@ impl App {
             let waiting = self.metadata.reading();
             ui.label(
                 egui::RichText::new(if waiting {
-                    "reading..."
+                    READING_TEXT
                 } else {
-                    "this file says nothing about itself"
+                    NO_METADATA_TEXT
                 })
                 .weak(),
             );
@@ -308,11 +323,12 @@ impl App {
             .collect();
 
         let line = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
-        let names = ui.available_width() * 0.38;
+        let names = ui.available_width() * METADATA_NAME_COLUMN_WIDTH_FRACTION;
         // What is left of the pane, and no more. Without a height of its own the
         // list takes whatever it asks for, runs off the bottom of the window, and
         // the part of it below the edge cannot be reached by anything.
-        let room = (ui.max_rect().bottom() - ui.cursor().top() - SCROLL_BAR).max(line * 3.0);
+        let room = (ui.max_rect().bottom() - ui.cursor().top() - SCROLLBAR_STRIP_WIDTH)
+            .max(line * METADATA_LIST_MIN_HEIGHT_LINES);
         let bar = egui::Id::new(("what it says", member.file_id));
         // The whole pane, not only the part the list covers: a scroll wheel
         // turned over the picture is a scroll wheel turned over this pane, and
@@ -322,7 +338,7 @@ impl App {
             ui,
             bar,
             true,
-            line * 3.0,
+            line * METADATA_LIST_SCROLL_STEP_LINES,
             Some(where_it_is),
             egui::ScrollArea::vertical()
                 .id_salt(("metadata", member.file_id))
@@ -342,7 +358,7 @@ impl App {
                                 );
                                 ui.painter().rect_filled(
                                     rect,
-                                    2.0,
+                                    METADATA_HEADING_CORNER_RADIUS,
                                     ui.visuals().widgets.inactive.weak_bg_fill,
                                 );
                                 let ink = ui.visuals().strong_text_color();
@@ -353,7 +369,7 @@ impl App {
                                 );
                                 let down = (rect.height() - words.size().y) / 2.0;
                                 ui.painter().galley(
-                                    rect.left_top() + egui::vec2(6.0, down),
+                                    rect.left_top() + egui::vec2(METADATA_HEADING_LEFT_INSET, down),
                                     words,
                                     ink,
                                 );
@@ -413,12 +429,12 @@ impl App {
                 // Everything behind it is covered, so what is on screen is the
                 // picture and nothing else.
                 ui.painter()
-                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(240));
+                    .rect_filled(screen, 0.0, FULL_WINDOW_PICTURE_BACKDROP_COLOUR);
                 let taken = ui.allocate_rect(screen, egui::Sense::click());
                 match picture {
                     Some(texture) => {
                         let size = texture.size_vec2();
-                        let room = screen.size() * 0.98;
+                        let room = screen.size() * FULL_WINDOW_PICTURE_SIZE_FRACTION;
                         let scale = (room.x / size.x).min(room.y / size.y).min(1.0);
                         let shown = egui::Rect::from_center_size(screen.center(), size * scale);
                         egui::Image::new(&texture).paint_at(ui, shown);
@@ -427,7 +443,7 @@ impl App {
                         ui.painter().text(
                             screen.center(),
                             egui::Align2::CENTER_CENTER,
-                            "reading...",
+                            READING_TEXT,
                             egui::TextStyle::Body.resolve(ui.style()),
                             ui.visuals().weak_text_color(),
                         );
@@ -471,9 +487,9 @@ impl App {
         // to its left edge is the gap from its right edge to the scroll bar.
         let inside = egui::Rect::from_min_max(
             room.min,
-            egui::pos2(room.right(), room.bottom() - BETWEEN_BOXES),
+            egui::pos2(room.right(), room.bottom() - SET_BOX_VERTICAL_GAP),
         )
-        .shrink(BOX_EDGE);
+        .shrink(SET_BOX_BORDER_WIDTH);
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(room), |ui| {
             ui.set_min_size(size);
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inside), |ui| {
@@ -498,16 +514,18 @@ impl App {
                         // that is theirs, not the bar's. Given the whole box the strip
                         // would put its bar under the buttons, at the very bottom.
                         let strip = egui::Rect::from_min_size(
-                            egui::pos2(inside.left(), inside.top() + BOX_PADDING),
+                            egui::pos2(inside.left(), inside.top() + SET_BOX_INNER_PADDING),
                             egui::vec2(
                                 inside.width(),
-                                tile_strip_height(ui) + STRIP_TO_BAR + SCROLL_BAR,
+                                tile_strip_height(ui)
+                                    + SET_TEXT_TO_SCROLLBAR_GAP
+                                    + SCROLLBAR_STRIP_WIDTH,
                             ),
                         );
 
                         // One tile's width is what a click on the strip's scroll bar
                         // moves by, and the first tile's is as good a step as any.
-                        let step = members.first().map_or(TILE.x, tile_width);
+                        let step = members.first().map_or(THUMBNAIL_MAX_WIDTH, tile_width);
                         let bar = egui::Id::new(("set bar", set_id));
                         let (_, offset, viewport, _) = ui
                             .allocate_new_ui(egui::UiBuilder::new().max_rect(strip), |ui| {
@@ -517,7 +535,7 @@ impl App {
                                 // opacity. The buttons are how it stops being ignored, so
                                 // they are not faded with the rest of it.
                                 if ignored {
-                                    ui.set_opacity(IGNORED_OPACITY);
+                                    ui.set_opacity(IGNORED_SET_OPACITY);
                                 }
                                 scrolled(
                                     ui,
@@ -532,8 +550,9 @@ impl App {
                                         // width of the box. Their own room, clipped to
                                         // it, so a picture scrolled up against the edge
                                         // stops there rather than in the padding.
-                                        let room =
-                                            ui.max_rect().shrink2(egui::vec2(BOX_PADDING, 0.0));
+                                        let room = ui
+                                            .max_rect()
+                                            .shrink2(egui::vec2(SET_BOX_INNER_PADDING, 0.0));
                                         let mut pictures =
                                             ui.new_child(egui::UiBuilder::new().max_rect(room));
                                         pictures.set_clip_rect(room.intersect(ui.clip_rect()));
@@ -585,14 +604,15 @@ impl App {
                             egui::pos2(inside.left(), inside.bottom() - button_row_height(ui)),
                             inside.max,
                         );
-                        ui.painter().rect_filled(band, 0.0, BUTTON_ROW_BACKGROUND);
+                        ui.painter()
+                            .rect_filled(band, 0.0, SET_BUTTON_BAND_BACKGROUND_COLOUR);
                         // A line of its own along the top of the band, in the grey the
                         // scroll bar is drawn round, which the bar above it now sits on.
                         ui.painter().hline(
                             band.x_range(),
                             band.top(),
                             egui::Stroke::new(
-                                1.0_f32,
+                                SET_BUTTON_BAND_TOP_LINE_WIDTH,
                                 ui.visuals().widgets.noninteractive.bg_stroke.color,
                             ),
                         );
@@ -602,27 +622,42 @@ impl App {
                             egui::UiBuilder::new()
                                 // In from the left edge of the box, so the line round the
                                 // first button is drawn rather than clipped away by it.
-                                .max_rect(band.with_min_x(band.left() + BUTTON_ROW_INSET))
+                                .max_rect(band.with_min_x(band.left() + SET_BUTTON_BAND_LEFT_INSET))
                                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
                             |ui| {
                                 // The presets under the slider are a row of buttons the
                                 // size of their own words, spaced by the style, with the
                                 // one that is on drawn as pressed. These are the same,
                                 // because they are the same kind of thing.
-                                ui.spacing_mut().button_padding = PRESET_PADDING;
+                                ui.spacing_mut().button_padding = egui::vec2(
+                                    SMALL_BUTTON_HORIZONTAL_PADDING,
+                                    SMALL_BUTTON_VERTICAL_PADDING,
+                                );
                                 for (label, what, says) in [
-                                    ("keep all", SetAction::KeepAll, ["keep all"; 2]),
-                                    ("keep none", SetAction::KeepNone, ["keep none"; 2]),
+                                    (
+                                        KEEP_ALL_BUTTON_LABEL,
+                                        SetAction::KeepAll,
+                                        [KEEP_ALL_BUTTON_LABEL; 2],
+                                    ),
+                                    (
+                                        KEEP_NONE_BUTTON_LABEL,
+                                        SetAction::KeepNone,
+                                        [KEEP_NONE_BUTTON_LABEL; 2],
+                                    ),
                                     // The third one undoes itself: a set that has been
                                     // ignored is one press away from being a set again.
                                     (
-                                        if ignored { "ignored" } else { "ignore" },
+                                        if ignored {
+                                            IGNORED_BUTTON_LABEL
+                                        } else {
+                                            IGNORE_BUTTON_LABEL
+                                        },
                                         if ignored {
                                             SetAction::Unignore
                                         } else {
                                             SetAction::Ignore
                                         },
-                                        ["ignore", "ignored"],
+                                        [IGNORE_BUTTON_LABEL, IGNORED_BUTTON_LABEL],
                                     ),
                                 ] {
                                     // An ignored set keeps nothing, so the two about
@@ -732,7 +767,7 @@ impl App {
         // is done to the whole of it at once.
         let kept = !ignored && keeps(keeping, member.file_id);
         let showing = !ignored && self.selected == Some(member.file_id);
-        let keep_colour = egui::Color32::from_rgb(90, 180, 110);
+        let keep_colour = KEPT_THUMBNAIL_MARK_COLOUR;
 
         let tall = tile_strip_height(ui);
         ui.allocate_ui(egui::vec2(width, tall), |ui| {
@@ -743,21 +778,21 @@ impl App {
             // set's, which is what made the sets below the first one wait.
             let on_screen = ui.is_rect_visible(ui.max_rect());
             ui.vertical(|ui| {
-                ui.add_space(TILE_RING);
+                ui.add_space(THUMBNAIL_CLEARANCE);
                 // The keeper's border stays on the picture. Being the one on the
                 // right is a second thing, drawn as a ring outside it, so a
                 // picture that is both shows both.
                 let frame = egui::Frame::none()
                     .stroke(if kept {
-                        egui::Stroke::new(3.0_f32, keep_colour)
+                        egui::Stroke::new(KEPT_THUMBNAIL_BORDER_WIDTH, keep_colour)
                     } else {
                         egui::Stroke::new(
-                            1.0_f32,
+                            THUMBNAIL_BORDER_WIDTH,
                             ui.style().visuals.widgets.noninteractive.bg_stroke.color,
                         )
                     })
-                    .inner_margin(TILE_BORDER / 2.0)
-                    .outer_margin(egui::Margin::symmetric(TILE_RING, 0.0));
+                    .inner_margin(THUMBNAIL_INNER_MARGIN)
+                    .outer_margin(egui::Margin::symmetric(THUMBNAIL_CLEARANCE, 0.0));
 
                 let framed = frame.show(ui, |ui| {
                     // The same picture whether or not the set is ignored, which
@@ -777,21 +812,27 @@ impl App {
                         // the whole strip is drawn at half its opacity.
                         Some(texture) => ui.add(
                             egui::Image::new(&texture)
-                                .fit_to_exact_size(TILE)
+                                .fit_to_exact_size(egui::vec2(
+                                    THUMBNAIL_MAX_WIDTH,
+                                    THUMBNAIL_MAX_HEIGHT,
+                                ))
                                 .sense(egui::Sense::click()),
                         ),
                         // The same space the picture will take, so nothing moves
                         // when it arrives.
                         None => ui.add_sized(
                             fitted(member.width, member.height),
-                            egui::Label::new(egui::RichText::new("...").weak())
+                            egui::Label::new(egui::RichText::new(THUMBNAIL_LOADING_TEXT).weak())
                                 .sense(egui::Sense::click()),
                         ),
                     }
                 });
                 // A frame's response covers its outer margin as well, and the ring
                 // goes around the picture, not around the space kept clear for it.
-                let bordered = framed.response.rect.shrink2(egui::vec2(TILE_RING, 0.0));
+                let bordered = framed
+                    .response
+                    .rect
+                    .shrink2(egui::vec2(THUMBNAIL_CLEARANCE, 0.0));
                 if showing {
                     // Inside the keep border, not around it. Drawn outside, the
                     // ring for the picture being looked at sits over the border
@@ -799,9 +840,12 @@ impl App {
                     // person needs to see about the picture in front of them is
                     // hidden by the fact that they are looking at it.
                     ui.painter().rect_stroke(
-                        bordered.shrink(3.0),
-                        2.0,
-                        egui::Stroke::new(3.0_f32, ui.style().visuals.selection.bg_fill),
+                        bordered.shrink(SHOWN_THUMBNAIL_RING_INSET),
+                        SHOWN_THUMBNAIL_RING_CORNER_RADIUS,
+                        egui::Stroke::new(
+                            SHOWN_THUMBNAIL_RING_WIDTH,
+                            ui.style().visuals.selection.bg_fill,
+                        ),
                     );
                 }
                 let picked = framed.inner;
@@ -831,7 +875,11 @@ impl App {
                     |ui| {
                         ui.set_min_size(over_the_picture);
                         if kept {
-                            ui.label(egui::RichText::new("KEEP").strong().color(keep_colour));
+                            ui.label(
+                                egui::RichText::new(KEEP_MARK_TEXT)
+                                    .strong()
+                                    .color(keep_colour),
+                            );
                         }
                     },
                 );
@@ -840,15 +888,23 @@ impl App {
                 // make that tile taller than every other one in the strip.
                 clipped_line_in(
                     ui,
-                    egui::RichText::new(format!("{}x{}", member.width, member.height)),
+                    egui::RichText::new(fill(
+                        THUMBNAIL_DIMENSIONS_TEMPLATE,
+                        &[("width", &member.width), ("height", &member.height)],
+                    )),
                     width,
                 );
                 clipped_line_in(
                     ui,
-                    egui::RichText::new(format!(
-                        "{}  {:.1} MB",
-                        member.format,
-                        member.size_bytes as f64 / 1_000_000.0
+                    egui::RichText::new(fill(
+                        THUMBNAIL_FORMAT_AND_SIZE_TEMPLATE,
+                        &[
+                            ("format", &member.format),
+                            (
+                                "megabytes",
+                                &format!("{:.1}", member.size_bytes as f64 / 1_000_000.0),
+                            ),
+                        ],
                     ))
                     .weak(),
                     width,

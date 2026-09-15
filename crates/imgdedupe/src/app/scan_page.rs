@@ -48,7 +48,7 @@ impl App {
                     // scan happened. It did not: there was nothing to scan.
                     self.lit.clear();
                     self.scan = ScanState {
-                        finished: Some(String::from("No images found in this folder")),
+                        finished: Some(String::from(NO_IMAGES_FOUND_TEXT)),
                         ..ScanState::default()
                     };
                     self.search = SearchState::default();
@@ -129,9 +129,15 @@ impl App {
                         self.scan.reading = Stage::Over;
                         self.scan.writing = Stage::Over;
                     }
-                    self.scan.finished = Some(format!(
-                        "indexed {indexed}, removed {removed}, failed {failed}, in {:.1}s",
-                        elapsed_ms as f64 / 1000.0
+                    let seconds = format!("{:.1}", elapsed_ms as f64 / 1000.0);
+                    self.scan.finished = Some(fill(
+                        SCAN_FINISHED_TEMPLATE,
+                        &[
+                            ("indexed", &indexed),
+                            ("removed", &removed),
+                            ("failed", &failed),
+                            ("seconds", &seconds),
+                        ],
                     ));
                 }
                 Update::Finished { cancelled, error } => {
@@ -139,7 +145,9 @@ impl App {
                     let comparing = std::mem::take(&mut self.comparing);
                     match error {
                         Some(message) => self.error = Some(message),
-                        None if cancelled => self.scan.finished = Some(String::from("cancelled")),
+                        None if cancelled => {
+                            self.scan.finished = Some(String::from(CANCELLED_TEXT))
+                        }
                         // That was the comparison, not a pass over the folder.
                         // What it found is what decides whether anything else
                         // happens at all.
@@ -167,7 +175,11 @@ impl App {
     pub(super) fn scan_view(&mut self, ui: &mut egui::Ui) {
         // Everything on one row: the groups and the buttons are all short and
         // stacking them full width leaves most of the window empty.
-        let widths = share_row_width(ui.available_width(), &self.scan_content, SECTION_GAP);
+        let widths = share_row_width(
+            ui.available_width(),
+            &self.scan_content,
+            SECTION_SPACING_GAP,
+        );
         let mut measured = self.scan_content.clone();
         // The three boxes end level with each other, at the height of whichever
         // holds the most. Nothing is a fixed height, so taking a control out
@@ -175,9 +187,9 @@ impl App {
         let mut tallest = 0.0_f32;
         ui.horizontal_top(|ui| {
             let folder = self.folder_section(ui, widths[0]);
-            ui.add_space(SECTION_GAP);
+            ui.add_space(SECTION_SPACING_GAP);
             let matching = self.matching_section(ui, widths[1]);
-            ui.add_space(SECTION_GAP);
+            ui.add_space(SECTION_SPACING_GAP);
             let run = self.run_section(ui, widths[2]);
             measured = vec![folder.x, matching.x, run.x];
             tallest = folder.y.max(matching.y).max(run.y);
@@ -199,8 +211,8 @@ impl App {
         // set to and how far the run has got, and the bar beside the lamps
         // reaches from the first lamp to the bottom of the window rather than
         // down the whole page.
-        ui.add_space(SECTION_GAP);
-        let step = ui.spacing().interact_size.y * 3.0;
+        ui.add_space(SECTION_SPACING_GAP);
+        let step = ui.spacing().interact_size.y * LAMP_LIST_SCROLL_STEP_CONTROL_HEIGHTS;
         scrolled(
             ui,
             egui::Id::new("scan lamps"),
@@ -216,27 +228,28 @@ impl App {
     /// with the milliseconds since the application started at the end of the
     /// line. The gaps between those numbers are where the wait is.
     fn lamps(&mut self, ui: &mut egui::Ui) {
-        const RED: egui::Color32 = egui::Color32::from_rgb(196, 62, 54);
-        const GREEN: egui::Color32 = egui::Color32::from_rgb(58, 160, 78);
-        const DOT: f32 = 5.0;
-
-        const GREY: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
-
         let dot = |ui: &mut egui::Ui, state: Went| {
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(DOT * 3.0, ui.spacing().interact_size.y),
+                egui::vec2(LAMP_SLOT_WIDTH, ui.spacing().interact_size.y),
                 egui::Sense::hover(),
             );
             match state {
-                Went::Happened => ui.painter().circle_filled(rect.center(), DOT, GREEN),
-                Went::Waiting => ui.painter().circle_filled(rect.center(), DOT, RED),
+                Went::Happened => {
+                    ui.painter()
+                        .circle_filled(rect.center(), LAMP_DOT_RADIUS, LAMP_DONE_COLOUR)
+                }
+                Went::Waiting => {
+                    ui.painter()
+                        .circle_filled(rect.center(), LAMP_DOT_RADIUS, LAMP_WAITING_COLOUR)
+                }
                 // Nothing to do rather than not done yet: an empty ring, so a
                 // pass that had no new files to read does not read as a pass
                 // that failed to read them.
-                Went::Skipped => {
-                    ui.painter()
-                        .circle_stroke(rect.center(), DOT, egui::Stroke::new(1.5_f32, GREY))
-                }
+                Went::Skipped => ui.painter().circle_stroke(
+                    rect.center(),
+                    LAMP_DOT_RADIUS,
+                    egui::Stroke::new(LAMP_SKIPPED_RING_WIDTH, LAMP_SKIPPED_RING_COLOUR),
+                ),
             }
         };
 
@@ -255,10 +268,13 @@ impl App {
             match &self.folder {
                 Some(folder) => clipped_line(
                     ui,
-                    egui::RichText::new(format!("Loaded {}", folder.display())),
+                    egui::RichText::new(fill(
+                        LOADED_FOLDER_TEMPLATE,
+                        &[("folder", &folder.display())],
+                    )),
                 ),
                 None => {
-                    ui.label(egui::RichText::new("No folder open").weak());
+                    ui.label(egui::RichText::new(NO_FOLDER_OPEN_TEXT).weak());
                 }
             }
         });
@@ -268,7 +284,10 @@ impl App {
             ui.horizontal(|ui| {
                 dot(ui, self.how_it_went(lamp));
                 match at {
-                    Some(at) => ui.label(format!("{label}  {at} ms")),
+                    Some(at) => ui.label(fill(
+                        LAMP_LINE_TEMPLATE,
+                        &[("label", &label), ("milliseconds", &at)],
+                    )),
                     None => ui.label(egui::RichText::new(label).weak()),
                 };
             });
@@ -300,128 +319,129 @@ impl App {
 
     pub(super) fn folder_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
         let busy = self.busy();
-        sized_section(ui, "Folder", egui::vec2(width, self.scan_row), |ui| {
-            let inner = ui.max_rect();
-            let row = ui
-                .horizontal(|ui| {
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Choose folder"))
-                        .clicked()
-                    {
-                        if let Some(folder) = crate::folder_picker::pick(self.folder.as_deref()) {
-                            self.open_folder(folder);
+        sized_section(
+            ui,
+            FOLDER_SECTION_TITLE,
+            egui::vec2(width, self.scan_row),
+            |ui| {
+                let inner = ui.max_rect();
+                let row = ui
+                    .horizontal(|ui| {
+                        if ui
+                            .add_enabled(!busy, egui::Button::new(CHOOSE_FOLDER_BUTTON_LABEL))
+                            .clicked()
+                        {
+                            if let Some(folder) = crate::folder_picker::pick(self.folder.as_deref())
+                            {
+                                self.open_folder(folder);
+                            }
                         }
-                    }
-                    // The previous button sits over the right end of this row, so
-                    // the path stops before it rather than running under it.
-                    let reserved = if self.previous.is_empty() {
-                        0.0
-                    } else {
-                        PREVIOUS_ROOM
-                    };
-                    match &self.folder {
-                        Some(folder) => clipped_line_in(
-                            ui,
-                            egui::RichText::new(folder.display().to_string()).strong(),
-                            ui.available_width() - reserved,
-                        ),
-                        None => {
-                            ui.label(egui::RichText::new("none chosen").weak());
-                        }
-                    };
-                })
-                .response
-                .rect;
-            // Against the right edge of the box, in a space of its own. Laying it
-            // out with the row would count it as content, and the box is sized
-            // from what its content measures.
-            let strip = egui::Rect::from_min_max(
-                egui::pos2(inner.left(), row.top()),
-                egui::pos2(inner.right(), row.bottom()),
-            );
-            let mut against_the_edge = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(strip)
-                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            );
-            self.previous_folders(&mut against_the_edge, busy);
-            ui.add_space(6.0);
-            let subfolders = ui.add_enabled(
-                !busy,
-                egui::Checkbox::new(&mut self.recurse, "Include subfolders"),
-            );
-            // Between the two, because it is about what the subfolders above it
-            // mean: with it on, each of them is searched on its own and a
-            // picture filed in two of them is two pictures. With no subfolders
-            // there is only one folder, so it says nothing and cannot be ticked.
-            let apart = ui.add_enabled(
-                !busy && self.recurse,
-                egui::Checkbox::new(&mut self.within_a_folder, "Only match within folders"),
-            );
-            let remember = ui.add_enabled(
-                !busy,
-                egui::Checkbox::new(
-                    &mut self.keep_index,
-                    "Save an index database for this folder",
-                ),
-            );
-            // Under the index box and about it: what runs on opening is the
-            // pass that brings the index up to date, so with no index kept there
-            // is nothing to run and nothing to tick.
-            let on_opening = ui.add_enabled(
-                !busy && self.keep_index,
-                egui::Checkbox::new(
-                    &mut self.auto_rescan,
-                    "Automatically rescan when opening this index",
-                ),
-            );
-            // Under the box about rescanning and about it: marking on its own
-            // happens at the end of a pass, so with no pass running on opening
-            // there is nothing for it to happen at the end of.
-            let on_marking = ui.add_enabled(
-                !busy && self.keep_index && self.auto_rescan,
-                egui::Checkbox::new(&mut self.auto_mark, "Automatically mark to keep"),
-            );
-            if remember.changed() && !self.keep_index {
-                // The index is what remembering a folder amounts to, so taking
-                // the tick off takes the index with it. On its own thread: this
-                // is up to three files removed, and when the folder is on another
-                // machine that is three round trips the window would otherwise
-                // sit through with the pointer as a spinning wheel. Nothing here
-                // waits on the answer, and the box is already unticked.
-                let index = self.index.clone();
-                std::thread::spawn(move || {
-                    discard_index(&index);
-                });
-                self.thumbs.forget();
-                self.sets.clear();
-                self.keep.clear();
-                self.selected = None;
-                self.showing = None;
-                self.scan = ScanState::default();
-                self.replan();
-            }
-            // A folder worth keeping an index for is a folder worth bringing up
-            // to date on sight, so saying yes to the one says yes to the other.
-            // It can be turned off again; what it cannot be is on without an
-            // index to rescan.
-            if remember.changed() && self.keep_index {
-                self.auto_rescan = true;
-            }
-            // A box that has just lost what it depends on comes off, and is
-            // written out that way rather than left ticked in the index for the
-            // next run to read back.
-            let depended_on = subfolders.changed() || remember.changed() || on_opening.changed();
-            if depended_on {
-                self.settle_the_boxes();
-            }
-            if apart.changed() || on_opening.changed() || on_marking.changed() || depended_on {
-                self.remember_ways_of_matching();
-            }
-            if subfolders.changed() || remember.changed() || apart.changed() {
-                self.remember();
-            }
-        })
+                        // The previous button sits over the right end of this row, so
+                        // the path stops before it rather than running under it.
+                        let reserved = if self.previous.is_empty() {
+                            0.0
+                        } else {
+                            PREVIOUS_BUTTON_WIDTH
+                        };
+                        match &self.folder {
+                            Some(folder) => clipped_line_in(
+                                ui,
+                                egui::RichText::new(folder.display().to_string()).strong(),
+                                ui.available_width() - reserved,
+                            ),
+                            None => {
+                                ui.label(egui::RichText::new(NO_FOLDER_CHOSEN_TEXT).weak());
+                            }
+                        };
+                    })
+                    .response
+                    .rect;
+                // Against the right edge of the box, in a space of its own. Laying it
+                // out with the row would count it as content, and the box is sized
+                // from what its content measures.
+                let strip = egui::Rect::from_min_max(
+                    egui::pos2(inner.left(), row.top()),
+                    egui::pos2(inner.right(), row.bottom()),
+                );
+                let mut against_the_edge = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(strip)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                );
+                self.previous_folders(&mut against_the_edge, busy);
+                ui.add_space(SECTION_ROW_GAP);
+                let subfolders = ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.recurse, INCLUDE_SUBFOLDERS_LABEL),
+                );
+                // Between the two, because it is about what the subfolders above it
+                // mean: with it on, each of them is searched on its own and a
+                // picture filed in two of them is two pictures. With no subfolders
+                // there is only one folder, so it says nothing and cannot be ticked.
+                let apart = ui.add_enabled(
+                    !busy && self.recurse,
+                    egui::Checkbox::new(&mut self.within_a_folder, ONLY_MATCH_WITHIN_FOLDERS_LABEL),
+                );
+                let remember = ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.keep_index, SAVE_INDEX_LABEL),
+                );
+                // Under the index box and about it: what runs on opening is the
+                // pass that brings the index up to date, so with no index kept there
+                // is nothing to run and nothing to tick.
+                let on_opening = ui.add_enabled(
+                    !busy && self.keep_index,
+                    egui::Checkbox::new(&mut self.auto_rescan, AUTOMATICALLY_RESCAN_LABEL),
+                );
+                // Under the box about rescanning and about it: marking on its own
+                // happens at the end of a pass, so with no pass running on opening
+                // there is nothing for it to happen at the end of.
+                let on_marking = ui.add_enabled(
+                    !busy && self.keep_index && self.auto_rescan,
+                    egui::Checkbox::new(&mut self.auto_mark, AUTOMATICALLY_MARK_TO_KEEP_LABEL),
+                );
+                if remember.changed() && !self.keep_index {
+                    // The index is what remembering a folder amounts to, so taking
+                    // the tick off takes the index with it. On its own thread: this
+                    // is up to three files removed, and when the folder is on another
+                    // machine that is three round trips the window would otherwise
+                    // sit through with the pointer as a spinning wheel. Nothing here
+                    // waits on the answer, and the box is already unticked.
+                    let index = self.index.clone();
+                    std::thread::spawn(move || {
+                        discard_index(&index);
+                    });
+                    self.thumbs.forget();
+                    self.sets.clear();
+                    self.keep.clear();
+                    self.selected = None;
+                    self.showing = None;
+                    self.scan = ScanState::default();
+                    self.replan();
+                }
+                // A folder worth keeping an index for is a folder worth bringing up
+                // to date on sight, so saying yes to the one says yes to the other.
+                // It can be turned off again; what it cannot be is on without an
+                // index to rescan.
+                if remember.changed() && self.keep_index {
+                    self.auto_rescan = true;
+                }
+                // A box that has just lost what it depends on comes off, and is
+                // written out that way rather than left ticked in the index for the
+                // next run to read back.
+                let depended_on =
+                    subfolders.changed() || remember.changed() || on_opening.changed();
+                if depended_on {
+                    self.settle_the_boxes();
+                }
+                if apart.changed() || on_opening.changed() || on_marking.changed() || depended_on {
+                    self.remember_ways_of_matching();
+                }
+                if subfolders.changed() || remember.changed() || apart.changed() {
+                    self.remember();
+                }
+            },
+        )
     }
 
     /// The folders scanned before, to go back to one of them without finding it
@@ -433,7 +453,7 @@ impl App {
         }
         let mut chosen = None;
         let mut forget = false;
-        let button = ui.add_enabled(!busy, egui::Button::new("previous"));
+        let button = ui.add_enabled(!busy, egui::Button::new(PREVIOUS_FOLDERS_BUTTON_LABEL));
         let list = egui::Id::new("previous folders");
         if button.clicked() {
             ui.memory_mut(|memory| memory.toggle_popup(list));
@@ -461,7 +481,7 @@ impl App {
                 }
                 ui.separator();
                 if ui
-                    .selectable_label(false, "clear previous locations")
+                    .selectable_label(false, CLEAR_PREVIOUS_FOLDERS_LABEL)
                     .clicked()
                 {
                     forget = true;
@@ -552,21 +572,21 @@ impl App {
         // folder starts where a first look at a folder starts, and then takes
         // back whatever its own index has a record of.
         if elsewhere {
-            self.sensitivity = matching::DEFAULT_SENSITIVITY;
-            self.ignore_colour = false;
-            self.recurse = false;
+            self.sensitivity = matching::SENSITIVITY_SLIDER_DEFAULT_PERCENT;
+            self.ignore_colour = MATCH_COLOUR_WITH_GRAYSCALE_DEFAULT;
+            self.recurse = INCLUDE_SUBFOLDERS_DEFAULT;
             // Both ways of matching, until this folder's index says otherwise,
             // and the whole folder at once rather than one folder at a time.
-            self.match_whole_frame = true;
-            self.match_corners = true;
-            self.within_a_folder = false;
+            self.match_whole_frame = MATCH_WHOLE_PICTURES_DEFAULT;
+            self.match_corners = MATCH_PARTIALS_DEFAULT;
+            self.within_a_folder = ONLY_MATCH_WITHIN_FOLDERS_DEFAULT;
             // Whether opening a folder runs a pass is that folder's own answer,
             // and a folder that has not been asked yet has not said yes.
-            self.auto_rescan = false;
+            self.auto_rescan = AUTOMATICALLY_RESCAN_DEFAULT;
             // A folder that has an index arrives with the box already ticked.
             self.keep_index = has_index;
             self.destination = Destination::Trash;
-            self.move_dir = String::new();
+            self.move_dir = MOVE_FOLDER_DEFAULT.to_string();
         }
         self.sets.clear();
         self.keep.clear();
@@ -725,7 +745,7 @@ impl App {
             // until the mouse happens to move over it, with the index sitting in
             // the channel: measured at one second on one run and two on the next,
             // for a folder whose index was ready in a fifth of a second.
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(INDEX_ARRIVAL_REPAINT_INTERVAL);
             return;
         }
         for said in arrived {
@@ -772,71 +792,72 @@ impl App {
     pub(super) fn matching_section(&mut self, ui: &mut egui::Ui, width: f32) -> egui::Vec2 {
         let busy = self.busy();
         let row = self.scan_row;
-        sized_section(
-            ui,
-            "What counts as a duplicate",
-            egui::vec2(width, row),
-            |ui| {
-                ui.spacing_mut().slider_width = 300.0;
-                // The number beside the slider is drawn in a box of this width, and
-                // the box would otherwise size to the digits in it. The row's boxes
-                // are shared out by what their contents measure, so 5.0 and 30.0
-                // would each want a different share and move all three.
-                ui.spacing_mut().interact_size.x = VALUE_WIDTH;
-                let mut changed = ui
-                    .add_enabled(
-                        !busy,
-                        egui::Slider::new(&mut self.sensitivity, 0.5..=matching::MAX_SENSITIVITY)
-                            .suffix(" %")
-                            .fixed_decimals(1)
-                            .text("difference allowed"),
+        sized_section(ui, MATCHING_SECTION_TITLE, egui::vec2(width, row), |ui| {
+            ui.spacing_mut().slider_width = SENSITIVITY_SLIDER_WIDTH;
+            // The number beside the slider is drawn in a box of this width, and
+            // the box would otherwise size to the digits in it. The row's boxes
+            // are shared out by what their contents measure, so 5.0 and 30.0
+            // would each want a different share and move all three.
+            ui.spacing_mut().interact_size.x = SENSITIVITY_PERCENTAGE_BOX_WIDTH;
+            let mut changed = ui
+                .add_enabled(
+                    !busy,
+                    egui::Slider::new(
+                        &mut self.sensitivity,
+                        0.5..=matching::SENSITIVITY_SLIDER_MAX_PERCENT,
                     )
-                    .changed();
-                ui.horizontal(|ui| {
-                    ui.label("presets:");
-                    ui.spacing_mut().button_padding = PRESET_PADDING;
-                    for (name, percent) in matching::PRESETS {
-                        let here = on_preset(self.sensitivity, percent);
-                        // The one the slider is on is drawn as pressed, so the row
-                        // says where the setting is as well as where it can go.
-                        let button = egui::Button::new(name).selected(here);
-                        if ui.add_enabled(!busy, button).clicked() {
-                            self.sensitivity = percent;
-                            changed = true;
-                        }
+                    .suffix(SENSITIVITY_SLIDER_SUFFIX)
+                    .fixed_decimals(1)
+                    .text(SENSITIVITY_SLIDER_LABEL),
+                )
+                .changed();
+            ui.horizontal(|ui| {
+                ui.label(SENSITIVITY_PRESETS_LABEL);
+                ui.spacing_mut().button_padding = egui::vec2(
+                    SMALL_BUTTON_HORIZONTAL_PADDING,
+                    SMALL_BUTTON_VERTICAL_PADDING,
+                );
+                for (name, percent) in matching::SENSITIVITY_SLIDER_PRESETS {
+                    let here = on_preset(self.sensitivity, percent);
+                    // The one the slider is on is drawn as pressed, so the row
+                    // says where the setting is as well as where it can go.
+                    let button = egui::Button::new(name).selected(here);
+                    if ui.add_enabled(!busy, button).clicked() {
+                        self.sensitivity = percent;
+                        changed = true;
                     }
-                });
-                ui.add_space(6.0);
-                // The two ways of matching, either of which can be left out. The
-                // first is nearly free and finds resizes, recompressions and
-                // rotations; the second is most of what a search costs and is what
-                // finds a crop. They come before the colour box, which is a change
-                // to how the first of them decides rather than a way of its own.
-                let ways = ui
-                    .add_enabled(
-                        !busy,
-                        egui::Checkbox::new(&mut self.match_whole_frame, "Match whole pictures"),
-                    )
-                    .changed()
-                    | ui.add_enabled(
-                        !busy,
-                        egui::Checkbox::new(&mut self.match_corners, "Match partials"),
-                    )
-                    .changed();
-                changed |= ui
-                    .add_enabled(
-                        !busy,
-                        egui::Checkbox::new(&mut self.ignore_colour, "Match colour with grayscale"),
-                    )
-                    .changed();
-                if ways {
-                    self.remember_ways_of_matching();
                 }
-                if changed || ways {
-                    self.remember();
-                }
-            },
-        )
+            });
+            ui.add_space(SECTION_ROW_GAP);
+            // The two ways of matching, either of which can be left out. The
+            // first is nearly free and finds resizes, recompressions and
+            // rotations; the second is most of what a search costs and is what
+            // finds a crop. They come before the colour box, which is a change
+            // to how the first of them decides rather than a way of its own.
+            let ways = ui
+                .add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.match_whole_frame, MATCH_WHOLE_PICTURES_LABEL),
+                )
+                .changed()
+                | ui.add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.match_corners, MATCH_PARTIALS_LABEL),
+                )
+                .changed();
+            changed |= ui
+                .add_enabled(
+                    !busy,
+                    egui::Checkbox::new(&mut self.ignore_colour, MATCH_COLOUR_WITH_GRAYSCALE_LABEL),
+                )
+                .changed();
+            if ways {
+                self.remember_ways_of_matching();
+            }
+            if changed || ways {
+                self.remember();
+            }
+        })
     }
 
     /// Whether there is work the Cancel button would stop.
@@ -856,50 +877,60 @@ impl App {
         let busy = self.busy();
         let have_folder = self.folder.is_some();
 
-        sized_section(ui, "Run", egui::vec2(width, self.scan_row), |ui| {
-            ui.horizontal(|ui| {
-                let start = ui.add_enabled(
-                    !busy && have_folder,
-                    egui::Button::new(egui::RichText::new("Scan").strong())
-                        .min_size(egui::vec2(90.0, 30.0)),
-                );
-                if start.clicked() {
-                    self.start_scan();
-                }
-                if ui
-                    .add_enabled(
-                        stoppable,
-                        egui::Button::new("Cancel").min_size(egui::vec2(80.0, 30.0)),
+        sized_section(
+            ui,
+            RUN_SECTION_TITLE,
+            egui::vec2(width, self.scan_row),
+            |ui| {
+                ui.horizontal(|ui| {
+                    let start = ui.add_enabled(
+                        !busy && have_folder,
+                        egui::Button::new(egui::RichText::new(SCAN_BUTTON_LABEL).strong())
+                            .min_size(egui::vec2(SCAN_BUTTON_WIDTH, RUN_BUTTON_HEIGHT)),
+                    );
+                    if start.clicked() {
+                        self.start_scan();
+                    }
+                    if ui
+                        .add_enabled(
+                            stoppable,
+                            egui::Button::new(CANCEL_BUTTON_LABEL)
+                                .min_size(egui::vec2(CANCEL_BUTTON_WIDTH, RUN_BUTTON_HEIGHT)),
+                        )
+                        .clicked()
+                    {
+                        self.cancel_work();
+                    }
+                });
+                // A button's label sits where the layout puts it, and a row's layout
+                // starts at the left, so the width `min_size` adds all lands on the
+                // right of the text.
+                let wide = egui::vec2(FIND_DUPLICATES_BUTTON_WIDTH, RUN_BUTTON_HEIGHT);
+                let found = ui
+                    .allocate_ui_with_layout(
+                        wide,
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            ui.add_enabled(
+                                !busy && self.db_path.is_some(),
+                                egui::Button::new(FIND_DUPLICATES_BUTTON_LABEL).min_size(wide),
+                            )
+                        },
                     )
-                    .clicked()
-                {
-                    self.cancel_work();
+                    .inner;
+                if found.clicked() {
+                    // Looking for duplicates in a folder that has not been read is
+                    // looking at nothing. The pass comes first and searches when it
+                    // is done, which is the same thing that happens when a folder
+                    // with an index is opened.
+                    if self.images.is_some() {
+                        self.load_sets();
+                    } else {
+                        self.start_scan();
+                    }
                 }
-            });
-            // A button's label sits where the layout puts it, and a row's layout
-            // starts at the left, so the width `min_size` adds all lands on the
-            // right of the text.
-            let wide = egui::vec2(178.0, 30.0);
-            let found = ui
-                .allocate_ui_with_layout(wide, egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.add_enabled(
-                        !busy && self.db_path.is_some(),
-                        egui::Button::new("Find duplicates").min_size(wide),
-                    )
-                })
-                .inner;
-            if found.clicked() {
-                // Looking for duplicates in a folder that has not been read is
-                // looking at nothing. The pass comes first and searches when it
-                // is done, which is the same thing that happens when a folder
-                // with an index is opened.
-                if self.images.is_some() {
-                    self.load_sets();
-                } else {
-                    self.start_scan();
-                }
-            }
-        })
+            },
+        )
     }
 
     pub(super) fn progress_section(&mut self, ui: &mut egui::Ui) {
@@ -909,18 +940,18 @@ impl App {
             return;
         }
 
-        ui.add_space(SECTION_GAP);
-        section(ui, "Progress", |ui| {
+        ui.add_space(SECTION_SPACING_GAP);
+        section(ui, PROGRESS_SECTION_TITLE, |ui| {
             // Before the folder has been listed there is no total, so there is no
             // fraction and the bars have nothing to show. The count is what there
             // is, and it is the difference between a window that is working and a
             // window that looks stopped.
             if let Some(found) = self.scan.listing {
-                ui.label(format!(
-                    "listing the folder: {}",
-                    counted(found, "file", "files")
+                ui.label(fill(
+                    LISTING_FOLDER_TEMPLATE,
+                    &[("count", &counted(found, FILE_WORD, FILES_WORD))],
                 ));
-                ui.add_space(6.0);
+                ui.add_space(SECTION_ROW_GAP);
             }
             let width = ui.available_width();
             // A bar is a fraction only while the stage it measures is the one
@@ -939,20 +970,20 @@ impl App {
             };
             bar(
                 ui,
-                "Scanning for files",
+                SCANNING_PROGRESS_LABEL,
                 self.scan.reading,
                 self.scan.done,
                 self.scan.total,
             );
-            ui.add_space(4.0);
+            ui.add_space(PROGRESS_BAR_GAP);
             bar(
                 ui,
-                "Indexing files",
+                INDEXING_PROGRESS_LABEL,
                 self.scan.writing,
                 self.scan.indexed,
                 self.scan.to_index,
             );
-            ui.add_space(4.0);
+            ui.add_space(PROGRESS_BAR_GAP);
             // The search's own bar, under the pass's two and driven by nothing
             // they touch. It is two stages of very different lengths, so it runs
             // over both: reading the index fills the first part of it, comparing
@@ -963,8 +994,14 @@ impl App {
                 (false, true) => Stage::Running,
                 (false, false) => Stage::Waiting,
             };
-            bar(ui, "Finding duplicates", searching, duplicates, of);
-            ui.add_space(6.0);
+            bar(
+                ui,
+                FINDING_DUPLICATES_PROGRESS_LABEL,
+                searching,
+                duplicates,
+                of,
+            );
+            ui.add_space(SECTION_ROW_GAP);
             // How many files the folder holds. The listing is what produces that
             // number, so before it is over the count it has reached so far is
             // what there is.
@@ -975,43 +1012,50 @@ impl App {
             };
             egui::Grid::new("scan counts")
                 .num_columns(6)
-                .spacing([24.0, 4.0])
+                .spacing([SCAN_COUNTS_COLUMN_GAP, SCAN_COUNTS_ROW_GAP])
                 .show(ui, |ui| {
-                    counter(ui, "found", in_folder);
+                    counter(ui, FOUND_COUNTER_LABEL, in_folder);
                     // Files this pass has read, which are the ones the index did
                     // not already have. This was labelled "found", which is the
                     // folder's count, not this.
-                    counter(ui, "new", self.scan.found());
-                    counter(ui, "unchanged", self.scan.unchanged);
-                    counter(ui, "removed", self.scan.removed);
-                    counter(ui, "failed to read", self.scan.failures.len() as u64);
-                    counter(ui, "per second", self.scan.per_sec);
+                    counter(ui, NEW_COUNTER_LABEL, self.scan.found());
+                    counter(ui, UNCHANGED_COUNTER_LABEL, self.scan.unchanged);
+                    counter(ui, REMOVED_COUNTER_LABEL, self.scan.removed);
+                    counter(
+                        ui,
+                        FAILED_TO_READ_COUNTER_LABEL,
+                        self.scan.failures.len() as u64,
+                    );
+                    counter(ui, PER_SECOND_COUNTER_LABEL, self.scan.per_sec);
                     ui.end_row();
                 });
             if let Some(finished) = &self.scan.finished {
-                ui.add_space(6.0);
+                ui.add_space(SECTION_ROW_GAP);
                 ui.label(egui::RichText::new(finished).strong());
             }
             if !self.scan.failures.is_empty() {
-                ui.add_space(6.0);
-                egui::CollapsingHeader::new(format!(
-                    "{} files could not be read",
-                    self.scan.failures.len()
+                ui.add_space(SECTION_ROW_GAP);
+                egui::CollapsingHeader::new(fill(
+                    FILES_COULD_NOT_BE_READ_TEMPLATE,
+                    &[("count", &self.scan.failures.len())],
                 ))
                 .show(ui, |ui| {
                     let line = ui.text_style_height(&egui::TextStyle::Body);
-                    ui.set_max_height(160.0);
+                    ui.set_max_height(FAILED_FILES_LIST_MAX_HEIGHT);
                     scrolled(
                         ui,
                         egui::Id::new("scan failures"),
                         true,
                         line,
                         None,
-                        egui::ScrollArea::vertical().max_height(160.0),
+                        egui::ScrollArea::vertical().max_height(FAILED_FILES_LIST_MAX_HEIGHT),
                         |area, ui| {
                             area.show(ui, |ui| {
                                 for (path, message) in &self.scan.failures {
-                                    ui.label(format!("{path}: {message}"));
+                                    ui.label(fill(
+                                        FAILED_FILE_LINE_TEMPLATE,
+                                        &[("path", &path), ("message", &message)],
+                                    ));
                                 }
                             })
                         },

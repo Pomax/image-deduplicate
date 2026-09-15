@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use imgdedupe_core::matching::Thresholds;
 
 mod app;
+mod constants;
 mod folder_picker;
 mod fonts;
 mod headless;
@@ -18,6 +19,7 @@ mod settings;
 #[cfg(test)]
 #[path = "tests/shot.rs"]
 mod shot;
+mod template_strings;
 mod thumbs;
 #[cfg(debug_assertions)]
 mod tools;

@@ -8,7 +8,7 @@ fn the_bundled_face_has_the_letters_the_window_writes() {
     let ctx = egui::Context::default();
     install(&ctx);
     let _ = ctx.run(Default::default(), |_| {});
-    let wanted = egui::FontId::new(SIZE, egui::FontFamily::Proportional);
+    let wanted = egui::FontId::new(FONT_SIZE, egui::FontFamily::Proportional);
     let written = "Choose folder previous Include subfolders Save an index database for this \
          folder What counts as a duplicate presets close balanced wide yolo Match colour with \
          grayscale Scan Cancel Find duplicates read indexed found unchanged removed failed to \
@@ -101,8 +101,8 @@ fn every_text_style_is_the_same_size() {
         egui::TextStyle::Monospace,
     ] {
         assert_eq!(
-            style.text_styles[&name].size, SIZE,
-            "{name:?} is not {SIZE}"
+            style.text_styles[&name].size, FONT_SIZE,
+            "{name:?} is not {FONT_SIZE}"
         );
     }
 }
@@ -134,7 +134,7 @@ fn the_size_is_not_scaled_by_anything() {
     assert_eq!(ctx.zoom_factor(), 1.0, "something is scaling the interface");
     assert_eq!(
         ctx.style().text_styles[&egui::TextStyle::Body].size,
-        SIZE,
+        FONT_SIZE,
         "body text is not the size this module sets"
     );
 }
@@ -158,7 +158,7 @@ fn the_bundled_face_is_the_only_one_the_window_has() {
             fonts
                 .layout_no_wrap(
                     String::from(text),
-                    egui::FontId::new(SIZE, egui::FontFamily::Proportional),
+                    egui::FontId::new(FONT_SIZE, egui::FontFamily::Proportional),
                     egui::Color32::BLACK,
                 )
                 .rect
@@ -191,7 +191,7 @@ fn there_is_one_face_and_both_families_use_it() {
             fonts
                 .layout_no_wrap(
                     String::from("gjpq"),
-                    egui::FontId::new(SIZE, family),
+                    egui::FontId::new(FONT_SIZE, family),
                     egui::Color32::BLACK,
                 )
                 .rect

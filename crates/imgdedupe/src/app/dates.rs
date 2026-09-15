@@ -9,10 +9,15 @@ pub(super) fn file_date(mtime_seconds: i64) -> String {
         mtime_seconds.rem_euclid(86_400),
     );
     let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
-        rest / 3600,
-        (rest % 3600) / 60
+    super::fill(
+        crate::template_strings::FILE_DATE_TEMPLATE,
+        &[
+            ("year", &format!("{year:04}")),
+            ("month", &format!("{month:02}")),
+            ("day", &format!("{day:02}")),
+            ("hour", &format!("{:02}", rest / 3600)),
+            ("minute", &format!("{:02}", (rest % 3600) / 60)),
+        ],
     )
 }
 

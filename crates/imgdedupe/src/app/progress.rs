@@ -181,78 +181,69 @@ pub(super) enum Lamp {
 /// to index, so those two lamps turn before the four about reading and indexing,
 /// which are skipped rather than run.
 pub(super) const LAMPS: [(Lamp, &str); 19] = [
-    (
-        Lamp::CheckedForIndexFile,
-        "Checked for sqlite file in this folder",
-    ),
+    (Lamp::CheckedForIndexFile, CHECKED_FOR_INDEX_FILE_LAMP_LABEL),
     (
         Lamp::StartedOpeningTheIndexForWriting,
-        "Started opening the index for writing",
+        STARTED_OPENING_THE_INDEX_FOR_WRITING_LAMP_LABEL,
     ),
     (
         Lamp::FinishedOpeningTheIndexForWriting,
-        "Finished opening the index for writing",
+        FINISHED_OPENING_THE_INDEX_FOR_WRITING_LAMP_LABEL,
     ),
     (
         Lamp::StartedReadingTheIndexSettings,
-        "Started reading the index's own settings",
+        STARTED_READING_THE_INDEX_SETTINGS_LAMP_LABEL,
     ),
     (
         Lamp::FinishedReadingTheIndexSettings,
-        "Finished reading the index's own settings",
+        FINISHED_READING_THE_INDEX_SETTINGS_LAMP_LABEL,
     ),
     (
         Lamp::StartedLookingForTheTotal,
-        "Started looking for total number of files",
+        STARTED_LOOKING_FOR_THE_TOTAL_LAMP_LABEL,
     ),
-    (Lamp::FoundTheTotal, "Found total number of files"),
-    (
-        Lamp::ListedTheFolder,
-        "Retrieved full file list in the folder",
-    ),
+    (Lamp::FoundTheTotal, FOUND_THE_TOTAL_LAMP_LABEL),
+    (Lamp::ListedTheFolder, LISTED_THE_FOLDER_LAMP_LABEL),
     (
         Lamp::LoadedIndexIntoMemory,
-        "Loaded sqlite file into memory and constructed in-memory index",
+        LOADED_INDEX_INTO_MEMORY_LAMP_LABEL,
     ),
     (
         Lamp::CrossReferencedWithTheIndex,
-        "Cross referenced file list in folder with index from memory",
+        CROSS_REFERENCED_WITH_THE_INDEX_LAMP_LABEL,
     ),
-    (
-        Lamp::CountedWhatChanged,
-        "Finished finding number of new, unchanged, and removed files",
-    ),
+    (Lamp::CountedWhatChanged, COUNTED_WHAT_CHANGED_LAMP_LABEL),
     (
         Lamp::StartedReadingNewFiles,
-        "Starting individual file reads for any new file not in the index yet",
+        STARTED_READING_NEW_FILES_LAMP_LABEL,
     ),
     (
         Lamp::FinishedReadingNewFiles,
-        "Finished individual file reads for any new file not in the index yet",
+        FINISHED_READING_NEW_FILES_LAMP_LABEL,
     ),
     (
         Lamp::StartedIndexingNewFiles,
-        "Starting indexing for new files not in the index yet",
+        STARTED_INDEXING_NEW_FILES_LAMP_LABEL,
     ),
     (
         Lamp::FinishedIndexingNewFiles,
-        "Finished indexing for new files not in the index yet",
+        FINISHED_INDEXING_NEW_FILES_LAMP_LABEL,
     ),
     (
         Lamp::StartedBuildingTheMemoryIndex,
-        "Starting index conversion to in-memory datastructure",
+        STARTED_BUILDING_THE_MEMORY_INDEX_LAMP_LABEL,
     ),
     (
         Lamp::FinishedBuildingTheMemoryIndex,
-        "Finished converting index to in-memory datastructure",
+        FINISHED_BUILDING_THE_MEMORY_INDEX_LAMP_LABEL,
     ),
     (
         Lamp::StartedFindingDuplicates,
-        "Started duplication computation given current settings",
+        STARTED_FINDING_DUPLICATES_LAMP_LABEL,
     ),
     (
         Lamp::FinishedFindingDuplicates,
-        "Finished duplication computation",
+        FINISHED_FINDING_DUPLICATES_LAMP_LABEL,
     ),
 ];
 

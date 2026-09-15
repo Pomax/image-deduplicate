@@ -9,6 +9,7 @@ Rules preceded by a `#` are considered "commented off" and should be treated as 
 These mandatory rules describe actions that MUST BE FOLLOWED AT EVERY STEP BY THE JUDGE
 
 - Allow a plan to be written
+- Allow a plan to be updated if the user gave that instruction
 - Allow any work that has an explicit demand for that work by the user in the chat log
 - Allow any work that you have been ordered to allow through the chat by the user
 - Read the current rules and work plan and test actions against those before making a ruling
