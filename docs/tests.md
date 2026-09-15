@@ -1575,7 +1575,7 @@ Scrolls the review list down to the second set, scans the folder and searches it
 
 Draws the review page and reads the rectangles the set boxes were painted as,
 with the rectangle each was clipped to. No box has its top cut off by the edge of
-the list, one box stands `BETWEEN_BOXES` clear of the next, the gap from the
+the list, one box stands `SET_BOX_VERTICAL_GAP` clear of the next, the gap from the
 window's edge to a box's left edge is the gap from its right edge to the scroll
 bar, and the pictures in a box start as far inside it as they end.
 
