@@ -1571,6 +1571,10 @@ the room the list is drawn in, and only the handle inside it moves.
 
 Scrolls the review list down to the second set, scans the folder and searches it again, and draws the review that search opens. The list is at the top, not where the last review was left scrolled to.
 
+### the_review_opens_with_the_set_it_opens_on_in_sight
+
+Ignores the first two of three sets, searches the folder again, and draws the review that search opens in a window too short to show the third set from the top of the list. The review opens on the third set, and the list is scrolled so that whole set is in sight.
+
 ### the_set_boxes_are_drawn_whole_and_evenly_spaced
 
 Draws the review page and reads the rectangles the set boxes were painted as,
@@ -2007,6 +2011,10 @@ The destination on screen becomes the disposal the cleanup runs.
 ### every_destination_has_a_label_and_a_note
 
 Each choice has a name and a line saying what it does.
+
+### the_permanent_delete_button_is_white_on_red
+
+Draws the cleanup page with "Delete permanently" chosen and something to remove, in both themes, and reads the colour the button's words were drawn in and the fill of the button round them. The words are white in both themes, and the fill on the light theme is pure red.
 
 ### every_template_is_filled_completely
 

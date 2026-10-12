@@ -248,6 +248,7 @@ impl App {
         // These are other sets, so the list starts at the first of them rather
         // than wherever the last review was left scrolled to.
         self.list_to_top = true;
+        self.scroll_to = self.sets.iter().position(|set| !self.is_ignored(set));
         self.view = View::Review;
     }
 

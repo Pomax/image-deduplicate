@@ -18,8 +18,7 @@ pub const PERMANENT_DELETE_BUTTON_FILL_DARK_COLOUR: egui::Color32 =
 
 /// The fill of the cleanup page's button when what it does is permanent, on a
 /// light theme.
-pub const PERMANENT_DELETE_BUTTON_FILL_LIGHT_COLOUR: egui::Color32 =
-    egui::Color32::from_rgb(240, 170, 170);
+pub const PERMANENT_DELETE_BUTTON_FILL_LIGHT_COLOUR: egui::Color32 = egui::Color32::RED;
 
 /// The fill of the cleanup page's button when what it does is permanent.
 pub fn permanent_delete_button_fill_colour(visuals: &egui::Visuals) -> egui::Color32 {
@@ -34,6 +33,8 @@ pub fn permanent_delete_button_fill_colour(visuals: &egui::Visuals) -> egui::Col
 pub fn cleanup_button_text_colour(visuals: &egui::Visuals) -> egui::Color32 {
     visuals.selection.stroke.color
 }
+
+pub const PERMANENT_DELETE_BUTTON_TEXT_COLOUR: egui::Color32 = egui::Color32::WHITE;
 
 /// The border round a thumbnail that is being kept, and the "KEEP" over it, on a
 /// dark theme.

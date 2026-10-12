@@ -106,20 +106,27 @@ impl App {
         let row_height = set_row_height(ui);
         let spacing = ui.spacing().item_spacing.y;
         let mut list = egui::ScrollArea::vertical().auto_shrink([false, false]);
-        if let Some(row) = self.scroll_to.take() {
-            if let Some(offset) = scroll_to_show(
-                row,
-                visible.len(),
-                row_height,
-                spacing,
-                self.list_offset,
-                self.list_viewport,
-            ) {
-                list = list.vertical_scroll_offset(offset);
-            }
-        }
+        let mut offset = self.list_offset;
         if std::mem::take(&mut self.list_to_top) {
-            list = list.vertical_scroll_offset(0.0);
+            offset = 0.0;
+            list = list.vertical_scroll_offset(offset);
+        }
+
+        if self.list_viewport > 0.0 {
+            if let Some(row) = self.scroll_to.take() {
+                if let Some(wanted) = scroll_to_show(
+                    row,
+                    visible.len(),
+                    row_height,
+                    spacing,
+                    offset,
+                    self.list_viewport,
+                ) {
+                    list = list.vertical_scroll_offset(wanted);
+                }
+            }
+        } else if self.scroll_to.is_some() {
+            ui.ctx().request_repaint();
         }
 
         // The page's margin down the left of the list, kept here rather than by

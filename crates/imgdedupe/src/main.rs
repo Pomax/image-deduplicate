@@ -91,11 +91,20 @@ fn start() -> anyhow::Result<()> {
     if std::env::args().skip(1).any(|arg| arg == "--log") {
         imgdedupe_core::runlog::start("imgdedupe");
     }
-    app::launch()
+    app::launch(theme_from_args())
 }
 
 /// A release build without the log compiled in is the window and nothing else.
 #[cfg(all(not(debug_assertions), not(feature = "logging")))]
 fn start() -> anyhow::Result<()> {
-    app::launch()
+    app::launch(theme_from_args())
+}
+
+#[cfg(not(debug_assertions))]
+fn theme_from_args() -> Option<egui::Theme> {
+    std::env::args().skip(1).find_map(|arg| match arg.as_str() {
+        "--light" => Some(egui::Theme::Light),
+        "--dark" => Some(egui::Theme::Dark),
+        _ => None,
+    })
 }
