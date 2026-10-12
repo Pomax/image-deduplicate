@@ -73,7 +73,11 @@ impl App {
                             &[("verb", &self.destination.verb()), ("count", &plan.files())],
                         ))
                         .strong()
-                        .color(cleanup_button_text_colour(ui.visuals())),
+                        .color(if danger {
+                            PERMANENT_DELETE_BUTTON_TEXT_COLOUR
+                        } else {
+                            cleanup_button_text_colour(ui.visuals())
+                        }),
                     )
                     .fill(if danger {
                         permanent_delete_button_fill_colour(ui.visuals())

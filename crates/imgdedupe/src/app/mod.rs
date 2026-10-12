@@ -32,10 +32,10 @@ use self::progress::*;
 use self::state::*;
 use self::widgets::*;
 
-pub fn launch() -> Result<()> {
+pub fn launch(theme: Option<egui::Theme>) -> Result<()> {
     #[cfg(target_os = "linux")]
     crate::mesa::quieten();
-    let result = start_window();
+    let result = start_window(theme);
     #[cfg(feature = "logging")]
     if let Err(err) = &result {
         // Without this a failure to open the window is invisible: a windowed
@@ -45,7 +45,7 @@ pub fn launch() -> Result<()> {
     result
 }
 
-fn start_window() -> Result<()> {
+fn start_window(theme: Option<egui::Theme>) -> Result<()> {
     let saved = crate::settings::Settings::load();
     let mut viewport = egui::ViewportBuilder::default()
         // Tall enough for the scan page's own content without scrolling: the three
@@ -76,6 +76,9 @@ fn start_window() -> Result<()> {
         Box::new(|cc| {
             crate::fonts::install(&cc.egui_ctx);
             install_style(&cc.egui_ctx);
+            if let Some(theme) = theme {
+                cc.egui_ctx.set_theme(theme);
+            }
             Ok(Box::new(App::from_settings(saved)))
         }),
     )
@@ -216,8 +219,9 @@ pub struct App {
     showing: Option<i64>,
     /// A set row is the same height every time, but that height comes from the
     /// style and the text, so it is taken from the first row drawn and used to
-    /// A row the cursor keys moved to that the list may not be showing, and what
-    /// the list was scrolled to and how tall it was on the last frame.
+    /// A row the list may not be showing: the one the cursor keys moved to, or
+    /// the one a search opened the review on. With it, what the list was
+    /// scrolled to and how tall it was on the last frame.
     scroll_to: Option<usize>,
     /// Set when new sets arrive, so the next frame of the review draws the list
     /// from its first set.

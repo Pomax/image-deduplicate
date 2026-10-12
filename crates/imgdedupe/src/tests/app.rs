@@ -3712,6 +3712,80 @@ fn the_review_starts_at_the_top_after_a_search() {
     );
 }
 
+/// A search opens the review on the first set that is a set of copies, which
+/// is not the first set when the ones before it are ignored. The list is
+/// scrolled so that set is in sight, rather than left at its top with the ring
+/// drawn round a picture below the bottom of the list.
+#[test]
+fn the_review_opens_with_the_set_it_opens_on_in_sight() {
+    let found = folder_with_pairs(&[0, 90, 180]);
+    let mut app = reviewing(found.path());
+    assert_eq!(app.sets.len(), 3, "the three pairs were not found");
+    // The first two are not sets of copies, so the review opens on the third.
+    for set_id in [app.sets[0].set_id, app.sets[1].set_id] {
+        app.ignore_set(set_id);
+    }
+
+    let ctx = window();
+    // A window short enough that the third set is below the bottom of the list
+    // while the list is at its top.
+    let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 450.0));
+    let draw = |app: &mut App| {
+        crate::shot::frame(
+            "the_review_opens_with_the_set_it_opens_on_in_sight",
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::ZERO),
+                    )
+                    .show(ctx, |ui| app.review_view(ui));
+            },
+        )
+    };
+    let (mut row_height, mut pitch) = (0.0, 0.0);
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            row_height = set_row_height(ui);
+            pitch = row_height + ui.spacing().item_spacing.y;
+        });
+    });
+
+    app.start_scan();
+    settle(&mut app);
+    app.load_sets();
+    settle(&mut app);
+    assert_eq!(app.view, View::Review, "the search did not open the review");
+    assert!(
+        app.is_ignored(&app.sets[0]) && app.is_ignored(&app.sets[1]),
+        "the sets came back as sets of copies"
+    );
+    assert_eq!(
+        app.selected,
+        Some(app.sets[2].members[0].file_id),
+        "the review did not open on the third set"
+    );
+    draw(&mut app);
+    draw(&mut app);
+
+    let top = 2.0 * pitch;
+    let bottom = top + row_height;
+    assert!(
+        bottom > app.list_viewport,
+        "the third set is in sight from the top of the list, so this measures nothing"
+    );
+    let shown = app.list_offset..=app.list_offset + app.list_viewport;
+    assert!(
+        shown.contains(&top) && shown.contains(&bottom),
+        "the set the review opened on is not in sight: it runs {top} to {bottom}, \
+         and the list shows {shown:?}"
+    );
+}
+
 /// Every set is drawn whole: the line round it is inside what the list is
 /// allowed to paint in, top and bottom, so no box is sliced by the edge of
 /// the list. One box stands as far from the next as `SET_BOX_VERTICAL_GAP`, the gap
@@ -5957,22 +6031,29 @@ fn the_checkbox_follows_the_folder_that_is_opened() {
 
 /// A folder holding two pairs, so a real pass finds two sets.
 fn folder_with_two_sets() -> tempfile::TempDir {
+    folder_with_pairs(&[0, 120])
+}
+
+/// A folder holding one pair of pictures for each seed, so a real pass finds
+/// one set per seed, in the order the seeds are given.
+fn folder_with_pairs(seeds: &[u32]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (name, seed) in [
-        ("a1.png", 0),
-        ("a2.png", 0),
-        ("b1.png", 120),
-        ("b2.png", 120),
-    ] {
-        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
-            image::Rgb([
-                ((x * 3 + seed) % 256) as u8,
-                ((y * 5 + seed) % 256) as u8,
-                40,
-            ])
-        }))
-        .save_with_format(dir.path().join(name), image::ImageFormat::Png)
-        .expect("a fixture");
+    for (which, seed) in seeds.iter().enumerate() {
+        let letter = (b'a' + which as u8) as char;
+        for copy in 1..=2 {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(64, 48, |x, y| {
+                image::Rgb([
+                    ((x * 3 + seed) % 256) as u8,
+                    ((y * 5 + seed) % 256) as u8,
+                    40,
+                ])
+            }))
+            .save_with_format(
+                dir.path().join(format!("{letter}{copy}.png")),
+                image::ImageFormat::Png,
+            )
+            .expect("a fixture");
+        }
     }
     dir
 }
@@ -6431,6 +6512,91 @@ fn every_destination_has_a_label_and_a_note() {
     assert!(
         Destination::Delete.note().contains("cannot be undone"),
         "the permanent option does not say so"
+    );
+}
+
+/// The cleanup button, when what it does is permanent, is white words on a red
+/// fill: pure red on the light theme, and white words on the dark one too.
+#[test]
+fn the_permanent_delete_button_is_white_on_red() {
+    let found = folder_with_a_duplicate();
+    let mut app = reviewing(found.path());
+    app.auto_mark_to_keep();
+    assert!(
+        app.plan.files() > 0,
+        "nothing to remove, so the button is off"
+    );
+    app.destination = Destination::Delete;
+    app.view = View::Cleanup;
+    let words = fill(
+        CLEANUP_BUTTON_TEMPLATE,
+        &[
+            ("verb", &app.destination.verb()),
+            ("count", &app.plan.files()),
+        ],
+    );
+
+    let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 700.0));
+    let mut drawn = Vec::new();
+    for (name, visuals) in [
+        ("dark", egui::Visuals::dark()),
+        ("light", egui::Visuals::light()),
+    ] {
+        let ctx = window();
+        ctx.set_visuals(visuals.clone());
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = crate::shot::frame(
+                &format!("the_permanent_delete_button_is_white_on_red_{name}"),
+                &ctx,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(
+                            egui::Frame::central_panel(&ctx.style())
+                                .inner_margin(egui::Margin::ZERO),
+                        )
+                        .show(ctx, |ui| app.cleanup_view(ui));
+                },
+            );
+        }
+        let (ink, on) = shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == words => Some((
+                    text.galley.job.sections[0].format.color,
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: the button's words {words:?} were not drawn"));
+        let fill = shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) if rect.rect.contains_rect(on) => Some(rect),
+                _ => None,
+            })
+            .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))
+            .unwrap_or_else(|| panic!("{name}: no button was drawn round the words"))
+            .fill;
+        drawn.push((name, ink, fill));
+    }
+
+    for (name, ink, _) in &drawn {
+        assert_eq!(
+            *ink,
+            egui::Color32::WHITE,
+            "{name}: the words on the permanent delete button are {ink:?}"
+        );
+    }
+    let (_, _, light) = drawn[1];
+    assert_eq!(
+        light,
+        egui::Color32::RED,
+        "light: the permanent delete button is filled {light:?}"
     );
 }
 

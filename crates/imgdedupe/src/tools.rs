@@ -70,6 +70,12 @@ struct Args {
     #[cfg(feature = "logging")]
     #[arg(long)]
     log: bool,
+
+    #[arg(long, conflicts_with = "dark")]
+    light: bool,
+
+    #[arg(long)]
+    dark: bool,
 }
 
 /// Read the command line, and either do what it asks or open the window.
@@ -82,7 +88,13 @@ pub fn start() -> Result<()> {
     match (&args.report, &args.clean) {
         (Some(folder), _) => report(folder.clone(), &args),
         (_, Some(folder)) => clean(folder.clone(), &args),
-        _ => crate::app::launch(),
+        _ => crate::app::launch(if args.light {
+            Some(egui::Theme::Light)
+        } else if args.dark {
+            Some(egui::Theme::Dark)
+        } else {
+            None
+        }),
     }
 }
 
